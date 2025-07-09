@@ -1,0 +1,883 @@
+{
+  "website": {
+    "name": "CustomerServiceWeb",
+    "version": "1.5.0",
+    "description": "Customer service website with analytics, mobile support, CI/CD, and custom AI.",
+    "components": {
+      "menus": [
+        {
+          "id": "main_menu",
+          "type": "navbar",
+          "items": [
+            {
+              "label": "Home",
+              "route": "/",
+              "icon": "home_icon.png",
+              "action": "navigate_home"
+            },
+            {
+              "label": "AI Chat",
+              "route": "/chat",
+              "icon": "chat_icon.png",
+              "action": "open_chat"
+            },
+            {
+              "label": "Book Services",
+              "route": "/booking",
+              "icon": "calendar_icon.png",
+              "action": "navigate_booking"
+            },
+            {
+              "label": "Track Delivery",
+              "route": "/tracking",
+              "icon": "tracking_icon.png",
+              "action": "navigate_tracking"
+            },
+            {
+              "label": "Profile",
+              "route": "/profile",
+              "icon": "user_icon.png",
+              "action": "navigate_profile"
+            },
+            {
+              "label": "Project Planning",
+              "route": "/planning",
+              "icon": "planning_icon.png",
+              "action": "navigate_planning"
+            }
+          ]
+        }
+      ],
+      "screens": [
+        {
+          "id": "home_screen",
+          "title": "Welcome to Customer Service",
+          "components": [
+            {
+              "type": "header",
+              "text": "Support at Your Fingertips",
+              "image": "welcome_banner.jpg"
+            },
+            {
+              "type": "button",
+              "label": "Start AI Chat",
+              "action": "open_chat",
+              "icon": "chat_icon.png"
+            }
+          ]
+        },
+        {
+          "id": "chat_screen",
+          "title": "AI Assistant",
+          "components": [
+            {
+              "type": "chat_window",
+              "id": "chat_container",
+              "fields": [
+                {
+                  "type": "text_area",
+                  "id": "chat_input",
+                  "placeholder": "Type your message..."
+                },
+                {
+                  "type": "voice_input",
+                  "id": "voice_input",
+                  "description": "Voice input for mobile apps",
+                  "action": "start_voice_recognition"
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Send",
+                  "action": "send_message",
+                  "icon": "send_icon.png"
+                },
+                {
+                  "label": "Switch Language",
+                  "action": "switch_language",
+                  "icon": "language_icon.png"
+                },
+                {
+                  "label": "Voice Mode",
+                  "action": "toggle_voice_mode",
+                  "icon": "mic_icon.png",
+                  "platforms": ["mobile"]
+                }
+              ]
+            },
+            {
+              "type": "history_panel",
+              "id": "chat_history",
+              "description": "Displays past messages with timestamps and AI suggestions"
+            },
+            {
+              "type": "ai_suggestions",
+              "id": "ai_suggestions_panel",
+              "description": "Displays real-time AI-generated suggestions and sentiment analysis"
+            }
+          ]
+        },
+        {
+          "id": "booking_screen",
+          "title": "Book Services or Meetings",
+          "components": [
+            {
+              "type": "form",
+              "id": "booking_form",
+              "fields": [
+                {
+                  "type": "select",
+                  "id": "service_type",
+                  "label": "Service Type",
+                  "options": ["Consulting", "Delivery", "Meeting"]
+                },
+                {
+                  "type": "date",
+                  "id": "booking_date",
+                  "label": "Date",
+                  "placeholder": "Select date"
+                },
+                {
+                  "type": "time",
+                  "id": "booking_time",
+                  "label": "Time",
+                  "placeholder": "Select time"
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Submit Booking",
+                  "action": "submit_booking"
+                },
+                {
+                  "label": "Cancel",
+                  "action": "cancel_booking"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tracking_screen",
+          "title": "Track Delivery",
+          "components": [
+            {
+              "type": "form",
+              "id": "tracking_form",
+              "fields": [
+                {
+                  "type": "text",
+                  "id": "tracking_id",
+                  "label": "Tracking ID",
+                  "placeholder": "Enter tracking ID"
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Track",
+                  "action": "track_delivery"
+                }
+              ]
+            },
+            {
+              "type": "status_display",
+              "id": "tracking_status",
+              "description": "Displays delivery status and updates"
+            }
+          ]
+        },
+        {
+          "id": "profile_screen",
+          "title": "User Profile",
+          "components": [
+            {
+              "type": "form",
+              "id": "profile_form",
+              "fields": [
+                {
+                  "type": "text",
+                  "id": "full_name",
+                  "label": "Full Name",
+                  "placeholder": "Enter full name"
+                },
+                {
+                  "type": "email",
+                  "id": "email",
+                  "label": "Email",
+                  "placeholder": "Enter email"
+                },
+                {
+                  "type": "select",
+                  "id": "preferred_language",
+                  "label": "Preferred Language",
+                  "options": ["en", "es", "fr", "ar"]
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Save Profile",
+                  "action": "save_profile"
+                },
+                {
+                  "label": "Logout",
+                  "action": "logout_user"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "planning_screen",
+          "title": "Project Planning",
+          "components": [
+            {
+              "type": "form",
+              "id": "planning_form",
+              "fields": [
+                {
+                  "type": "text",
+                  "id": "project_name",
+                  "label": "Project Name",
+                  "placeholder": "Enter project name"
+                },
+                {
+                  "type": "textarea",
+                  "id": "project_requirements",
+                  "label": "Requirements",
+                  "placeholder": "Describe project requirements"
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Submit Plan",
+                  "action": "submit_plan"
+                },
+                {
+                  "label": "AI Suggest",
+                  "action": "ai_suggest_requirements",
+                  "icon": "ai_icon.png"
+                }
+              ]
+            },
+            {
+              "type": "suggestions_display",
+              "id": "ai_suggestions",
+              "description": "Displays AI-generated project suggestions"
+            }
+          ]
+        }
+      ],
+      "popups": [
+        {
+          "id": "login_popup",
+          "title": "Login",
+          "fields": [
+            {
+              "type": "text",
+              "id": "username",
+              "label": "Username",
+              "placeholder": "Enter username"
+            },
+            {
+              "type": "password",
+              "id": "password",
+              "label": "Password",
+              "placeholder": "Enter password"
+            }
+          ],
+          "buttons": [
+            {
+              "label": "Login",
+              "action": "submit_login"
+            },
+            {
+              "label": "Cancel",
+              "action": "close_popup"
+            }
+          ]
+        },
+        {
+          "id": "booking_confirmation_popup",
+          "title": "Booking Confirmation",
+          "components": [
+            {
+              "type": "text",
+              "id": "confirmation_message",
+              "content": "Booking confirmed! Details sent to your email."
+            }
+          ],
+          "buttons": [
+            {
+              "label": "OK",
+              "action": "close_popup"
+            }
+          ]
+        },
+        {
+          "id": "tracking_result_popup",
+          "title": "Delivery Status",
+          "components": [
+            {
+              "type": "text",
+              "id": "tracking_message",
+              "content": "Delivery status: {status}"
+            }
+          ],
+          "buttons": [
+            {
+              "label": "OK",
+              "action": "close_popup"
+            }
+          ]
+        }
+      ],
+      "functions": [
+        {
+          "id": "track_user_behavior",
+          "description": "Tracks user interactions for analytics.",
+          "parameters": ["user_id", "event_type", "event_data"],
+          "return": "success",
+          "unit_tests": [
+            {
+              "test_id": "track_user_behavior_valid",
+              "description": "Test tracking a valid user event.",
+              "input": {"user_id": "user123", "event_type": "click", "event_data": {"button": "send_message"}},
+              "expected_output": true,
+              "assertions": ["event is logged in analytics", "no errors"]
+            },
+            {
+              "test_id": "track_user_behavior_invalid",
+              "description": "Test tracking with missing user_id.",
+              "input": {"user_id": "", "event_type": "click", "event_data": {}},
+              "expected_output": false,
+              "assertions": ["returns false", "logs missing user_id error"]
+            }
+          ]
+        },
+        {
+          "id": "start_voice_recognition",
+          "description": "Initiates voice input for AI chat on mobile.",
+          "parameters": ["session_id", "language"],
+          "return": "transcribed_text",
+          "unit_tests": [
+            {
+              "test_id": "start_voice_recognition_valid",
+              "description": "Test voice recognition with valid session.",
+              "input": {"session_id": "session_abc123", "language": "en"},
+              "expected_output": "Hello, need help",
+              "assertions": ["transcribed_text is not empty", "text matches language"]
+            },
+            {
+              "test_id": "start_voice_recognition_invalid_session",
+              "description": "Test voice recognition with invalid session.",
+              "input": {"session_id": "invalid", "language": "en"},
+              "expected_output": null,
+              "assertions": ["returns null", "logs session error"]
+            }
+          ]
+        },
+        {
+          "id": "analyze_sentiment",
+          "description": "Analyzes sentiment of user messages in chat.",
+          "parameters": ["message", "language"],
+          "return": "sentiment_score",
+          "unit_tests": [
+            {
+              "test_id": "analyze_sentiment_positive",
+              "description": "Test sentiment analysis for positive message.",
+              "input": {"message": "Great service!", "language": "en"},
+              "expected_output": {"score": 0.8, "label": "positive"},
+              "assertions": ["score is positive", "label is correct"]
+            },
+            {
+              "test_id": "analyze_sentiment_negative",
+              "description": "Test sentiment analysis for negative message.",
+              "input": {"message": "I'm upset", "language": "en"},
+              "expected_output": {"score": -0.6, "label": "negative"},
+              "assertions": ["score is negative", "label is correct"]
+            }
+          ]
+        },
+        {
+          "id": "train_ai_model",
+          "description": "Trains AI model for vector embeddings using chat and project data.",
+          "parameters": ["dataset", "model_config"],
+          "return": "model_id",
+          "unit_tests": [
+            {
+              "test_id": "train_ai_model_valid",
+              "description": "Test training with valid dataset.",
+              "input": {
+                "dataset": [{"text": "Plan a meeting", "vector": [0.1, 0.2]}],
+                "model_config": {"dimension": 128, "epochs": 10}
+              },
+              "expected_output": "model_123",
+              "assertions": ["model_id is not null", "model is saved to storage"]
+            }
+          ]
+        },
+        {
+          "id": "logout_user",
+          "description": "Logs out the user and clears session.",
+          "parameters": ["user_id", "session_id"],
+          "return": "success",
+          "unit_tests": [
+            {
+              "test_id": "logout_user_valid",
+              "description": "Test logout with valid user and session.",
+              "input": {"user_id": "user123", "session_id": "session_abc123"},
+              "expected_output": true,
+              "assertions": ["session is cleared", "user is redirected to login"]
+            }
+          ]
+        },
+        {
+          "id": "track_delivery",
+          "description": "Retrieves delivery status by tracking ID.",
+          "parameters": ["tracking_id", "user_id"],
+          "return": "status",
+          "unit_tests": [
+            {
+              "test_id": "track_delivery_valid",
+              "description": "Test tracking with valid ID.",
+              "input": {"tracking_id": "track_123", "user_id": "user123"},
+              "expected_output": {"status": "In Transit", "last_updated": "2025-07-08"},
+              "assertions": ["status is not null", "tracking popup displays status"]
+            }
+          ]
+        },
+        {
+          "id": "load_translations",
+          "description": "Loads translations for a given language.",
+          "parameters": ["language"],
+          "return": "translation_data",
+          "unit_tests": [
+            {
+              "test_id": "load_translations_valid",
+              "description": "Test loading translations for Arabic.",
+              "input": {"language": "ar"},
+              "expected_output": {"welcome": "مرحبا", "chat": "الدردشة"},
+              "assertions": ["translation_data is not empty", "UI updates with RTL"]
+            }
+          ]
+        },
+        {
+          "id": "init_chat",
+          "description": "Initializes AI chat with vector-based context retrieval.",
+          "parameters": ["user_id", "language", "context_data"],
+          "return": "session_id",
+          "unit_tests": [
+            {
+              "test_id": "init_chat_with_vector",
+              "description": "Test chat init with vector context.",
+              "input": {"user_id": "user123", "language": "en", "context_data": {"history": ["prev_message"], "vector": [0.1, 0.2]}},
+              "expected_output": "session_abc123",
+              "assertions": ["session_id is not null", "vector context is indexed"]
+            }
+          ]
+        },
+        {
+          "id": "send_message",
+          "description": "Processes user message and retrieves AI response using vector search.",
+          "parameters": ["session_id", "message", "language"],
+          "return": "ai_response",
+          "unit_tests": [
+            {
+              "test_id": "send_message_with_vector",
+              "description": "Test message with vector-based response.",
+              "input": {"session_id": "session_abc123", "message": "Track my delivery", "language": "en"},
+              "expected_output": {"response": "Please provide tracking ID", "vector": [0.3, 0.4]},
+              "assertions": ["response is relevant", "vector is updated"]
+            }
+          ]
+        },
+        {
+          "id": "vector_search",
+          "description": "Performs vector search for contextual AI responses.",
+          "parameters": ["query_vector", "collection_name"],
+          "return": "matching_documents",
+          "unit_tests": [
+            {
+              "test_id": "vector_search_valid",
+              "description": "Test vector search with valid query.",
+              "input": {"query_vector": [0.1, 0.2], "collection_name": "chat_history"},
+              "expected_output": [{"session_id": "session_abc123", "vector": [0.1, 0.2]}],
+              "assertions": ["returns matching documents", "documents contain vectors"]
+            }
+          ]
+        },
+        {
+          "id": "submit_booking",
+          "description": "Submits booking request with validation.",
+          "parameters": ["user_id", "service_type", "date", "time"],
+          "return": "booking_id",
+          "unit_tests": [
+            {
+              "test_id": "submit_booking_valid",
+              "description": "Test valid booking submission.",
+              "input": {"user_id": "user123", "service_type": "Delivery", "date": "2025-07-10", "time": "14:00"},
+              "expected_output": "booking_12345",
+              "assertions": ["booking_id is generated", "confirmation popup triggered"]
+            }
+          ]
+        },
+        {
+          "id": "ai_suggest_requirements",
+          "description": "Generates project requirements using vector-based AI.",
+          "parameters": ["project_name", "user_input", "context_data"],
+          "return": "suggestions",
+          "unit_tests": [
+            {
+              "test_id": "ai_suggest_with_context",
+              "description": "Test AI suggestions with context.",
+              "input": {"project_name": "App Development", "user_input": "Need a mobile app", "context_data": {"vector": [0.5, 0.6]}},
+              "expected_output": ["Use Flutter for cross-platform", "Include push notifications"],
+              "assertions": ["suggestions are relevant", "vector is updated"]
+            }
+          ]
+        },
+        {
+          "id": "switch_language",
+          "description": "Dynamically switches UI and AI language with RTL support.",
+          "parameters": ["language"],
+          "return": "success",
+          "unit_tests": [
+            {
+              "test_id": "switch_language_rtl",
+              "description": "Test switching to RTL language (Arabic).",
+              "input": {"language": "ar"},
+              "expected_output": true,
+              "assertions": ["UI updates to Arabic", "text direction is RTL", "AI responds in Arabic"]
+            }
+          ]
+        }
+      ],
+      "icons": [
+        {
+          "id": "home_icon",
+          "file": "home_icon.png",
+          "description": "Icon for home menu item"
+        },
+        {
+          "id": "chat_icon",
+          "file": "chat_icon.png",
+          "description": "Icon for AI chat"
+        },
+        {
+          "id": "send_icon",
+          "file": "send_icon.png",
+          "description": "Icon for send button"
+        },
+        {
+          "id": "language_icon",
+          "file": "language_icon.png",
+          "description": "Icon for language switch"
+        },
+        {
+          "id": "planning_icon",
+          "file": "planning_icon.png",
+          "description": "Icon for project planning"
+        },
+        {
+          "id": "ai_icon",
+          "file": "ai_icon.png",
+          "description": "Icon for AI suggest button"
+        },
+        {
+          "id": "tracking_icon",
+          "file": "tracking_icon.png",
+          "description": "Icon for delivery tracking"
+        },
+        {
+          "id": "mic_icon",
+          "file": "mic_icon.png",
+          "description": "Icon for voice mode"
+        }
+      ],
+      "images": [
+        {
+          "id": "welcome_banner",
+          "file": "welcome_banner.jpg",
+          "description": "Banner image for home screen"
+        }
+      ],
+      "ai_config": {
+        "vector_search": {
+          "engine": "faiss",
+          "dimension": 128,
+          "index_type": "flat"
+        },
+        "context_retention": {
+          "max_history": 100,
+          "retention_period": "30 days"
+        },
+        "training_pipeline": {
+          "model_type": "SentenceTransformer",
+          "training_data": ["chat_history", "projects"],
+          "schedule": "weekly",
+          "parameters": {
+            "batch_size": 32,
+            "epochs": 10,
+            "learning_rate": 2e-5
+          }
+        },
+        "response_modes": [
+          {
+            "mode": "text",
+            "description": "Standard text-based AI responses"
+          },
+          {
+            "mode": "suggestions",
+            "description": "AI-generated suggestions based on context"
+          },
+          {
+            "mode": "tracking_assist",
+            "description": "AI assists with delivery tracking queries"
+          },
+          {
+            "mode": "sentiment_analysis",
+            "description": "Analyzes user sentiment in chat"
+          }
+        ]
+      }
+    },
+    "settings": {
+      "multilingual": {
+        "supported_languages": ["en", "es", "fr", "ar"],
+        "default_language": "en",
+        "translation_engine": "i18next",
+        "dynamic_loading": true,
+        "rtl_support": ["ar"],
+        "translation_files": [
+          {
+            "language": "en",
+            "file": "en.json"
+          },
+          {
+            "language": "es",
+            "file": "es.json"
+          },
+          {
+            "language": "fr",
+            "file": "fr.json"
+          },
+          {
+            "language": "ar",
+            "file": "ar.json"
+          }
+        ]
+      },
+      "database": {
+        "type": "NoSQL",
+        "vector_support": true,
+        "provider": "MongoDB",
+        "collections": [
+          {
+            "name": "chat_history",
+            "schema": {
+              "session_id": "string",
+              "user_id": "string",
+              "messages": [
+                {
+                  "text": "string",
+                  "timestamp": "datetime",
+                  "vector": "array",
+                  "sentiment": "object"
+                }
+              ],
+              "vector_index": "cosine"
+            }
+          },
+          {
+            "name": "bookings",
+            "schema": {
+              "booking_id": "string",
+              "user_id": "string",
+              "service_type": "string",
+              "date": "date",
+              "time": "time"
+            }
+          },
+          {
+            "name": "deliveries",
+            "schema": {
+              "tracking_id": "string",
+              "user_id": "string",
+              "status": "string",
+              "last_updated": "datetime",
+              "details": "object"
+            }
+          },
+          {
+            "name": "profiles",
+            "schema": {
+              "user_id": "string",
+              "full_name": "string",
+              "email": "string",
+              "preferred_language": "string"
+            }
+          },
+          {
+            "name": "projects",
+            "schema": {
+              "project_id": "string",
+              "user_id": "string",
+              "project_name": "string",
+              "requirements": "string",
+              "suggestions": "array",
+              "vector": "array",
+              "vector_index": "cosine"
+            }
+          },
+          {
+            "name": "analytics",
+            "schema": {
+              "event_id": "string",
+              "user_id": "string",
+              "event_type": "string",
+              "event_data": "object",
+              "timestamp": "datetime"
+            }
+          }
+        ]
+      },
+      "deployment": {
+        "platform": "AWS",
+        "services": [
+          {
+            "name": "EC2",
+            "description": "Host React frontend and Node.js backend"
+          },
+          {
+            "name": "MongoDB Atlas",
+            "description": "Managed NoSQL database with vector search"
+          },
+          {
+            "name": "CloudFront",
+            "description": "CDN for static assets (icons, images)"
+          },
+          {
+            "name": "Elastic Load Balancer",
+            "description": "Distribute traffic across EC2 instances"
+          }
+        ],
+        "scaling": {
+          "auto_scaling": true,
+          "min_instances": 2,
+          "max_instances": 10,
+          "cpu_threshold": "70%"
+        },
+        "monitoring": [
+          {
+            "tool": "CloudWatch",
+            "metrics": ["response_time", "error_rate", "user_traffic", "ai_response_latency"]
+          },
+          {
+            "tool": "Sentry",
+            "description": "Real-time error tracking"
+          },
+          {
+            "tool": "Prometheus",
+            "description": "Metrics for vector search and API performance"
+          },
+          {
+            "tool": "Google Analytics",
+            "description": "User behavior tracking"
+          }
+        ],
+        "security": {
+          "authentication": {
+            "method": "JWT",
+            "token_expiry": "1h"
+          },
+          "encryption": {
+            "data_at_rest": "AES-256",
+            "data_in_transit": "TLS 1.3"
+          },
+          "api_security": {
+            "rate_limit": "100 requests/minute",
+            "cors": ["https://customer-service-web.com"]
+          }
+        },
+        "ci_cd": {
+          "provider": "GitHub Actions",
+          "stages": [
+            {
+              "name": "test",
+              "description": "Run unit and end-to-end tests"
+            },
+            {
+              "name": "build",
+              "description": "Build React app and Node.js backend"
+            },
+            {
+              "name": "deploy",
+              "description": "Deploy to AWS EC2 and CloudFront"
+            }
+          ]
+        }
+      },
+      "mobile": {
+        "platforms": ["iOS", "Android"],
+        "features": [
+          {
+            "name": "AI Chat",
+            "description": "Text and voice-based chat",
+            "voice_mode": true
+          },
+          {
+            "name": "Booking",
+            "description": "Book services and meetings"
+          },
+          {
+            "name": "Tracking",
+            "description": "Track delivery status"
+          },
+          {
+            "name": "Profile",
+            "description": "Manage user profile"
+          },
+          {
+            "name": "Planning",
+            "description": "Project planning with AI suggestions"
+          }
+        ]
+      }
+    },
+    "testing": {
+      "unit_tests": "See functions.unit_tests",
+      "end_to_end_tests": [
+        {
+          "test_id": "e2e_mobile_voice",
+          "description": "Test voice mode on mobile app.",
+          "steps": [
+            "User logs in on mobile app",
+            "User activates voice mode in chat",
+            "User sends a voice message",
+            "AI responds with relevant text"
+          ],
+          "assertions": [
+            "Login succeeds",
+            "Voice input is transcribed",
+            "AI response is relevant"
+          ]
+        },
+        {
+          "test_id": "e2e_analytics",
+          "description": "Test user behavior tracking.",
+          "steps": [
+            "User navigates to chat screen",
+            "User sends a message",
+            "User clicks booking button",
+            "Analytics events are logged"
+          ],
+          "assertions": [
+            "Click events are logged",
+            "Chat events are logged",
+            "No errors in analytics pipeline"
+          ]
+        }
+      ]
+    }
+  }
+}

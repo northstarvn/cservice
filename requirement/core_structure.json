@@ -1,0 +1,154 @@
+{
+  "application": {
+    "name": "CustomerServiceWeb",
+    "version": "1.0.0",
+    "description": "A scalable customer service web app with AI chat, multilingual support, and service booking.",
+    "core_structure": {
+      "main_menu": {
+        "id": "main_menu",
+        "type": "navigation",
+        "items": [
+          {
+            "id": "home",
+            "label": "Home",
+            "icon": "fa-home",
+            "route": "/",
+            "description": "Redirects to the homepage with AI chat widget and service overview."
+          },
+          {
+            "id": "ai_chat",
+            "label": "AI Assistant",
+            "icon": "fa-robot",
+            "route": "/ai-chat",
+            "description": "Opens the AI virtual assistant for customer support."
+          },
+          {
+            "id": "services",
+            "label": "Services",
+            "icon": "fa-concierge-bell",
+            "route": "/services",
+            "description": "Displays service booking options like deliveries and meetings."
+          },
+          {
+            "id": "project_planning",
+            "label": "Project Planning",
+            "icon": "fa-project-diagram",
+            "route": "/project-planning",
+            "description": "Guides users through idea submission and requirement breakdown."
+          },
+          {
+            "id": "profile",
+            "label": "Profile",
+            "icon": "fa-user",
+            "route": "/profile",
+            "description": "User account settings and history."
+          },
+          {
+            "id": "language",
+            "label": "Language",
+            "icon": "fa-globe",
+            "type": "dropdown",
+            "options": [
+              {"code": "en", "label": "English"},
+              {"code": "es", "label": "Spanish"},
+              {"code": "fr", "label": "French"}
+            ],
+            "description": "Selects the interface language."
+          }
+        ]
+      },
+      "screens": [
+        {
+          "id": "home_screen",
+          "route": "/",
+          "components": [
+            {
+              "id": "hero_section",
+              "type": "banner",
+              "content": {
+                "title": "Welcome to Customer Service",
+                "subtitle": "Connect with our AI assistant or book services instantly.",
+                "image": "hero_image.jpg",
+                "cta_button": {
+                  "id": "start_chat_button",
+                  "label": "Chat with AI",
+                  "action": "open_ai_chat"
+                }
+              }
+            },
+            {
+              "id": "service_cards",
+              "type": "grid",
+              "items": [
+                {
+                  "id": "booking_card",
+                  "title": "Book a Service",
+                  "icon": "fa-calendar-check",
+                  "route": "/services"
+                },
+                {
+                  "id": "planning_card",
+                  "title": "Plan a Project",
+                  "icon": "fa-lightbulb",
+                  "route": "/project-planning"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "ai_chat_screen",
+          "route": "/ai-chat",
+          "components": [
+            {
+              "id": "chat_widget",
+              "type": "chat",
+              "features": {
+                "real_time": true,
+                "history": true,
+                "meta_data": ["user_id", "session_id", "language"],
+                "data_format": ["nosql", "vector"],
+                "buttons": [
+                  {
+                    "id": "end_chat_button",
+                    "label": "End Chat",
+                    "action": "close_chat"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "unit_tests": [
+      {
+        "id": "main_menu_test",
+        "description": "Verify main menu renders all items and icons correctly.",
+        "test_cases": [
+          {
+            "id": "menu_item_count",
+            "input": "main_menu.items",
+            "expected_output": "6 items"
+          },
+          {
+            "id": "menu_icon_validation",
+            "input": "main_menu.items[].icon",
+            "expected_output": "Valid FontAwesome class"
+          }
+        ]
+      },
+      {
+        "id": "home_screen_test",
+        "description": "Test home screen components and CTA functionality.",
+        "test_cases": [
+          {
+            "id": "hero_button_action",
+            "input": "start_chat_button.click",
+            "expected_output": "Navigates to /ai-chat"
+          }
+        ]
+      }
+    ]
+  }
+}

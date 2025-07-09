@@ -1,0 +1,223 @@
+{
+  "website": {
+    "name": "CustomerServiceWeb",
+    "version": "1.0.0",
+    "description": "A scalable customer service website with AI chat, booking, and project planning features.",
+    "components": {
+      "menus": [
+        {
+          "id": "main_menu",
+          "type": "navbar",
+          "items": [
+            {
+              "label": "Home",
+              "route": "/",
+              "icon": "home_icon.png",
+              "action": "navigate_home"
+            },
+            {
+              "label": "AI Chat",
+              "route": "/chat",
+              "icon": "chat_icon.png",
+              "action": "open_chat"
+            },
+            {
+              "label": "Book Services",
+              "route": "/booking",
+              "icon": "calendar_icon.png",
+              "action": "navigate_booking"
+            },
+            {
+              "label": "Profile",
+              "route": "/profile",
+              "icon": "user_icon.png",
+              "action": "navigate_profile"
+            }
+          ]
+        }
+      ],
+      "screens": [
+        {
+          "id": "home_screen",
+          "title": "Welcome to Customer Service",
+          "components": [
+            {
+              "type": "header",
+              "text": "Support at Your Fingertips",
+              "image": "welcome_banner.jpg"
+            },
+            {
+              "type": "button",
+              "label": "Start AI Chat",
+              "action": "open_chat",
+              "icon": "chat_icon.png"
+            }
+          ]
+        },
+        {
+          "id": "chat_screen",
+          "title": "AI Assistant",
+          "components": [
+            {
+              "type": "chat_window",
+              "id": "chat_container",
+              "fields": [
+                {
+                  "type": "text_area",
+                  "id": "chat_input",
+                  "placeholder": "Type your message..."
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Send",
+                  "action": "send_message",
+                  "icon": "send_icon.png"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "popups": [
+        {
+          "id": "login_popup",
+          "title": "Login",
+          "fields": [
+            {
+              "type": "text",
+              "id": "username",
+              "label": "Username",
+              "placeholder": "Enter username"
+            },
+            {
+              "type": "password",
+              "id": "password",
+              "label": "Password",
+              "placeholder": "Enter password"
+            }
+          ],
+          "buttons": [
+            {
+              "label": "Login",
+              "action": "submit_login"
+            },
+            {
+              "label": "Cancel",
+              "action": "close_popup"
+            }
+          ]
+        }
+      ],
+      "functions": [
+        {
+          "id": "init_chat",
+          "description": "Initializes the AI chat session.",
+          "parameters": ["user_id", "language"],
+          "return": "session_id",
+          "unit_tests": [
+            {
+              "test_id": "init_chat_valid_user",
+              "description": "Test chat initialization with valid user_id and language.",
+              "input": {"user_id": "user123", "language": "en"},
+              "expected_output": "session_abc123",
+              "assertions": ["session_id is not null", "session_id format is valid"]
+            },
+            {
+              "test_id": "init_chat_invalid_user",
+              "description": "Test chat initialization with invalid user_id.",
+              "input": {"user_id": "", "language": "en"},
+              "expected_output": null,
+              "assertions": ["returns null", "logs error"]
+            },
+            {
+              "test_id": "init_chat_unsupported_language",
+              "description": "Test chat initialization with unsupported language.",
+              "input": {"user_id": "user123", "language": "xx"},
+              "expected_output": null,
+              "assertions": ["returns null", "logs unsupported language error"]
+            }
+          ]
+        },
+        {
+          "id": "submit_login",
+          "description": "Authenticates user credentials.",
+          "parameters": ["username", "password"],
+          "return": "auth_token",
+          "unit_tests": [
+            {
+              "test_id": "submit_login_valid_credentials",
+              "description": "Test login with valid username and password.",
+              "input": {"username": "testuser", "password": "Test123!"},
+              "expected_output": "token_xyz789",
+              "assertions": ["auth_token is not null", "token format is valid"]
+            },
+            {
+              "test_id": "submit_login_invalid_credentials",
+              "description": "Test login with invalid credentials.",
+              "input": {"username": "testuser", "password": "wrong"},
+              "expected_output": null,
+              "assertions": ["returns null", "displays error message"]
+            },
+            {
+              "test_id": "submit_login_empty_fields",
+              "description": "Test login with empty username or password.",
+              "input": {"username": "", "password": ""},
+              "expected_output": null,
+              "assertions": ["returns null", "displays validation error"]
+            }
+          ]
+        },
+        {
+          "id": "navigate_home",
+          "description": "Navigates to the home screen.",
+          "parameters": [],
+          "return": "success",
+          "unit_tests": [
+            {
+              "test_id": "navigate_home_success",
+              "description": "Test navigation to home screen.",
+              "input": {},
+              "expected_output": true,
+              "assertions": ["route is /", "home screen components are rendered"]
+            }
+          ]
+        }
+      ],
+      "icons": [
+        {
+          "id": "home_icon",
+          "file": "home_icon.png",
+          "description": "Icon for home menu item"
+        },
+        {
+          "id": "chat_icon",
+          "file": "chat_icon.png",
+          "description": "Icon for AI chat"
+        },
+        {
+          "id": "send_icon",
+          "file": "send_icon.png",
+          "description": "Icon for send button in chat"
+        }
+      ],
+      "images": [
+        {
+          "id": "welcome_banner",
+          "file": "welcome_banner.jpg",
+          "description": "Banner image for home screen"
+        }
+      ]
+    },
+    "settings": {
+      "multilingual": {
+        "supported_languages": ["en", "es", "fr"],
+        "default_language": "en"
+      },
+      "database": {
+        "type": "NoSQL",
+        "vector_support": true
+      }
+    }
+  }
+}

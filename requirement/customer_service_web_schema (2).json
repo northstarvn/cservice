@@ -1,0 +1,558 @@
+{
+  "website": {
+    "name": "CustomerServiceWeb",
+    "version": "1.2.0",
+    "description": "Customer service website with advanced AI, end-to-end testing, and UI scalability.",
+    "components": {
+      {
+      "menus": [
+        {
+          "id": "main_menu",
+          "type": "navbar",
+          "items": [
+            {
+              "label": "Home",
+              "route": "/",
+              "icon": "home_icon.png",
+              "action": "navigate_home"
+            },
+            {
+              "label": "AI Chat",
+              "route": "/chat",
+              "icon": "chat_icon.png",
+              "action": "open_chat"
+            },
+            {
+              "label": "Book Services",
+              "route": "/booking",
+              "icon": "calendar_icon.png",
+              "action": "navigate_booking"
+            },
+            {
+              "label": "Profile",
+              "route": "/profile",
+              "icon": "user_icon.png",
+              "action": "navigate_profile"
+            },
+            {
+              "label": "Project Planning",
+              "route": "/planning",
+              "icon": "planning_icon.png",
+              "action": "navigate_planning"
+            }
+          ]
+        }
+      ],
+      "screens": [
+        {
+          "id": "home_screen",
+          "title": "Welcome to Customer Service",
+          "components": [
+            {
+              "type": "header",
+              "text": "Support at Your Fingertips",
+              "image": "welcome_banner.jpg"
+            },
+            {
+              "type": "button",
+              "label": "Start AI Chat",
+              "action": "open_chat",
+              "icon": "chat_icon.png"
+            }
+          ]
+        },
+        {
+          "id": "chat_screen",
+          "title": "AI Assistant",
+          "components": [
+            {
+              "type": "chat_window",
+              "id": "chat_container",
+              "fields": [
+                {
+                  "type": "text_area",
+                  "id": "chat_input",
+                  "placeholder": "Type your message..."
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Send",
+                  "action": "send_message",
+                  "icon": "send_icon.png"
+                },
+                {
+                  "label": "Switch Language",
+                  "action": "switch_language",
+                  "icon": "language_icon.png"
+                }
+              ]
+            },
+            {
+              "type": "history_panel",
+              "id": "chat_history",
+              "description": "Displays past messages with timestamps and AI suggestions"
+            },
+            {
+              "type": "ai_suggestions",
+              "id": "ai_suggestions_panel",
+              "description": "Displays real-time AI-generated suggestions based on vector search"
+            }
+          ]
+        },
+        {
+          "id": "booking_screen",
+          "title": "Book Services or Meetings",
+          "components": [
+            {
+              "type": "form",
+              "id": "booking_form",
+              "fields": [
+                {
+                  "type": "select",
+                  "id": "service_type",
+                  "label": "Service Type",
+                  "options": ["Consulting", "Delivery", "Meeting"]
+                },
+                {
+                  "type": "date",
+                  "id": "booking_date",
+                  "label": "Date",
+                  "placeholder": "Select date"
+                },
+                {
+                  "type": "time",
+                  "id": "booking_time",
+                  "label": "Time",
+                  "placeholder": "Select time"
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Submit Booking",
+                  "action": "submit_booking"
+                },
+                {
+                  "label": "Cancel",
+                  "action": "cancel_booking"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "profile_screen",
+          "title": "User Profile",
+          "components": [
+            {
+              "type": "form",
+              "id": "profile_form",
+              "fields": [
+                {
+                  "type": "text",
+                  "id": "full_name",
+                  "label": "Full Name",
+                  "placeholder": "Enter full name"
+                },
+                {
+                  "type": "email",
+                  "id": "email",
+                  "label": "Email",
+                  "placeholder": "Enter email"
+                },
+                {
+                  "type": "select",
+                  "id": "preferred_language",
+                  "label": "Preferred Language",
+                  "options": ["en", "es", "fr"]
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Save Profile",
+                  "action": "save_profile"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "planning_screen",
+          "title": "Project Planning",
+          "components": [
+            {
+              "type": "form",
+              "id": "planning_form",
+              "fields": [
+                {
+                  "type": "text",
+                  "id": "project_name",
+                  "label": "Project Name",
+                  "placeholder": "Enter project name"
+                },
+                {
+                  "type": "textarea",
+                  "id": "project_requirements",
+                  "label": "Requirements",
+                  "placeholder": "Describe project requirements"
+                }
+              ],
+              "buttons": [
+                {
+                  "label": "Submit Plan",
+                  "action": "submit_plan"
+                },
+                {
+                  "label": "AI Suggest",
+                  "action": "ai_suggest_requirements",
+                  "icon": "ai_icon.png"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "popups": [
+        {
+          "id": "login_popup",
+          "title": "Login",
+          "fields": [
+            {
+              "type": "text",
+              "id": "username",
+              "label": "Username",
+              "placeholder": "Enter username"
+            },
+            {
+              "type": "password",
+              "id": "password",
+              "label": "Password",
+              "placeholder": "Enter password"
+            }
+          ],
+          "buttons": [
+            {
+              "label": "Login",
+              "action": "submit_login"
+            },
+            {
+              "label": "Cancel",
+              "action": "close_popup"
+            }
+          ]
+        },
+        {
+          "id": "booking_confirmation_popup",
+          "title": "Booking Confirmation",
+          "components": [
+            {
+              "type": "text",
+              "id": "confirmation_message",
+              "content": "Booking confirmed! Details sent to your email."
+            }
+          ],
+          "buttons": [
+            {
+              "label": "OK",
+              "action": "close_popup"
+            }
+          ]
+        }
+      ],
+      "functions": [
+        {
+          "id": "init_chat",
+          "description": "Initializes AI chat with vector-based context retrieval.",
+          "parameters": ["user_id", "language", "context_data"],
+          "return": "session_id",
+          "unit_tests": [
+            {
+              "test_id": "init_chat_with_vector",
+              "description": "Test chat init with vector context.",
+              "input": {"user_id": "user123", "language": "en", "context_data": {"history": ["prev_message"], "vector": [0.1, 0.2]}},
+              "expected_output": "session_abc123",
+              "assertions": ["session_id is not null", "vector context is indexed"]
+            },
+            {
+              "test_id": "init_chat_no_vector",
+              "description": "Test chat init without vector data.",
+              "input": {"user_id": "user123", "language": "en", "context_data": {}},
+              "expected_output": "session_abc124",
+              "assertions": ["session_id is not null", "default vector is created"]
+            }
+          ]
+        },
+        {
+          "id": "send_message",
+          "description": "Processes user message and retrieves AI response using vector search.",
+          "parameters": ["session_id", "message", "language"],
+          "return": "ai_response",
+          "unit_tests": [
+            {
+              "test_id": "send_message_with_vector",
+              "description": "Test message with vector-based response.",
+              "input": {"session_id": "session_abc123", "message": "Plan a meeting", "language": "en"},
+              "expected_output": {"response": "Meeting scheduled for tomorrow?", "vector": [0.3, 0.4], "suggestions": ["Set agenda", "Invite team"]},
+              "assertions": ["response is relevant", "vector is updated", "suggestions are generated"]
+            },
+            {
+              "test_id": "send_message_no_session",
+              "description": "Test message with invalid session.",
+              "input": {"session_id": "invalid", "message": "Hello", "language": "en"},
+              "expected_output": null,
+              "assertions": ["returns null", "logs session error"]
+            }
+          ]
+        },
+        {
+          "id": "vector_search",
+          "description": "Performs vector search for contextual AI responses.",
+          "parameters": ["query_vector", "collection_name"],
+          "return": "matching_documents",
+          "unit_tests": [
+            {
+              "test_id": "vector_search_valid",
+              "description": "Test vector search with valid query.",
+              "input": {"query_vector": [0.1, 0.2], "collection_name": "chat_history"},
+              "expected_output": [{"session_id": "session_abc123", "vector": [0.1, 0.2]}],
+              "assertions": ["returns matching documents", "documents contain vectors"]
+            },
+            {
+              "test_id": "vector_search_empty",
+              "description": "Test vector search with empty query.",
+              "input": {"query_vector": [], "collection_name": "chat_history"},
+              "expected_output": [],
+              "assertions": ["returns empty array", "logs empty query error"]
+            }
+          ]
+        },
+        {
+          "id": "submit_booking",
+          "description": "Submits booking request with validation.",
+          "parameters": ["user_id", "service_type", "date", "time"],
+          "return": "booking_id",
+          "unit_tests": [
+            {
+              "test_id": "submit_booking_valid",
+              "description": "Test valid booking submission.",
+              "input": {"user_id": "user123", "service_type": "Meeting", "date": "2025-07-10", "time": "14:00"},
+              "expected_output": "booking_12345",
+              "assertions": ["booking_id is generated", "confirmation popup triggered"]
+            },
+            {
+              "test_id": "submit_booking_past_date",
+              "description": "Test booking with past date.",
+              "input": {"user_id": "user123", "service_type": "Meeting", "date": "2025-07-01", "time": "14:00"},
+              "expected_output": null,
+              "assertions": ["returns null", "displays date error"]
+            }
+          ]
+        },
+        {
+          "id": "ai_suggest_requirements",
+          "description": "Generates project requirements using vector-based AI.",
+          "parameters": ["project_name", "user_input", "context_data"],
+          "return": "suggestions",
+          "unit_tests": [
+            {
+              "test_id": "ai_suggest_with_context",
+              "description": "Test AI suggestions with context.",
+              "input": {"project_name": "App Development", "user_input": "Need a mobile app", "context_data": {"vector": [0.5, 0.6]}},
+              "expected_output": ["Use Flutter for cross-platform", "Include push notifications"],
+              "assertions": ["suggestions are relevant", "vector is updated"]
+            },
+            {
+              "test_id": "ai_suggest_no_input",
+              "description": "Test AI suggestions without input.",
+              "input": {"project_name": "App Development", "user_input": "", "context_data": {}},
+              "expected_output": [],
+              "assertions": ["returns empty array", "logs missing input error"]
+            }
+          ]
+        },
+        {
+          "id": "switch_language",
+          "description": "Dynamically switches UI and AI language.",
+          "parameters": ["language"],
+          "return": "success",
+          "unit_tests": [
+            {
+              "test_id": "switch_language_valid",
+              "description": "Test switching to supported language.",
+              "input": {"language": "fr"},
+              "expected_output": true,
+              "assertions": ["UI updates to French", "AI responds in French"]
+            },
+            {
+              "test_id": "switch_language_unsupported",
+              "description": "Test switching to unsupported language.",
+              "input": {"language": "xx"},
+              "expected_output": false,
+              "assertions": ["returns false", "displays language error"]
+            }
+          ]
+        }
+      ],
+      "icons": [
+        {
+          "id": "home_icon",
+          "file": "home_icon.png",
+          "description": "Icon for home menu item"
+        },
+        {
+          "id": "chat_icon",
+          "file": "chat_icon.png",
+          "description": "Icon for AI chat"
+        },
+        {
+          "id": "send_icon",
+          "file": "send_icon.png",
+          "description": "Icon for send button"
+        },
+        {
+          "id": "language_icon",
+          "file": "language_icon.png",
+          "description": "Icon for language switch"
+        },
+        {
+          "id": "planning_icon",
+          "file": "planning_icon.png",
+          "description": "Icon for project planning"
+        },
+        {
+          "id": "ai_icon",
+          "file": "ai_icon.png",
+          "description": "Icon for AI suggest button"
+        }
+      ],
+      "images": [
+        {
+          "id": "welcome_banner",
+          "file": "welcome_banner.jpg",
+          "description": "Banner image for home screen"
+        }
+      ],
+      "ai_config": {
+        "vector_search": {
+          "engine": "faiss",
+          "dimension": 128,
+          "index_type": "flat"
+        },
+        "context_retention": {
+          "max_history": 100,
+          "retention_period": "30 days"
+        },
+        "response_modes": [
+          {
+            "mode": "text",
+            "description": "Standard text-based AI responses"
+          },
+          {
+            "mode": "suggestions",
+            "description": "AI-generated suggestions based on context"
+          }
+        ]
+      }
+    },
+    "settings": {
+      "multilingual": {
+        "supported_languages": ["en", "es", "fr"],
+        "default_language": "en",
+        "translation_engine": "i18n",
+        "dynamic_loading": true
+      },
+      "database": {
+        "type": "NoSQL",
+        "vector_support": true,
+        "provider": "MongoDB",
+        "collections": [
+          {
+            "name": "chat_history",
+            "schema": {
+              "session_id": "string",
+              "user_id": "string",
+              "messages": [
+                {
+                  "text": "string",
+                  "timestamp": "datetime",
+                  "vector": "array"
+                }
+              ],
+              "vector_index": "cosine"
+            }
+          },
+          {
+            "name": "bookings",
+            "schema": {
+              "booking_id": "string",
+              "user_id": "string",
+              "service_type": "string",
+              "date": "date",
+              "time": "time"
+            }
+          },
+          {
+            "name": "profiles",
+            "schema": {
+              "user_id": "string",
+              "full_name": "string",
+              "email": "string",
+              "preferred_language": "string"
+            }
+          },
+          {
+            "name": "projects",
+            "schema": {
+              "project_id": "string",
+              "user_id": "string",
+              "project_name": "string",
+              "requirements": "string",
+              "suggestions": "array",
+              "vector": "array",
+              "vector_index": "cosine"
+            }
+          }
+        ]
+      }
+    },
+    "testing": {
+      "unit_tests": "See functions.unit_tests",
+      "end_to_end_tests": [
+        {
+          "test_id": "e2e_full_journey",
+          "description": "Test user journey from login to booking and project planning.",
+          "steps": [
+            "User opens login popup and submits valid credentials",
+            "User navigates to chat screen and sends a message",
+            "AI responds with relevant suggestions",
+            "User navigates to booking screen and submits a booking",
+            "Booking confirmation popup appears",
+            "User navigates to planning screen and submits a project plan",
+            "AI suggests requirements based on input"
+          ],
+          "assertions": [
+            "Login succeeds",
+            "Chat response is relevant",
+            "Booking is saved in database",
+            "Project plan is saved with AI suggestions"
+          ]
+        },
+        {
+          "test_id": "e2e_multilingual",
+          "description": "Test multilingual support across UI and AI.",
+          "steps": [
+            "User switches language to French",
+            "User sends a message in French on chat screen",
+            "AI responds in French",
+            "User submits a booking with French UI"
+          ],
+          "assertions": [
+            "UI updates to French",
+            "AI response is in French",
+            "Booking form labels are in French"
+          ]
+        }
+      ]
+    }
+  }
+}

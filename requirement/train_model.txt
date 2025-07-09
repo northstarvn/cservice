@@ -1,0 +1,43 @@
+```python
+from sentence_transformers import SentenceTransformer, InputExample, losses
+from torch.utils.data import DataLoader
+from pymongo import MongoClient
+
+def train_ai_model(dataset, model_config):
+    if not dataset:
+        print("Empty dataset")
+        return None
+
+    # Initialize model
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    train_examples = [InputExample(texts=[item['text']], label=item['vector']) for item in dataset]
+    train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=model_config['batch_size'])
+
+    # Define loss
+    train_loss = losses.CosineSimilarityLoss(model)
+
+    # Train model
+    model.fit(
+        train_objectives=[(train_dataloader, train_loss)],
+        epochs=model_config['epochs'],
+        warmup_steps=100,
+        output_path=f"model_{model_config['dimension']}_{model_config['epochs']}"
+    )
+
+    # Save model metadata to MongoDB
+    client = MongoClient('mongodb://localhost:27017')
+    db = client['CustomerServiceWeb']
+    model_id = f"model_{int(time.time())}"
+    db.models.insert_one({
+        'model_id': model_id,
+        'config': model_config,
+        'path': model.output_path
+    })
+
+    return model_id
+
+# Example usage
+dataset = [{"text": "Plan a meeting", "vector": [0.1, 0.2]}]
+config = {"dimension": 128, "epochs": 10, "batch_size": 32}
+model_id = train_ai_model(dataset, config)
+```

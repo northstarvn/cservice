@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Service Web</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Navigation -->
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>Customer Service</h1>
+            </div>
+            <ul class="nav-menu" id="nav-menu">
+                <li><a href="#" onclick="showScreen('home')" class="nav-link active">
+                    <i class="fas fa-home"></i> Home
+                </a></li>
+                <li><a href="#" onclick="showScreen('chat')" class="nav-link">
+                    <i class="fas fa-comments"></i> AI Chat
+                </a></li>
+                <li><a href="#" onclick="showScreen('booking')" class="nav-link">
+                    <i class="fas fa-calendar"></i> Book Services
+                </a></li>
+                <li><a href="#" onclick="showScreen('tracking')" class="nav-link">
+                    <i class="fas fa-truck"></i> Track Delivery
+                </a></li>
+                <li><a href="#" onclick="showScreen('profile')" class="nav-link">
+                    <i class="fas fa-user"></i> Profile
+                </a></li>
+                <li><a href="#" onclick="showScreen('planning')" class="nav-link">
+                    <i class="fas fa-project-diagram"></i> Project Planning
+                </a></li>
+            </ul>
+            <div class="nav-actions">
+                <select id="language-select" onchange="switchLanguage(this.value)">
+                    <option value="en">English</option>
+                    <option value="es">Español</option>
+                    <option value="fr">Français</option>
+                    <option value="ar">العربية</option>
+                </select>
+                <button onclick="showPopup('login')" class="btn-login">Login</button>
+            </div>
+        </nav>
+
+        <!-- Home Screen -->
+        <div id="home-screen" class="screen active">
+            <div class="hero-section">
+                <div class="hero-content">
+                    <h2 data-translate="welcome">Support at Your Fingertips</h2>
+                    <p data-translate="hero-desc">Get instant help with our AI-powered customer service platform</p>
+                    <button onclick="showScreen('chat')" class="btn-primary">
+                        <i class="fas fa-comments"></i> Start AI Chat
+                    </button>
+                </div>
+                <div class="hero-image">
+                    <div class="chat-bubbles">
+                        <div class="bubble bubble-1"></div>
+                        <div class="bubble bubble-2"></div>
+                        <div class="bubble bubble-3"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Screen -->
+        <div id="chat-screen" class="screen">
+            <div class="chat-container">
+                <div class="chat-header">
+                    <h3>AI Assistant</h3>
+                    <div class="chat-controls">
+                        <button onclick="toggleVoiceMode()" class="btn-voice" id="voice-btn">
+                            <i class="fas fa-microphone"></i>
+                        </button>
+                        <button onclick="clearChat()" class="btn-clear">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="chat-messages" id="chat-messages">
+                    <div class="message ai-message">
+                        <div class="message-content">
+                            <p>Hello! I'm your AI assistant. How can I help you today?</p>
+                            <span class="message-time">Now</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="chat-input-container">
+                    <input type="text" id="chat-input" placeholder="Type your message..." onkeypress="handleChatKeyPress(event)">
+                    <button onclick="sendMessage()" class="btn-send">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+                <div class="ai-suggestions" id="ai-suggestions">
+                    <div class="suggestion-item" onclick="sendSuggestion('Track my delivery')">Track my delivery</div>
+                    <div class="suggestion-item" onclick="sendSuggestion('Book a service')">Book a service</div>
+                    <div class="suggestion-item" onclick="sendSuggestion('Contact support')">Contact support</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Booking Screen -->
+        <div id="booking-screen" class="screen">
+            <div class="form-container">
+                <h3>Book Services or Meetings</h3>
+                <form id="booking-form" onsubmit="submitBooking(event)">
+                    <div class="form-group">
+                        <label for="service-type">Service Type</label>
+                        <select id="service-type" required>
+                            <option value="">Select service...</option>
+                            <option value="consulting">Consulting</option>
+                            <option value="delivery">Delivery</option>
+                            <option value="meeting">Meeting</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="booking-date">Date</label>
+                        <input type="date" id="booking-date" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="booking-time">Time</label>
+                        <input type="time" id="booking-time" required>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">Submit Booking</button>
+                        <button type="button" onclick="resetBookingForm()" class="btn-secondary">Cancel</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Tracking Screen -->
+        <div id="tracking-screen" class="screen">
+            <div class="form-container">
+                <h3>Track Delivery</h3>
+                <form id="tracking-form" onsubmit="trackDelivery(event)">
+                    <div class="form-group">
+                        <label for="tracking-id">Tracking ID</label>
+                        <input type="text" id="tracking-id" placeholder="Enter tracking ID" required>
+                    </div>
+                    <button type="submit" class="btn-primary">Track</button>
+                </form>
+                <div id="tracking-status" class="tracking-status hidden">
+                    <div class="status-card">
+                        <h4>Delivery Status</h4>
+                        <div class="status-info">
+                            <div class="status-badge" id="status-badge">In Transit</div>
+                            <p id="status-details">Your package is on its way!</p>
+                            <div class="status-timeline">
+                                <div class="timeline-item completed">
+                                    <div class="timeline-marker"></div>
+                                    <div class="timeline-content">Order Placed</div>
+                                </div>
+                                <div class="timeline-item completed">
+                                    <div class="timeline-marker"></div>
+                                    <div class="timeline-content">Processing</div>
+                                </div>
+                                <div class="timeline-item active">
+                                    <div class="timeline-marker"></div>
+                                    <div class="timeline-content">In Transit</div>
+                                </div>
+                                <div class="timeline-item">
+                                    <div class="timeline-marker"></div>
+                                    <div class="timeline-content">Delivered</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Profile Screen -->
+        <div id="profile-screen" class="screen">
+            <div class="form-container">
+                <h3>User Profile</h3>
+                <form id="profile-form" onsubmit="saveProfile(event)">
+                    <div class="form-group">
+                        <label for="full-name">Full Name</label>
+                        <input type="text" id="full-name" placeholder="Enter full name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="email">Email</label>
+                        <input type="email" id="email" placeholder="Enter email" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="preferred-language">Preferred Language</label>
+                        <select id="preferred-language">
+                            <option value="en">English</option>
+                            <option value="es">Español</option>
+                            <option value="fr">Français</option>
+                            <option value="ar">العربية</option>
+                        </select>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">Save Profile</button>
+                        <button type="button" onclick="logoutUser()" class="btn-secondary">Logout</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Planning Screen -->
+        <div id="planning-screen" class="screen">
+            <div class="form-container">
+                <h3>Project Planning</h3>
+                <form id="planning-form" onsubmit="submitPlan(event)">
+                    <div class="form-group">
+                        <label for="project-name">Project Name</label>
+                        <input type="text" id="project-name" placeholder="Enter project name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="project-requirements">Requirements</label>
+                        <textarea id="project-requirements" placeholder="Describe project requirements" rows="5" required></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary">Submit Plan</button>
+                        <button type="button" onclick="aiSuggestRequirements()" class="btn-ai">
+                            <i class="fas fa-robot"></i> AI Suggest
+                        </button>
+                    </div>
+                </form>
+                <div id="ai-suggestions-panel" class="suggestions-panel hidden">
+                    <h4>AI Suggestions</h4>
+                    <div id="suggestions-list"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Popups -->
+        <div id="popup-overlay" class="popup-overlay hidden" onclick="closePopup()">
+            <div class="popup" onclick="event.stopPropagation()">
+                <div class="popup-header">
+                    <h3 id="popup-title">Login</h3>
+                    <button onclick="closePopup()" class="popup-close">&times;</button>
+                </div>
+                <div class="popup-content" id="popup-content">
+                    <!-- Dynamic content -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    <script src="ai-service.js"></script>
+    <script src="translations.js"></script>
+</body>
+</html>

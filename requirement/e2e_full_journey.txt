@@ -1,0 +1,31 @@
+describe('Customer Service Web E2E', () => {
+  it('should complete full user journey', () => {
+    // Login
+    cy.visit('/');
+    cy.get('#login_popup').click();
+    cy.get('#username').type('user123');
+    cy.get('#password').type('Test123!');
+    cy.get('#submit_login').click();
+
+    // Chat
+    cy.get('#main_menu a[href="/chat"]').click();
+    cy.get('#chat_input').type('Plan a meeting');
+    cy.get('#send_button').click();
+    cy.get('.chat_history').should('contain', 'Meeting scheduled');
+
+    // Booking
+    cy.get('#main_menu a[href="/booking"]').click();
+    cy.get('#service_type').select('Meeting');
+    cy.get('#booking_date').type('2025-10-10');
+    cy.get('#booking_time').type('14:00');
+    cy.get('#submit_booking').click();
+    cy.get('#booking_confirmation_popup').should('be.visible');
+
+    // Project Planning
+    cy.get('#main_menu a[href="/planning"]').click();
+    cy.get('#project_name').type('App Development');
+    cy.get('#project_requirements').type('Need a mobile app');
+    cy.get('#ai_suggest').click();
+    cy.get('.suggestions').should('contain', 'Use Flutter');
+  });
+});

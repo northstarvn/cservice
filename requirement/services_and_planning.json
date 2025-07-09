@@ -1,0 +1,134 @@
+{
+  "services_and_planning": {
+    "screens": [
+      {
+        "id": "services_screen",
+        "route": "/services",
+        "components": [
+          {
+            "id": "booking_form",
+            "type": "form",
+            "fields": [
+              {
+                "id": "service_type",
+                "type": "dropdown",
+                "label": "Service Type",
+                "options": [
+                  {"value": "delivery", "label": "Delivery"},
+                  {"value": "meeting", "label": "Meeting"}
+                ],
+                "validation": "required"
+              },
+              {
+                "id": "date_time",
+                "type": "datetime",
+                "label": "Preferred Date & Time",
+                "validation": "future_date"
+              },
+              {
+                "id": "notes",
+                "type": "textarea",
+                "label": "Additional Notes",
+                "validation": "optional"
+              }
+            ],
+            "buttons": [
+              {
+                "id": "submit_booking_button",
+                "label": "Book Now",
+                "action": "submit_booking"
+              }
+            ]
+          },
+          {
+            "id": "booking_confirmation_popup",
+            "type": "popup",
+            "trigger": "submit_booking",
+            "content": {
+              "title": "Booking Confirmed",
+              "message": "Your booking has been scheduled.",
+              "buttons": [
+                {
+                  "id": "close_confirmation_button",
+                  "label": "OK",
+                  "action": "close_popup"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "project_planning_screen",
+        "route": "/project-planning",
+        "components": [
+          {
+            "id": "idea_form",
+            "type": "form",
+            "fields": [
+              {
+                "id": "project_name",
+                "type": "text",
+                "label": "Project Name",
+                "validation": "required"
+              },
+              {
+                "id": "description",
+                "type": "textarea",
+                "label": "Project Description",
+                "validation": "required"
+              },
+              {
+                "id": "goals",
+                "type": "textarea",
+                "label": "Project Goals",
+                "validation": "optional"
+              }
+            ],
+            "buttons": [
+              {
+                "id": "submit_idea_button",
+                "label": "Submit Idea",
+                "action": "submit_idea"
+              }
+            ]
+          },
+          {
+            "id": "ai_requirements_popup",
+            "type": "popup",
+            "trigger": "submit_idea",
+            "content": {
+              "title": "AI-Generated Requirements",
+              "message": "AI is analyzing your idea...",
+              "buttons": [
+                {
+                  "id": "view_requirements_button",
+                  "label": "View Breakdown",
+                  "action": "display_requirements"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "unit_tests": [
+      {
+        "id": "booking_form_test",
+        "description": "Test booking form validation and submission.",
+        "test_cases": [
+          {
+            "id": "service_type_validation",
+            "input": "service_type.value",
+            "expected_output": "delivery or meeting"
+          },
+          {
+            "id": "submit_booking_action",
+            "input": "submit_booking_button.click",
+            "expected_output": "Calls /api/book"
+          }
+        ]
+      }
+    ]
+  }
+}

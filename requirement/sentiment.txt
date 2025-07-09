@@ -1,0 +1,13 @@
+```python
+from transformers import pipeline
+
+def analyze_sentiment(message, language):
+    classifier = pipeline('sentiment-analysis', model='nlptown/bert-base-multilingual-uncased-sentiment')
+    result = classifier(message)[0]
+    score = result['score'] if result['label'] == 'POSITIVE' else -result['score']
+    return {'score': score, 'label': result['label'].lower()}
+
+# Example usage
+result = analyze_sentiment("Great service!", "en")
+print(result)  # {'score': 0.8, 'label': 'positive'}
+```

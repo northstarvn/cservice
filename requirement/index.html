@@ -1,0 +1,229 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Customer Service Web</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Mock API functions (replace with real backend calls)
+    const initChat = async (userId, language) => {
+      return `session_${Date.now()}`;
+    };
+    const sendMessage = async (sessionId, message, language) => {
+      return { response: `AI: ${message}`, suggestions: ["Suggestion 1", "Suggestion 2"] };
+    };
+    const submitBooking = async (userId, serviceType, date, time) => {
+      return `booking_${Date.now()}`;
+    };
+
+    // Navbar Component
+    const Navbar = ({ navigate }) => (
+      <nav className="bg-blue-600 p-4 flex justify-between text-white">
+        {[
+          { label: "Home", route: "/" },
+          { label: "AI Chat", route: "/chat" },
+          { label: "Book Services", route: "/booking" },
+          { label: "Profile", route: "/profile" },
+          { label: "Project Planning", route: "/planning" },
+        ].map((item) => (
+          <button
+            key={item.route}
+            onClick={() => navigate(item.route)}
+            className="px-4 py-2 hover:bg-blue-700 rounded"
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+    );
+
+    // Home Screen
+    const HomeScreen = ({ navigate }) => (
+      <div className="flex flex-col items-center p-8">
+        <img src="/welcome_banner.jpg" alt="Welcome" className="w-full h-48 object-cover mb-4" />
+        <h1 className="text-3xl font-bold mb-4">Support at Your Fingertips</h1>
+        <button
+          onClick={() => navigate("/chat")}
+          className="bg-blue-500 text-white px-6 py-3 rounded-lg flex items-center gap-2"
+        >
+          <span>Start AI Chat</span>
+          <img src="/chat_icon.png" alt="Chat" className="w-5 h-6" />
+          </button>
+        </div>
+      );
+
+      // Chat Screen
+      const ChatScreen = () => {
+        const [messages, setMessages] = useState([]);
+        const [input, setInput] = useState("");
+        const [sessionId, setSessionId] = useState(null);
+        const [language, setLanguage] = useState("en");
+        useEffect(() => {
+          initChat("user123", "en").then((id) => setSessionId(id));
+        }, []);
+
+        const handleSend = async () => {
+          if (!input || !sessionId) return;
+          const response = await sendMessage(sessionId, input, language);
+          setMessages([...messages, { user: input, ai: response.response }]);
+          setInput("");
+        };
+
+        return (
+          <div className="p-8 flex flex-col h-screen">
+            <h1 className="text-2xl font-bold mb-4">AI Assistant</h1>
+            <div className="flex-1 overflow-y-auto border rounded p-4 mb-4">
+              {messages.map((msg, index) => (
+                <div key={index" className="mb-2">
+                  <p><strong>User:</strong> {msg.user}</p>
+                  <p><strong>AI:</strong> {msg.ai}</p>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <textarea
+                className="flex-1 border rounded p-2"
+                placeholder="Type your message..."
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+              />
+              <button
+                onClick={handleSend}
+                className="bg-blue-500 text-white px-4 py-2 rounded flex items-center gap-1"
+              >
+                <span>Send</span>
+                <img src="/send_icon.png" alt="Send" className="w-5 h-5" />
+              </button>
+              <button
+                onClick={() => setLanguage(language === "en" ? "fr" : "en")}
+                className="bg-gray-500 text-white px-4 py-2 rounded flex items-center gap-1"
+              >
+                <span>Switch Language</span>
+                <img src="/language_icon.png" alt="Language" className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        );
+      };
+
+      // Booking Screen
+      const BookingScreen = () => {
+        const [serviceType, setServiceType] = useState("Consulting");
+        const [date, setDate] = useState("");
+        const [time, setTime] = useState("");
+        const [message, setMessage] = useState("");
+
+        const handleSubmit = async () => {
+          const bookingId = await submitBooking("user123", serviceType, date, time);
+          if (bookingId) {
+            setMessage("Booking confirmed!");
+          } else {
+            setMessage("Invalid booking details.");
+          }
+        };
+
+        return (
+          <div className="p-8 max-w-md mx-auto">
+            <h1 className="text-2xl font-bold mb-4">Book Services or Meetings</h1>
+            <div className="flex flex-col gap-4">
+              <select
+                className="border rounded p-2"
+                value={serviceType}
+                onChange={(e) => setServiceType(e.target.value)}
+                >
+                <option value="Consulting">Consulting</option>
+                <option value="Delivery">Delivery</option>
+                <option value="Meeting">Meeting</option>
+              </select>
+              <input
+                type="date"
+                className="border rounded p-2"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                />
+              <input
+                type="time"
+                className="border rounded p-2"
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                />
+              <button
+                onClick={handleSubmit}
+                className="bg-blue-500 text-white px-4 py-2 rounded"
+              >
+                Submit Booking
+              </button>
+              {message && <p className="text-sm text-green-600">{message}</p>}
+            </div>
+          </div>
+        );
+      };
+
+      // App Component
+      const App = () => {
+        const [page, setPage] = useState("/");
+
+        const navigate = (route) => setPage(route);
+
+        return (
+          <div>
+            <Navbar navigate={navigate} />
+            {page === "/" && <HomeScreen navigate={navigate} />}
+            {page === "/chat" && <ChatScreen />}
+            {page === "/booking" && <BookingScreen />}
+          </div>
+        );
+      };
+
+      ReactDOM.render(<App />, document.getElementById("root"));
+    </script>
+  </body>
+</html>

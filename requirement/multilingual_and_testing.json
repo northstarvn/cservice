@@ -1,0 +1,82 @@
+{
+  "multilingual_support": {
+    "id": "multilingual_module",
+    "description": "Handles language switching and locale-specific content.",
+    "components": [
+      {
+        "id": "language_selector",
+        "type": "dropdown",
+        "location": "header",
+        "options": [
+          {
+            "code": "en",
+            "label": "English",
+            "locale_file": "en.json"
+          },
+          {
+            "code": "es",
+            "label": "Spanish",
+            "locale_file": "es.json"
+          },
+          {
+            "code": "fr",
+            "label": "French",
+            "locale_file": "fr.json"
+          }
+        ]
+      }
+    ],
+    "locale_files": [
+      "id": {
+        "home.welcome": "Welcome to Customer Service",
+        "ai_chat.greeting": "Hello! How can I assist you?"
+      },
+      {
+        "id": "es",
+        "content": "es.json",
+        "home.welcome": "Bienvenido al Servicio al Cliente",
+        "ai_chat.greeting": "¡Hola! ¿Cómo puedo ayudarte?"
+      }
+    ]
+  },
+  "testing_guidelines": {
+    "unit_tests": {
+      "description": "Individual component functionality tests.",
+      "tools": ["Jest", "React Testing Library"],
+      "coverage": "80% minimum",
+      "examples": [
+        {
+          "id": "language_selector_test",
+          "description": "language_selector.change",
+          "input": "code='es'",
+          "expected_output": "Loads es.json locale"
+        }
+      ]
+    },
+    "integration_tests": {
+      "description": "Tests for inter-component and API interactions.",
+      "tools": ["Cypress"],
+      "examples": [
+        {
+          "id": "chat_to_booking_flow",
+          "description": "Test AI chat leading to service booking.",
+          "input": "AI suggestion to book",
+          "expected_output": "Navigates to /services"
+        }
+      ]
+    },
+    "end_to_end_tests": {
+      {
+        "description": "Complete user journeys.",
+        "tools": ["Playwright"],
+        "examples": [
+          {
+            "id": "full_project_planning",
+            "input": "Submit idea to requirements breakdown",
+            "expected_output": "Displays AI-generated project plan"
+          }
+        ]
+      }
+    }
+  }
+}
