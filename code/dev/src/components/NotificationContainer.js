@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { CheckCircle, AlertCircle, Info, X, AlertTriangle } from 'lucide-react';
-import { useApp } from '../context/app_context';
+import { useApp } from '../context/AppContext';
 
 const NotificationContainer = () => {
   const { notifications, removeNotification } = useApp();

@@ -1,6 +1,6 @@
 import React from 'react';
 import { X, Package, MapPin, Clock, CheckCircle, AlertCircle, Truck } from 'lucide-react';
-import { useApp } from '../context/app_context';
+import { useApp } from '../context/AppContext';
 
 const TrackingResultPopup = () => {
   const { trackingResult, closeTrackingResult } = useApp();

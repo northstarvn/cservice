@@ -1,8 +1,8 @@
 // src/pages/Booking.js
 import React, { useState } from 'react';
-import { useAuth } from '../context/auth_context';
-import { useApp } from '../context/app_context';
-import LoadingSpinner from '../components/loading_spinner';
+import { useAuth } from '../context/AuthContext';
+import { useApp } from '../context/AppContext';
+import LoadingSpinner from '../components/LoadingSpinner';
 
 const Booking = () => {
   const { user } = useAuth();

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/auth_context';
-import { useApp } from '../context/app_context';
+import { useAuth } from '../context/AuthContext';
+import { useApp } from '../context/AppContext';
 import { 
   MessageCircle, 
   Calendar, 

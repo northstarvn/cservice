@@ -1,6 +1,6 @@
 import React, { useState, useContext } from 'react';
-import { AuthContext } from '../context/auth_context';
-import { AppContext } from '../context/app_context';
+import { AuthContext } from '../context/AuthContext';
+import { AppContext } from '../context/AppContext';
 import { api } from '../utils/api';
 
 const LoginPopup = ({ isOpen, onClose }) => {

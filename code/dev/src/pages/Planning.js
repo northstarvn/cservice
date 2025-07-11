@@ -1,8 +1,8 @@
 import React, { useState, useContext, useEffect } from 'react';
-import { AuthContext } from '../context/auth_context';
-import { AppContext } from '../context/app_context';
+import { AuthContext } from '../context/AuthContext';
+import { AppContext } from '../context/AppContext';
 import { api } from '../utils/api';
-import LoadingSpinner from '../components/loading_spinner';
+import LoadingSpinner from '../components/LoadingSpinner';
 import { vectorSearch } from '../utils/vectorSearch';
 
 const Planning = () => {

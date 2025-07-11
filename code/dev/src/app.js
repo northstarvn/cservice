@@ -1,23 +1,23 @@
 // src/App.js
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import { AuthProvider } from './context/auth_context';
-import { AppProvider } from './context/app_context';
-import { ChatProvider } from './context/chat_context';
-import Navbar from './components/navbar_component';
-import Home from './pages/home_page';
-import Chat from './pages/chat_component';
-import Booking from './pages/booking_component';
-import Tracking from './pages/tracking_page';
-import Profile from './pages/profile_page';
-import Planning from './pages/planning_page';
-import LoginPopup from './components/login_popup';
-import BookingConfirmationPopup from './components/booking_confirmation_popup';
-import TrackingResultPopup from './components/tracking_result_popup';
-import NotificationContainer from './components/notification_container';
-import LoadingSpinner from './components/loading_spinner';
-import { useApp } from './context/app_context';
-import { useAuth } from './context/auth_context';
+import { AuthProvider } from './context/AuthContext';
+import { AppProvider } from './context/AppContext';
+import { ChatProvider } from './context/ChatContext';
+import Navbar from './components/Navbar';
+import Home from './pages/Home';
+import Chat from './pages/Chat';
+import Booking from './pages/Booking';
+import Tracking from './pages/Tracking';
+import Profile from './pages/Profile';
+import Planning from './pages/Planning';
+import LoginPopup from './components/LoginPopup';
+import BookingConfirmationPopup from './components/BookingConfirmationPopup';
+import TrackingResultPopup from './components/TrackingResultPopup';
+import NotificationContainer from './components/NotificationContainer';
+import LoadingSpinner from './components/LoadingSpinner';
+import { useApp } from './context/AppContext';
+import { useAuth } from './context/AuthContext';
 import './styles/App.css';
 
 const AppContent = () => {

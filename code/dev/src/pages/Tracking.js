@@ -1,7 +1,7 @@
 import React, { useState, useContext } from 'react';
-import { AppContext } from '../context/app_context';
-import { AuthContext } from '../context/auth_context';
-import LoadingSpinner from '../components/loading_spinner';
+import { AppContext } from '../context/AppContext';
+import { AuthContext } from '../context/AuthContext';
+import LoadingSpinner from '../components/LoadingSpinner';
 import TrackingResultPopup from '../components/tracking_result_popup';
 
 const Tracking = () => {

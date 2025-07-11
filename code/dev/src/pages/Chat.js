@@ -1,9 +1,9 @@
 // src/pages/Chat.js
 import React, { useState, useEffect, useRef } from 'react';
-import { useAuth } from '../context/auth_context';
+import { useAuth } from '../context/AuthContext';
 import { useChat } from '../context/ChatContext';
-import { useApp } from '../context/app_context';
-import LoadingSpinner from '../components/loading_spinner';
+import { useApp } from '../context/AppContext';
+import LoadingSpinner from '../components/LoadingSpinner';
 
 const Chat = () => {
   const { user } = useAuth();
