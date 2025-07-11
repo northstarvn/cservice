@@ -30,6 +30,11 @@ const AppContent = () => {
     language 
   } = useApp();
   const { loading: authLoading } = useAuth();
+  
+  if (!useApp || !useAuth) {
+    console.error('Missing required context providers');
+    return <div>Application configuration error</div>;
+  }
 
   if (authLoading) {
     return (

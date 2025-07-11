@@ -50,7 +50,9 @@ export const POPUP_IDS = {
 export const SERVICE_TYPES = {
   CONSULTING: 'Consulting',
   DELIVERY: 'Delivery',
-  MEETING: 'Meeting'
+  MEETING: 'Meeting',
+  SUPPORT: 'Support',
+  TRAINING: 'Training'
 };
 
 // Languages
@@ -151,14 +153,18 @@ export const STATUS_MESSAGES = {
   IDLE: 'idle'
 };
 
-// Default Values
+// ✅ UPDATED: Client-side focused defaults
 export const DEFAULTS = {
   LANGUAGE: LANGUAGES.EN,
   MAX_HISTORY: 100,
-  RETENTION_PERIOD: '30 days',
+  MAX_CHAT_HISTORY_DISPLAY: 50,
   SESSION_TIMEOUT: 3600000, // 1 hour in milliseconds
-  VECTOR_DIMENSION: 128,
-  RATE_LIMIT: 100 // requests per minute
+  AUTO_SAVE_INTERVAL: 30000,
+  DEBOUNCE_DELAY: 300,
+  ANIMATION_DURATION: 200,
+  RETRY_ATTEMPTS: 3,
+  CACHE_DURATION: 300000,
+  NOTIFICATION_DURATION: 5000
 };
 
 // Validation Rules
@@ -168,15 +174,21 @@ export const VALIDATION = {
   MAX_PROJECT_NAME_LENGTH: 100,
   MAX_REQUIREMENTS_LENGTH: 2000,
   EMAIL_REGEX: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
-  TRACKING_ID_REGEX: /^[A-Z0-9]{6,20}$/
+  TRACKING_ID_REGEX: /^[A-Z0-9]{6,20}$/,
+  PHONE_REGEX: /^[\+]?[1-9][\d]{0,15}$/,
+  USERNAME_REGEX: /^[a-zA-Z0-9_]{3,20}$/
 };
 
-// Time Formats
+// ✅ UPDATED: Client-side time formats
 export const TIME_FORMATS = {
-  DATETIME: 'YYYY-MM-DD HH:mm:ss',
-  DATE: 'YYYY-MM-DD',
-  TIME: 'HH:mm',
-  TIMESTAMP: 'timestamp'
+  DISPLAY_DATE: 'MMM DD, YYYY',
+  DISPLAY_TIME: 'h:mm A',
+  DISPLAY_DATETIME: 'MMM DD, YYYY h:mm A',
+  INPUT_DATE: 'YYYY-MM-DD',
+  INPUT_TIME: 'HH:mm',
+  INPUT_DATETIME: 'YYYY-MM-DDTHH:mm',
+  ISO_STRING: 'toISOString',
+  RELATIVE: 'relative'
 };
 
 // CSS Classes
@@ -192,24 +204,48 @@ export const CSS_CLASSES = {
   VISIBLE: 'visible'
 };
 
-// Local Storage Keys
+// ✅ UPDATED: Enhanced storage configuration
 export const STORAGE_KEYS = {
-  USER_PREFERENCES: 'user_preferences',
-  CHAT_HISTORY: 'chat_history',
-  CURRENT_LANGUAGE: 'current_language',
-  USER_PROFILE: 'user_profile',
-  SESSION_DATA: 'session_data'
+  // User Data
+  USER_PREFERENCES: 'cservice_user_preferences',
+  USER_PROFILE: 'cservice_user_profile',
+  USER_SETTINGS: 'cservice_user_settings',
+  
+  // Session Management
+  SESSION_DATA: 'cservice_session_data',
+  AUTH_TOKEN: 'cservice_auth_token',
+  REFRESH_TOKEN: 'cservice_refresh_token',
+  
+  // Application State
+  CURRENT_LANGUAGE: 'cservice_current_language',
+  THEME_PREFERENCE: 'cservice_theme_preference',
+  CHAT_HISTORY: 'cservice_chat_history',
+  FORM_DRAFTS: 'cservice_form_drafts',
+  
+  // Performance & Analytics
+  CACHE_DATA: 'cservice_cache_data',
+  ANALYTICS_CONSENT: 'cservice_analytics_consent',
+  PERFORMANCE_METRICS: 'cservice_performance_metrics',
+  
+  // Feature States
+  FEATURE_TUTORIALS: 'cservice_feature_tutorials',
+  ACCESSIBILITY_SETTINGS: 'cservice_accessibility_settings'
 };
 
-// API Endpoints (placeholders)
+// ✅ UPDATED: Environment-aware API endpoints
 export const API_ENDPOINTS = {
+  BASE_URL: typeof window !== 'undefined' && window.location.hostname === 'localhost' 
+    ? 'http://localhost:3001' 
+    : '',
   CHAT: '/api/chat',
   BOOKING: '/api/booking',
   TRACKING: '/api/tracking',
   PROFILE: '/api/profile',
   PLANNING: '/api/planning',
   AUTH: '/api/auth',
-  ANALYTICS: '/api/analytics'
+  ANALYTICS: '/api/analytics',
+  HEALTH: '/api/health',
+  VERSION: '/api/version'
 };
 
 // Error Messages
@@ -233,4 +269,89 @@ export const SUCCESS_MESSAGES = {
   PLAN_SUBMITTED: 'Project plan submitted successfully.',
   LANGUAGE_SWITCHED: 'Language changed successfully.',
   LOGOUT_SUCCESS: 'Logged out successfully.'
+};
+
+// ✅ NEW: Client-side API Configuration
+export const CLIENT_API_CONFIG = {
+  TIMEOUT: 30000,
+  RETRY_ATTEMPTS: 3,
+  RETRY_DELAY: 1000,
+  CONCURRENT_REQUESTS: 5,
+  CACHE_STRATEGY: 'memory',
+  OFFLINE_SUPPORT: true
+};
+
+// ✅ NEW: Client-side Performance Settings
+export const PERFORMANCE_CONFIG = {
+  LAZY_LOADING: true,
+  VIRTUAL_SCROLLING_THRESHOLD: 100,
+  IMAGE_OPTIMIZATION: true,
+  BUNDLE_SPLITTING: true,
+  PRELOAD_CRITICAL_RESOURCES: true
+};
+
+// ✅ NEW: Client-side Security Settings
+export const CLIENT_SECURITY = {
+  SANITIZE_HTML: true,
+  VALIDATE_FORMS: true,
+  SECURE_STORAGE: true,
+  AUTO_LOGOUT_IDLE: 1800000,
+  PREVENT_XSS: true,
+  CONTENT_SECURITY_POLICY: true
+};
+
+// ✅ NEW: Browser Compatibility
+export const BROWSER_SUPPORT = {
+  MIN_CHROME_VERSION: 80,
+  MIN_FIREFOX_VERSION: 75,
+  MIN_SAFARI_VERSION: 13,
+  MIN_EDGE_VERSION: 80,
+  POLYFILLS_REQUIRED: ['fetch', 'IntersectionObserver']
+};
+
+// ✅ NEW: Client-side Feature Flags
+export const FEATURE_FLAGS = {
+  VOICE_RECOGNITION: true,
+  OFFLINE_MODE: true,
+  PUSH_NOTIFICATIONS: true,
+  DARK_MODE: true,
+  ANALYTICS_TRACKING: true,
+  A11Y_ENHANCED: true,
+  PWA_SUPPORT: true
+};
+
+// ✅ NEW: Enhanced Error Handling
+export const NETWORK_ERROR_MESSAGES = {
+  OFFLINE: 'You are currently offline. Please check your connection.',
+  TIMEOUT: 'Request timed out. Please try again.',
+  RATE_LIMITED: 'Too many requests. Please wait and try again.',
+  CORS_ERROR: 'Access blocked by security policy.',
+  DNS_ERROR: 'Cannot connect to server. Please check your connection.',
+  SSL_ERROR: 'Security certificate error. Please check your connection.'
+};
+
+export const VALIDATION_ERROR_MESSAGES = {
+  REQUIRED_FIELD: 'This field is required.',
+  INVALID_EMAIL: 'Please enter a valid email address.',
+  PASSWORD_TOO_SHORT: 'Password must be at least 6 characters long.',
+  PASSWORD_WEAK: 'Password must contain uppercase, lowercase, number, and special character.',
+  INVALID_PHONE: 'Please enter a valid phone number.',
+  INVALID_DATE: 'Please enter a valid date.',
+  INVALID_TIME: 'Please enter a valid time.',
+  FILE_TOO_LARGE: 'File size must be less than 5MB.',
+  INVALID_FILE_TYPE: 'File type not supported.'
+};
+
+// ✅ NEW: Storage Configuration
+export const STORAGE_CONFIG = {
+  PREFIX: 'cservice_',
+  ENCRYPTION_ENABLED: true,
+  COMPRESSION_ENABLED: true,
+  MAX_STORAGE_SIZE: 5 * 1024 * 1024,
+  CLEANUP_INTERVAL: 24 * 60 * 60 * 1000,
+  STORAGE_TYPES: {
+    PERSISTENT: 'localStorage',
+    SESSION: 'sessionStorage',
+    MEMORY: 'memoryStorage'
+  }
 };

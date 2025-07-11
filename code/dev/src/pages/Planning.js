@@ -24,20 +24,20 @@ const Planning = () => {
     }));
   };
 
-  //???
-  const validation = validatePlanningForm({
-    project_name: formData.projectName,
-    project_requirements: formData.projectRequirements
-  });
-
-  if (!validation.isValid) {
-    const errorMessages = Object.values(validation.errors).flat().join(', ');
-    showNotification(errorMessages, 'error');
-    return;
-  }///
-
   const handleSubmitPlan = async (e) => {
     e.preventDefault();
+    //???
+    const validation = validatePlanningForm({
+      project_name: formData.projectName,
+      project_requirements: formData.projectRequirements
+    });
+
+    if (!validation.isValid) {
+      const errorMessages = Object.values(validation.errors).flat().join(', ');
+      showNotification(errorMessages, 'error');
+      return;
+    }///
+
     if (!formData.projectName || !formData.projectRequirements) {
       showNotification('Please fill in all required fields', 'error');
       return;
@@ -74,33 +74,37 @@ const Planning = () => {
 
     setIsGenerating(true);
     try {
-      // Generate vector for context
-      const contextVector = await vectorSearch.generateVector(formData.projectName + ' ' + formData.projectRequirements);
+      // Use client-side suggestion generation instead of server API
+      const suggestions = await generateClientSuggestions(
+        formData.projectName,
+        formData.projectRequirements
+      );
       
-      // Search for similar projects
-      const similarProjects = await vectorSearch.search(contextVector, 'projects');
-      
-      const response = await api.post('/api/ai/suggest-requirements', {
-        project_name: formData.projectName,
-        user_input: formData.projectRequirements,
-        context_data: {
-          vector: contextVector,
-          similar_projects: similarProjects
-        }
-      });
-
-      if (response.success) {
-        setAiSuggestions(response.data.suggestions);
-        showNotification('AI suggestions generated!', 'success');
-      } else {
-        showNotification('Failed to generate AI suggestions', 'error');
-      }
+      setAiSuggestions(suggestions);
+      showNotification('AI suggestions generated!', 'success');
     } catch (error) {
-      console.error('Error generating AI suggestions:', error);
-      showNotification('Error generating AI suggestions', 'error');
+      console.error('Error generating suggestions:', error);
+      showNotification('Error generating suggestions', 'error');
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  // Add client-side suggestion function:
+  const generateClientSuggestions = async (projectName, requirements) => {
+    // Simple client-side suggestion logic
+    const suggestionTemplates = {
+      'web': ['User authentication', 'Database design', 'API endpoints', 'Frontend framework'],
+      'mobile': ['Cross-platform compatibility', 'User interface design', 'Push notifications', 'Offline functionality'],
+      'ai': ['Data preprocessing', 'Model training', 'Performance optimization', 'Deployment strategy'],
+      'default': ['Requirements analysis', 'Architecture design', 'Testing strategy', 'Documentation']
+    };
+    
+    const projectType = projectName.toLowerCase().includes('web') ? 'web' :
+                      projectName.toLowerCase().includes('mobile') ? 'mobile' :
+                      projectName.toLowerCase().includes('ai') ? 'ai' : 'default';
+    
+    return suggestionTemplates[projectType] || suggestionTemplates.default;
   };
 
   const applySuggestion = (suggestion) => {

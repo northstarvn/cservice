@@ -24,26 +24,32 @@ class VectorSearchEngine {
 
   // Generate vector embeddings for text
   async generateEmbedding(text, language = 'en') {
-    if (!text || typeof text !== 'string') {
-      throw new VectorSearchError('Invalid text input for embedding generation', 'INVALID_INPUT');
+    // Client-side simple text vectorization for demo purposes
+    const words = text.toLowerCase().split(/\s+/);
+    const vector = new Array(128).fill(0);
+    
+    // Simple hash-based vectorization
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      const hash = this.simpleHash(word);
+      vector[hash % 128] += 1;
     }
-
-    const cacheKey = `embedding_${text.slice(0, 50)}_${language}`;
-    const cached = this.getCachedResult(cacheKey);
-    if (cached) return cached;
-
-    try {
-      const response = await api.chat.sendMessage(null, text, language);
-      const embedding = response.vector || this.generateMockEmbedding(text);
-      
-      this.setCachedResult(cacheKey, embedding);
-      return embedding;
-    } catch (error) {
-      console.warn('Failed to generate embedding via API, using mock:', error);
-      return this.generateMockEmbedding(text);
-    }
+    
+    // Normalize vector
+    const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
+    return magnitude > 0 ? vector.map(val => val / magnitude) : vector;
   }
 
+  // Add simple hash function for client-side use:
+  simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash);
+  }
   // Mock embedding generation for development/fallback
   generateMockEmbedding(text) {
     const hash = this.simpleHash(text);

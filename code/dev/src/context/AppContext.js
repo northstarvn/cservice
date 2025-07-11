@@ -1,6 +1,7 @@
 // src/context/AppContext.js
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useAuth } from './AuthContext';
+import { i18n } from '../utils/I18n';  // Import the class
 
 const AppContext = createContext();
 
@@ -233,6 +234,7 @@ export const AppProvider = ({ children }) => {
     showTrackingResult,
     trackingData,
     bookingData,
+    translations: {}, // Add this line - even if empty to prevent undefined
     switchLanguage,
     toggleTheme,
     trackUserBehavior,
