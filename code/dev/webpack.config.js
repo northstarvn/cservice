@@ -34,4 +34,11 @@ module.exports = {
     port: 3000,
   },
   mode: 'development',
+    devServer: {
+    static: './dist',
+    hot: true,
+    open: false, // Disable auto-browser open
+    // Optional: Explicitly set watch files
+    watchFiles: ['src/**/*']
+  },
 };
