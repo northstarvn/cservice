@@ -20,8 +20,6 @@ import { useApp } from './context/AppContext';
 import { useAuth } from './context/AuthContext';
 import './styles/App.css';
 
-const appContext = useApp();
-const authContext = useAuth();
 const AppContent = () => {
   const { 
     loading, 
@@ -31,9 +29,12 @@ const AppContent = () => {
     theme,
     language 
   } = useApp();
-  const { loading: authLoading } = authContext;
+  const { loading: authLoading } = useAuth();
 
-  if (!appContext || !authContext) {
+  const appContextValue = useApp();
+  const authContextValue = useAuth();
+  
+  if (!appContextValue || !authContextValue) {
     console.error('Missing required context providers');
     return <div>Application configuration error</div>;
   }
