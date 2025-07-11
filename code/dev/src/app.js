@@ -31,15 +31,12 @@ const AppContent = () => {
   } = useApp();
   const { loading: authLoading } = useAuth();
 
-  const appContextValue = useApp();
-  const authContextValue = useAuth();
-  
-  if (!appContextValue || !authContextValue) {
+  if (!loading && !authLoading && (!theme || !language)) {
     console.error('Missing required context providers');
     return <div>Application configuration error</div>;
   }
 
-  if (authLoading) {
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-600 to-purple-700">
         <LoadingSpinner size="large" color="white" />
