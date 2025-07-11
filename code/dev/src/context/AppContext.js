@@ -8,6 +8,7 @@ const AppContext = createContext();
 export const useApp = () => {
   const context = useContext(AppContext);
   if (!context) {
+    console.error('useApp must be used within an AppProvider');
     throw new Error('useApp must be used within an AppProvider');
   }
   return context;
@@ -31,6 +32,7 @@ export const AppProvider = ({ children }) => {
     chatMessages: 0
   });
 
+  const [translations, setTranslations] = useState({});
   // Detect mobile device
   useEffect(() => {
     const checkMobile = () => {
@@ -57,12 +59,26 @@ export const AppProvider = ({ children }) => {
 
   const switchLanguage = (newLanguage) => {
     setLanguage(newLanguage);
+    // Load translations for the new language
+    loadTranslations(newLanguage);
     trackUserBehavior('language_switch', { from: language, to: newLanguage });
     
     // Update user profile if logged in
     if (user) {
-      // This would typically update the backend
       console.log('Updating user language preference to:', newLanguage);
+    }
+  };
+
+  const loadTranslations = async (lang) => {
+    try {
+      // This would typically load from an API or import language files
+      const mockTranslations = {
+        en: { welcome: 'Welcome', loading: 'Loading...' },
+        es: { welcome: 'Bienvenido', loading: 'Cargando...' }
+      };
+      setTranslations(mockTranslations[lang] || mockTranslations.en);
+    } catch (error) {
+      console.error('Error loading translations:', error);
     }
   };
 
@@ -234,7 +250,7 @@ export const AppProvider = ({ children }) => {
     showTrackingResult,
     trackingData,
     bookingData,
-    translations: {}, // Add this line - even if empty to prevent undefined
+    translations,
     switchLanguage,
     toggleTheme,
     trackUserBehavior,

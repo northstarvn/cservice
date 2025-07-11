@@ -7,11 +7,11 @@ const ChatContext = createContext();
 export const useChat = () => {
   const context = useContext(ChatContext);
   if (!context) {
+    console.error('useChat must be used within a ChatProvider');
     throw new Error('useChat must be used within a ChatProvider');
   }
   return context;
 };
-
 export const ChatProvider = ({ children }) => {
   const { user } = useAuth();
   const [messages, setMessages] = useState([]);
