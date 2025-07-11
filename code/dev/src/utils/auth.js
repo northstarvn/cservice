@@ -1,13 +1,27 @@
-// /utils/auth.js
+// /utils/auth.js This code file is suspect of server side????????
 /**
  * Authentication and security utilities
  * Handles JWT tokens, session management, and security operations
  */
 
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
-import crypto from 'crypto';
+// import jwt from 'jsonwebtoken'; serverside code only
+// import bcrypt from 'bcryptjs';
+// import crypto from 'crypto';
 
+import jwtDecode from 'jwt-decode';
+import bcrypt from 'bcrypt-js';
+import sha256 from 'js-sha256';
+
+// Random number generation
+const randomBytes = crypto.getRandomValues(new Uint8Array(16));
+
+// Hashing
+const sha256 = async (message) => {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+};
 // Authentication configuration
 const AUTH_CONFIG = {
   method: 'JWT',
@@ -136,7 +150,7 @@ export const encryptData = (data) => {
   try {
     const key = crypto.scryptSync(JWT_SECRET, 'salt', AUTH_CONFIG.encryption.keyLength);
     const iv = crypto.randomBytes(AUTH_CONFIG.encryption.ivLength);
-    const cipher = crypto.createCipher(AUTH_CONFIG.encryption.algorithm, key);
+    const cipher = crypto.createCipherGCM(AUTH_CONFIG.encryption.algorithm, key, iv);
     
     let encrypted = cipher.update(JSON.stringify(data), 'utf8', 'hex');
     encrypted += cipher.final('hex');
@@ -160,7 +174,7 @@ export const encryptData = (data) => {
 export const decryptData = (encryptedData) => {
   try {
     const key = crypto.scryptSync(JWT_SECRET, 'salt', AUTH_CONFIG.encryption.keyLength);
-    const decipher = crypto.createDecipher(AUTH_CONFIG.encryption.algorithm, key);
+    const decipher = crypto.createDecipherGCM(AUTH_CONFIG.encryption.algorithm, key, Buffer.from(encryptedData.iv, 'hex'));
     
     decipher.setAuthTag(Buffer.from(encryptedData.authTag, 'hex'));
     

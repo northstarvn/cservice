@@ -3,7 +3,8 @@ import { AuthContext } from '../context/AuthContext';
 import { AppContext } from '../context/AppContext';
 import { api } from '../utils/api';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { vectorSearch } from '../utils/vectorSearch';
+import { vectorSearch } from '../utils/VectorSearchEngine';
+import { validatePlanningForm } from '../utils/validation';
 
 const Planning = () => {
   const { user } = useContext(AuthContext);
@@ -22,6 +23,18 @@ const Planning = () => {
       [name]: value
     }));
   };
+
+  //???
+  const validation = validatePlanningForm({
+    project_name: formData.projectName,
+    project_requirements: formData.projectRequirements
+  });
+
+  if (!validation.isValid) {
+    const errorMessages = Object.values(validation.errors).flat().join(', ');
+    showNotification(errorMessages, 'error');
+    return;
+  }///
 
   const handleSubmitPlan = async (e) => {
     e.preventDefault();

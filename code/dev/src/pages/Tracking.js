@@ -2,7 +2,7 @@ import React, { useState, useContext } from 'react';
 import { AppContext } from '../context/AppContext';
 import { AuthContext } from '../context/AuthContext';
 import LoadingSpinner from '../components/LoadingSpinner';
-import TrackingResultPopup from '../components/tracking_result_popup';
+import TrackingResultPopup from '../components/TrackingResultPopup';
 
 const Tracking = () => {
   const { showNotification, isLoading, setIsLoading } = useContext(AppContext);
