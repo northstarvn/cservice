@@ -6,6 +6,7 @@ module.exports = {
     "node": true,
     "mocha": true
   },
+  plugins: ['react-hooks'],
   "rules": {
     "import/prefer-default-export": 0,
     "max-len": [
@@ -34,6 +35,8 @@ module.exports = {
         ]
       }
     ],
+    'react-hooks/rules-of-hooks': 'error',
+    'react-hooks/exhaustive-deps': 'warn',
     "object-curly-newline": 0,
     "react/jsx-filename-extension": 0,
     "react/jsx-one-expression-per-line": 0,

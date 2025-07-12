@@ -7,7 +7,10 @@ module.exports = {
     path: path.resolve(__dirname, 'dist'),
     filename: 'bundle.js',
     clean: true,
+    devtoolModuleFilenameTemplate: (info) =>
+      `webpack://${info.resourcePath}?${info.loaders}`,
   },
+  devtool: 'source-map',
   module: {
     rules: [
       {

@@ -3,7 +3,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useAuth } from './AuthContext';
 import { i18n } from '../utils/I18n';  // Import the class
 
-const AppContext = createContext();
+export const AppContext = createContext();
 
 export const useApp = () => {
   const context = useContext(AppContext);
