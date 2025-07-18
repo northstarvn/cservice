@@ -222,7 +222,7 @@ const Chat = () => {
       </div>
 
       {/* AI Suggestions Panel */}
-      {suggestions.length > 0 && (
+      {suggestions?.length > 0 && (
         <div className="bg-yellow-50 border-t border-yellow-200 p-3">
           <div className="flex items-center space-x-2 mb-2">
             <span className="text-yellow-600 text-sm font-medium">💡 Suggestions:</span>
