@@ -1,0 +1,15 @@
+import uvicorn
+from fastapi import FastAPI
+from app.routers import users, bookings
+from app.db import Base, engine
+
+# Create all DB tables (in production use Alembic migrations)
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="CService Booking Backend")
+
+app.include_router(users.router, prefix="/users", tags=["users"])
+app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
