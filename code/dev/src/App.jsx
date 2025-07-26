@@ -24,12 +24,12 @@ import { useNavigate } from 'react-router-dom';
 import { ROUTES } from './routes';
 
 export function LoginRedirect() {
-  const { openLoginPopup } = useApp(); // Remove navigate from here
-  const navigate = useNavigate(); // Use React Router's useNavigate
+  const { openLoginPopup } = useApp();
+  const navigate = useNavigate();
 
   useEffect(() => {
     openLoginPopup();
-  }, [openLoginPopup, navigate]);
+  }, [openLoginPopup]); // Remove 'navigate' from dependency array
 
   return null;
 }

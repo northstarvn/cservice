@@ -1,5 +1,5 @@
 // src/context/AppContext.js
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { i18n } from '../utils/I18n';  // Import the class
 
@@ -88,7 +88,8 @@ export const AppProvider = ({ children }) => {
     trackUserBehavior('theme_toggle', { theme: newTheme });
   };
 
-  const trackUserBehavior = (eventType, eventData = {}) => {
+ // Wrap trackUserBehavior in useCallback to prevent infinite re-renders
+  const trackUserBehavior = useCallback((eventType, eventData = {}) => {
     const event = {
       id: 'event_' + Date.now(),
       userId: user?.id || 'anonymous',
@@ -110,7 +111,12 @@ export const AppProvider = ({ children }) => {
 
     // In real app, send to analytics service
     console.log('Analytics Event:', event);
-  };
+  }, [user?.id, language]); // Add dependencies
+
+  // Replace the useEffect at line 56-58 with this:
+  useEffect(() => {
+    trackUserBehavior('page_view', { page: window.location.pathname });
+  }, [trackUserBehavior]); // Add trackUserBehavior as dependency
 
   const submitBooking = async (bookingDetails) => {
     try {
