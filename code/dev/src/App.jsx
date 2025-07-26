@@ -20,20 +20,20 @@ import { useApp } from './context/AppContext';
 import { useAuth } from './context/AuthContext';
 import './styles/App.css';
 import { useEffect } from 'react';
-import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ROUTES } from './routes';
 
 export function LoginRedirect() {
-  const { openLoginPopup, navigate } = useApp();
+  const { openLoginPopup } = useApp(); // Remove navigate from here
+  const navigate = useNavigate(); // Use React Router's useNavigate
 
   useEffect(() => {
     openLoginPopup();
-    navigate(ROUTES.HOME); // Redirect to home after opening the popup
   }, [openLoginPopup, navigate]);
 
   return null;
 }
+
 const AppContent = () => {
   const { 
     loading, 
@@ -41,7 +41,8 @@ const AppContent = () => {
     showBookingConfirmation, 
     showTrackingResult,
     theme,
-    language 
+    language,
+    closePopup
   } = useApp();
   const { loading: authLoading } = useAuth();
 
@@ -61,24 +62,21 @@ const AppContent = () => {
   return (
     <div className={`min-h-screen ${theme === 'dark' ? 'dark' : ''}`}>
       <div className="bg-gray-50 dark:bg-gray-900 min-h-screen">
-        <Router>
-          <Navbar />
-          <main className="pt-16">
-            <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/chat" element={<Chat />} />
-              <Route path="/booking" element={<Booking />} />
-              <Route path="/tracking" element={<Tracking />} />
-              <Route path="/profile" element={<Profile />} />
-              <Route path="/planning" element={<Planning />} />
-              {/* <Route path="/login" element={<Login />} /> */}
-              <Route path="/login" element={<LoginRedirect />} />
-            </Routes>
-          </main>
-        </Router>
+        <Navbar />
+        <main className="pt-16">
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/chat" element={<Chat />} />
+            <Route path="/booking" element={<Booking />} />
+            <Route path="/tracking" element={<Tracking />} />
+            <Route path="/profile" element={<Profile />} />
+            <Route path="/planning" element={<Planning />} />
+            <Route path="/login" element={<LoginRedirect />} />
+          </Routes>
+        </main>
 
         {/* Popups */}
-        {showLoginPopup && <LoginPopup />}
+        {showLoginPopup && <LoginPopup isOpen={showLoginPopup} onClose={closePopup} />}
         {showBookingConfirmation && <BookingConfirmationPopup />}
         {showTrackingResult && <TrackingResultPopup />}
 
@@ -100,17 +98,13 @@ const AppContent = () => {
 };
 
 function App() {
-  const navigate = useNavigate();
-
-  const handleClick = useCallback(() => {
-    navigate(ROUTES.LOGIN);
-  }, [navigate]);
-
   return (
     <AuthProvider>
       <AppProvider>
         <ChatProvider>
-          <AppContent />
+          <Router>
+            <AppContent />
+          </Router>
         </ChatProvider>
       </AppProvider>
     </AuthProvider>

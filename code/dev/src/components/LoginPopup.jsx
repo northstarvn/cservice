@@ -1,7 +1,7 @@
 import React, { useState, useContext } from 'react';
 import { AuthContext } from '../context/AuthContext';
 import { AppContext } from '../context/AppContext';
-import { api } from '../utils/api';
+// Remove: import { api } from '../utils/api';
 
 const LoginPopup = ({ isOpen, onClose }) => {
   const { login } = useContext(AuthContext);
@@ -30,18 +30,15 @@ const LoginPopup = ({ isOpen, onClose }) => {
 
     setIsLoading(true);
     try {
-      const response = await api.post('/api/auth/login', {
-        username: formData.username,
-        password: formData.password
-      });
+      // Use AuthContext login directly instead of API call
+      const response = await login(formData.username, formData.password);
 
       if (response.success) {
-        login(response.data.user, response.data.token);
         showNotification('Login successful!', 'success');
         onClose();
         setFormData({ username: '', password: '' });
       } else {
-        showNotification(response.message || 'Login failed', 'error');
+        showNotification(response.error || 'Login failed', 'error');
       }
     } catch (error) {
       console.error('Login error:', error);
@@ -51,6 +48,7 @@ const LoginPopup = ({ isOpen, onClose }) => {
     }
   };
 
+  // ... rest of the component remains the same
   const handleClose = () => {
     setFormData({ username: '', password: '' });
     onClose();
