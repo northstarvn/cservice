@@ -19,8 +19,7 @@ class UserCreate(UserBase):
 
 class UserOut(UserBase):
     id: int
-    class Config:
-        orm_mode = True
+    model_config = {"from_attributes": True}
 
 class Token(BaseModel):
     access_token: str
@@ -49,5 +48,4 @@ class BookingOut(BookingBase):
     created_at: datetime
     updated_at: datetime
     user_id: int
-    class Config:
-        orm_mode = True
+    model_config = {"from_attributes": True}

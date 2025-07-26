@@ -209,7 +209,6 @@ export const AppProvider = ({ children }) => {
     setShowLoginPopup(true);
     trackUserBehavior('login_popup_opened');
   };
-
   // Generate AI suggestions for project planning
   const generateAISuggestions = async (projectName, userInput) => {
     try {

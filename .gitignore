@@ -4,3 +4,6 @@ dist.zip
 yarn.lock
 package-lock.json
 *.zip
+.env
+*.pyc
+*.txt

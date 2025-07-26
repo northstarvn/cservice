@@ -19,7 +19,21 @@ import LoadingSpinner from './components/LoadingSpinner';
 import { useApp } from './context/AppContext';
 import { useAuth } from './context/AuthContext';
 import './styles/App.css';
+import { useEffect } from 'react';
+import { useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { ROUTES } from './routes';
 
+export function LoginRedirect() {
+  const { openLoginPopup, navigate } = useApp();
+
+  useEffect(() => {
+    openLoginPopup();
+    navigate(ROUTES.HOME); // Redirect to home after opening the popup
+  }, [openLoginPopup, navigate]);
+
+  return null;
+}
 const AppContent = () => {
   const { 
     loading, 
@@ -57,6 +71,8 @@ const AppContent = () => {
               <Route path="/tracking" element={<Tracking />} />
               <Route path="/profile" element={<Profile />} />
               <Route path="/planning" element={<Planning />} />
+              {/* <Route path="/login" element={<Login />} /> */}
+              <Route path="/login" element={<LoginRedirect />} />
             </Routes>
           </main>
         </Router>
@@ -84,6 +100,12 @@ const AppContent = () => {
 };
 
 function App() {
+  const navigate = useNavigate();
+
+  const handleClick = useCallback(() => {
+    navigate(ROUTES.LOGIN);
+  }, [navigate]);
+
   return (
     <AuthProvider>
       <AppProvider>
