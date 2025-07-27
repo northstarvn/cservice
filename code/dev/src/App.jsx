@@ -1,5 +1,5 @@
-// src/App.js
 import React from 'react';
+import ErrorBoundary from './components/ErrorBoundary';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { AppProvider } from './context/AppContext';
@@ -108,16 +108,22 @@ const AppContent = () => {
 
 function App() {
   return (
-    <AuthProvider>
-      <AppProvider>
-        <ChatProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <AppProvider>
           <Router>
-            <AppContent />
+            <div className="App">
+              <Routes>
+                <Route path="/bookings" element={<MyBookings />} />
+                {/* other routes */}
+              </Routes>
+            </div>
           </Router>
-        </ChatProvider>
-      </AppProvider>
-    </AuthProvider>
+        </AppProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 
 export default App;
+

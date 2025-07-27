@@ -3,6 +3,15 @@ from datetime import datetime
 from typing import List, Optional
 import enum
 
+class PaginatedBookings(BaseModel):
+    items: List[BookingOut]
+    total: int
+    page: int
+    per_page: int
+    pages: int
+
+    class Config:
+        from_attributes = True
 class BookingStatus(str, enum.Enum):
     pending = "pending"
     confirmed = "confirmed"
