@@ -34,7 +34,9 @@ const MyBookings = () => {
       setBookings(userBookings);
     } catch (error) {
       console.error('Error loading bookings:', error);
-      showNotification('Error loading bookings', 'error');
+      if (showNotification) {
+        showNotification('Error loading bookings', 'error');
+      }
     } finally {
       setLoading(false);
     }
@@ -67,9 +69,14 @@ const MyBookings = () => {
       );
       localStorage.setItem('userBookings', JSON.stringify(updated));
       
-      showNotification('Booking cancelled successfully', 'success');
+      if (showNotification) {
+        showNotification('Booking cancelled successfully', 'success');
+      }
     } catch (error) {
-      showNotification('Error cancelling booking', 'error');
+      console.error('Error cancelling booking:', error);
+      if (showNotification) {
+        showNotification('Error cancelling booking', 'error');
+      }
     }
   };
 
