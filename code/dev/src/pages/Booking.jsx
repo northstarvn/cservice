@@ -6,8 +6,8 @@ import LoadingSpinner from '../components/LoadingSpinner';
 
 const Booking = () => {
   const { user } = useAuth();
-  const { showNotification, showBookingConfirmation } = useApp();
-  
+  const { addNotification, submitBooking } = useApp();
+
   const [formData, setFormData] = useState({
     service_type: '',
     date: '',
@@ -101,8 +101,11 @@ const Booking = () => {
       existingBookings.push(bookingData);
       localStorage.setItem('bookings', JSON.stringify(existingBookings));
       
-      showBookingConfirmation(bookingData);
-      
+      const result = await submitBooking(formData);
+      if (result.success) {
+        addNotification('Booking confirmed successfully!', 'success');
+      }
+
       // Reset form
       setFormData({
         service_type: '',
@@ -111,11 +114,11 @@ const Booking = () => {
         notes: ''
       });
       
-      showNotification('Booking submitted successfully!', 'success');
+      addNotification('Booking submitted successfully!', 'success');
       
     } catch (error) {
       console.error('Booking submission error:', error);
-      showNotification('Failed to submit booking. Please try again.', 'error');
+      addNotification('Failed to submit booking. Please try again.', 'error');
     } finally {
       setIsSubmitting(false);
     }

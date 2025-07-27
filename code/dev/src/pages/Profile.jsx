@@ -4,7 +4,7 @@ import { AuthContext } from '../context/AuthContext';
 import LoadingSpinner from '../components/LoadingSpinner';
 
 const Profile = () => {
-  const { showNotification, isLoading, setIsLoading, currentLanguage, switchLanguage } = useContext(AppContext);
+  const { addNotification, isLoading, setIsLoading, currentLanguage, switchLanguage } = useContext(AppContext);
   const { user, updateUserProfile, logout } = useContext(AuthContext);
   
   const [formData, setFormData] = useState({
@@ -47,19 +47,19 @@ const Profile = () => {
     e.preventDefault();
     
     if (!formData.full_name.trim()) {
-      showNotification('Full name is required', 'error');
+      addNotification('Full name is required', 'error');
       return;
     }
     
     if (!formData.email.trim()) {
-      showNotification('Email is required', 'error');
+      addNotification('Email is required', 'error');
       return;
     }
 
     // Email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(formData.email)) {
-      showNotification('Please enter a valid email address', 'error');
+      addNotification('Please enter a valid email address', 'error');
       return;
     }
 
@@ -78,11 +78,11 @@ const Profile = () => {
       
       setOriginalData(formData);
       setIsEditing(false);
-      showNotification('Profile updated successfully', 'success');
+      addNotification('Profile updated successfully', 'success');
       
     } catch (error) {
       console.error('Profile update error:', error);
-      showNotification('Failed to update profile', 'error');
+      addNotification('Failed to update profile', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -97,10 +97,10 @@ const Profile = () => {
     if (window.confirm('Are you sure you want to logout?')) {
       try {
         await logout();
-        showNotification('Logged out successfully', 'success');
+        addNotification('Logged out successfully', 'success');
       } catch (error) {
         console.error('Logout error:', error);
-        showNotification('Logout failed', 'error');
+        addNotification('Logout failed', 'error');
       }
     }
   };

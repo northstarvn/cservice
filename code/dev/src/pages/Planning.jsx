@@ -8,7 +8,7 @@ import { validatePlanningForm } from '../utils/validation';
 
 const Planning = () => {
   const { user } = useContext(AuthContext);
-  const { showNotification, isLoading, setIsLoading } = useContext(AppContext);
+  const { addNotification, isLoading, setIsLoading } = useContext(AppContext);
   const [formData, setFormData] = useState({
     projectName: '',
     projectRequirements: ''
@@ -34,12 +34,12 @@ const Planning = () => {
 
     if (!validation.isValid) {
       const errorMessages = Object.values(validation.errors).flat().join(', ');
-      showNotification(errorMessages, 'error');
+      addNotification(errorMessages, 'error');
       return;
     }///
 
     if (!formData.projectName || !formData.projectRequirements) {
-      showNotification('Please fill in all required fields', 'error');
+      addNotification('Please fill in all required fields', 'error');
       return;
     }
 
@@ -52,15 +52,15 @@ const Planning = () => {
       });
 
       if (response.success) {
-        showNotification('Project plan submitted successfully!', 'success');
+        addNotification('Project plan submitted successfully!', 'success');
         setFormData({ projectName: '', projectRequirements: '' });
         setAiSuggestions([]);
       } else {
-        showNotification('Failed to submit project plan', 'error');
+        addNotification('Failed to submit project plan', 'error');
       }
     } catch (error) {
       console.error('Error submitting project:', error);
-      showNotification('Error submitting project plan', 'error');
+      addNotification('Error submitting project plan', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -68,7 +68,7 @@ const Planning = () => {
 
   const handleAiSuggest = async () => {
     if (!formData.projectName) {
-      showNotification('Please enter a project name first', 'error');
+      addNotification('Please enter a project name first', 'error');
       return;
     }
 
@@ -81,10 +81,10 @@ const Planning = () => {
       );
       
       setAiSuggestions(suggestions);
-      showNotification('AI suggestions generated!', 'success');
+      addNotification('AI suggestions generated!', 'success');
     } catch (error) {
       console.error('Error generating suggestions:', error);
-      showNotification('Error generating suggestions', 'error');
+      addNotification('Error generating suggestions', 'error');
     } finally {
       setIsGenerating(false);
     }

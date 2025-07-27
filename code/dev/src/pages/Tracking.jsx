@@ -5,7 +5,7 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import TrackingResultPopup from '../components/TrackingResultPopup';
 
 const Tracking = () => {
-  const { showNotification, isLoading, setIsLoading } = useContext(AppContext);
+  const { addNotification, isLoading, setIsLoading } = useContext(AppContext);
   const { user } = useContext(AuthContext);
   const [trackingId, setTrackingId] = useState('');
   const [showTrackingResult, setShowTrackingResult] = useState(false);
@@ -15,12 +15,12 @@ const Tracking = () => {
     e.preventDefault();
     
     if (!trackingId.trim()) {
-      showNotification('Please enter a tracking ID', 'error');
+      addNotification('Please enter a tracking ID', 'error');
       return;
     }
 
     if (!user) {
-      showNotification('Please log in to track deliveries', 'error');
+      addNotification('Please log in to track deliveries', 'error');
       return;
     }
 
@@ -51,11 +51,11 @@ const Tracking = () => {
 
       setTrackingResult(mockTrackingData);
       setShowTrackingResult(true);
-      showNotification('Tracking information retrieved successfully', 'success');
+      addNotification('Tracking information retrieved successfully', 'success');
       
     } catch (error) {
       console.error('Tracking error:', error);
-      showNotification('Failed to retrieve tracking information', 'error');
+      addNotification('Failed to retrieve tracking information', 'error');
     } finally {
       setIsLoading(false);
     }

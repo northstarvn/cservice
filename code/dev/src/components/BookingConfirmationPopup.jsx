@@ -1,7 +1,15 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 const BookingConfirmationPopup = ({ isOpen, onClose, bookingDetails }) => {
+  const navigate = useNavigate();
+  
   if (!isOpen) return null;
+
+  const handleViewBookings = () => {
+    onClose();
+    navigate('/bookings');
+  };
 
   const formatDate = (dateString) => {
     const date = new Date(dateString);
@@ -66,45 +74,25 @@ const BookingConfirmationPopup = ({ isOpen, onClose, bookingDetails }) => {
         )}
 
         <div className="space-y-3">
-          <div className="flex items-center text-sm text-gray-600">
-            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-            </svg>
-            Confirmation email sent
-          </div>
-          <div className="flex items-center text-sm text-gray-600">
-            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Reminder will be sent 1 hour before
-          </div>
-          <div className="flex items-center text-sm text-gray-600">
-            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            You can reschedule up to 2 hours before
-          </div>
-        </div>
-
-        <div className="mt-6 flex flex-col sm:flex-row gap-3">
+          <button
+            onClick={handleViewBookings}
+            className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-blue-700 transition-colors"
+          >
+            View My Bookings
+          </button>
           <button
             onClick={onClose}
-            className="flex-1 bg-blue-600 text-white py-3 px-6 rounded-lg font-medium hover:bg-blue-700 transition-colors duration-200"
+            className="w-full border border-gray-300 text-gray-700 py-3 px-4 rounded-lg font-medium hover:bg-gray-50 transition-colors"
           >
             OK
           </button>
-          <button
-            onClick={() => {
-              // Add calendar functionality here
-              console.log('Add to calendar clicked');
-            }}
-            className="flex-1 bg-gray-100 text-gray-700 py-3 px-6 rounded-lg font-medium hover:bg-gray-200 transition-colors duration-200 flex items-center justify-center"
-          >
-            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            Add to Calendar
-          </button>
+        </div>
+
+        <div className="mt-4 flex items-center text-sm text-gray-600">
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>You can manage your booking anytime in "My Bookings"</span>
         </div>
       </div>
     </div>

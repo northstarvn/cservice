@@ -1,11 +1,13 @@
 import React, { useState, useContext } from 'react';
+import { useNavigate } from 'react-router-dom'; 
 import { AuthContext } from '../context/AuthContext';
 import { AppContext } from '../context/AppContext';
-// Remove: import { api } from '../utils/api';
+import { ROUTES } from '../routes';
 
 const LoginPopup = ({ isOpen, onClose }) => {
+  const navigate = useNavigate(); 
   const { login } = useContext(AuthContext);
-  const { showNotification } = useContext(AppContext);
+  const { addNotification } = useContext(AppContext); // ✅ Change from addNotification to addNotification
   const [formData, setFormData] = useState({
     username: '',
     password: ''
@@ -24,25 +26,25 @@ const LoginPopup = ({ isOpen, onClose }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!formData.username || !formData.password) {
-      showNotification('Please fill in all fields', 'error');
+      addNotification('Please fill in all fields', 'error'); // ✅ Change to addNotification
       return;
     }
 
     setIsLoading(true);
     try {
-      // Use AuthContext login directly instead of API call
       const response = await login(formData.username, formData.password);
 
       if (response.success) {
-        showNotification('Login successful!', 'success');
+        addNotification('Login successful!', 'success'); // ✅ Change to addNotification
         onClose();
         setFormData({ username: '', password: '' });
+        navigate(ROUTES.HOME);
       } else {
-        showNotification(response.error || 'Login failed', 'error');
+        addNotification(response.error || 'Login failed', 'error'); // ✅ Change to addNotification
       }
     } catch (error) {
       console.error('Login error:', error);
-      showNotification('Login failed. Please try again.', 'error');
+      addNotification('Login failed. Please try again.', 'error'); // ✅ Change to addNotification
     } finally {
       setIsLoading(false);
     }

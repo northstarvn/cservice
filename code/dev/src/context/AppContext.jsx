@@ -52,18 +52,11 @@ export const AppProvider = ({ children }) => {
     }
   }, [user]);
 
-  // Track page views
-  useEffect(() => {
-    trackUserBehavior('page_view', { page: window.location.pathname });
-  }, []);
-
   const switchLanguage = (newLanguage) => {
     setLanguage(newLanguage);
-    // Load translations for the new language
     loadTranslations(newLanguage);
     trackUserBehavior('language_switch', { from: language, to: newLanguage });
     
-    // Update user profile if logged in
     if (user) {
       console.log('Updating user language preference to:', newLanguage);
     }
@@ -71,7 +64,6 @@ export const AppProvider = ({ children }) => {
 
   const loadTranslations = async (lang) => {
     try {
-      // This would typically load from an API or import language files
       const mockTranslations = {
         en: { welcome: 'Welcome', loading: 'Loading...' },
         es: { welcome: 'Bienvenido', loading: 'Cargando...' }
@@ -88,7 +80,7 @@ export const AppProvider = ({ children }) => {
     trackUserBehavior('theme_toggle', { theme: newTheme });
   };
 
- // Wrap trackUserBehavior in useCallback to prevent infinite re-renders
+  // Wrap trackUserBehavior in useCallback to prevent infinite re-renders
   const trackUserBehavior = useCallback((eventType, eventData = {}) => {
     const event = {
       id: 'event_' + Date.now(),
@@ -109,14 +101,14 @@ export const AppProvider = ({ children }) => {
       ...(eventType === 'chat_message' && { chatMessages: prev.chatMessages + 1 })
     }));
 
-    // In real app, send to analytics service
     console.log('Analytics Event:', event);
-  }, [user?.id, language]); // Add dependencies
+  }, [user?.id, language]);
 
-  // Replace the useEffect at line 56-58 with this:
+  // MOVE THIS AFTER trackUserBehavior DEFINITION
+  // Track page views
   useEffect(() => {
     trackUserBehavior('page_view', { page: window.location.pathname });
-  }, [trackUserBehavior]); // Add trackUserBehavior as dependency
+  }, [trackUserBehavior]);
 
   const submitBooking = async (bookingDetails) => {
     try {
@@ -185,9 +177,15 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  const addNotification = (message, type = 'info') => {
+  const closePopup = useCallback(() => {
+    setShowLoginPopup(false);
+    setShowBookingConfirmation(false);
+    setShowTrackingResult(false);
+  }, []);
+
+  const addNotification = useCallback((message, type = 'info') => {
     const notification = {
-      id: 'notif_' + Date.now(),
+      id: 'notif_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9), // ✅ Unique ID
       message,
       type,
       timestamp: new Date().toISOString()
@@ -195,26 +193,19 @@ export const AppProvider = ({ children }) => {
     
     setNotifications(prev => [...prev, notification]);
     
-    // Auto-remove after 5 seconds
     setTimeout(() => {
       removeNotification(notification.id);
     }, 5000);
-  };
+  }, []);
 
-  const removeNotification = (id) => {
+  const removeNotification = useCallback((id) => {
     setNotifications(prev => prev.filter(notif => notif.id !== id));
-  };
+  }, []);
 
-  const closePopup = () => {
-    setShowLoginPopup(false);
-    setShowBookingConfirmation(false);
-    setShowTrackingResult(false);
-  };
-
-  const openLoginPopup = () => {
+  const openLoginPopup = useCallback(() => {
     setShowLoginPopup(true);
     trackUserBehavior('login_popup_opened');
-  };
+  }, [trackUserBehavior]);
   // Generate AI suggestions for project planning
   const generateAISuggestions = async (projectName, userInput) => {
     try {
