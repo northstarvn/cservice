@@ -6,7 +6,7 @@ import LoadingSpinner from '../components/LoadingSpinner';
 
 const Booking = () => {
   const { user } = useAuth();
-  const { addNotification, submitBooking } = useApp();
+  const { addNotification, submitBooking, openBookingConfirmation } = useApp(); 
 
   const [formData, setFormData] = useState({
     service_type: '',
@@ -84,37 +84,25 @@ const Booking = () => {
     setIsSubmitting(true);
     
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      const bookingId = `booking_${Date.now()}`;
-      const bookingData = {
-        ...formData,
-        user_id: user?.id,
-        booking_id: bookingId,
-        status: 'confirmed',
-        created_at: new Date().toISOString()
-      };
-      
-      // Store booking in localStorage for demo
-      const existingBookings = JSON.parse(localStorage.getItem('bookings') || '[]');
-      existingBookings.push(bookingData);
-      localStorage.setItem('bookings', JSON.stringify(existingBookings));
-      
+      // Use the context's submitBooking function
       const result = await submitBooking(formData);
-      if (result.success) {
-        addNotification('Booking confirmed successfully!', 'success');
-      }
-
-      // Reset form
-      setFormData({
-        service_type: '',
-        date: '',
-        time: '',
-        notes: ''
-      });
       
-      addNotification('Booking submitted successfully!', 'success');
+      if (result.success) {
+        // Show booking confirmation popup with booking data
+        openBookingConfirmation(result.data);
+
+        // Reset form
+        setFormData({
+          service_type: '',
+          date: '',
+          time: '',
+          notes: ''
+        });
+        
+        addNotification('Booking submitted successfully!', 'success');
+      } else {
+        addNotification('Failed to submit booking. Please try again.', 'error');
+      }
       
     } catch (error) {
       console.error('Booking submission error:', error);
@@ -123,7 +111,6 @@ const Booking = () => {
       setIsSubmitting(false);
     }
   };
-
   const handleCancel = () => {
     setFormData({
       service_type: '',

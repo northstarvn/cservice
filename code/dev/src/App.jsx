@@ -8,6 +8,7 @@ import Navbar from './components/Navbar';
 import Home from './pages/Home';
 import Chat from './pages/Chat';
 import Booking from './pages/Booking';
+import MyBookings from './pages/MyBookings';
 import Tracking from './pages/Tracking';
 import Profile from './pages/Profile';
 import Planning from './pages/Planning';
@@ -29,7 +30,7 @@ export function LoginRedirect() {
 
   useEffect(() => {
     openLoginPopup();
-  }, [openLoginPopup]); // Remove 'navigate' from dependency array
+  }, [openLoginPopup]);
 
   return null;
 }
@@ -40,6 +41,7 @@ const AppContent = () => {
     showLoginPopup, 
     showBookingConfirmation, 
     showTrackingResult,
+    bookingConfirmationData,
     theme,
     language,
     closePopup
@@ -68,6 +70,7 @@ const AppContent = () => {
             <Route path="/" element={<Home />} />
             <Route path="/chat" element={<Chat />} />
             <Route path="/booking" element={<Booking />} />
+            <Route path="/bookings" element={<MyBookings />} />
             <Route path="/tracking" element={<Tracking />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/planning" element={<Planning />} />
@@ -77,7 +80,13 @@ const AppContent = () => {
 
         {/* Popups */}
         {showLoginPopup && <LoginPopup isOpen={showLoginPopup} onClose={closePopup} />}
-        {showBookingConfirmation && <BookingConfirmationPopup />}
+        {showBookingConfirmation && (
+          <BookingConfirmationPopup 
+            isOpen={showBookingConfirmation} 
+            onClose={closePopup}
+            bookingDetails={bookingConfirmationData}
+          />
+        )}
         {showTrackingResult && <TrackingResultPopup />}
 
         {/* Notifications */}

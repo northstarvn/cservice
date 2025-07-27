@@ -24,6 +24,7 @@ export const AppProvider = ({ children }) => {
   const [showTrackingResult, setShowTrackingResult] = useState(false);
   const [trackingData, setTrackingData] = useState(null);
   const [bookingData, setBookingData] = useState(null);
+  const [bookingConfirmationData, setBookingConfirmationData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [analytics, setAnalytics] = useState({
@@ -33,6 +34,7 @@ export const AppProvider = ({ children }) => {
   });
 
   const [translations, setTranslations] = useState({});
+
   // Detect mobile device
   useEffect(() => {
     const checkMobile = () => {
@@ -104,7 +106,6 @@ export const AppProvider = ({ children }) => {
     console.log('Analytics Event:', event);
   }, [user?.id, language]);
 
-  // MOVE THIS AFTER trackUserBehavior DEFINITION
   // Track page views
   useEffect(() => {
     trackUserBehavior('page_view', { page: window.location.pathname });
@@ -117,25 +118,28 @@ export const AppProvider = ({ children }) => {
       // Mock API call
       await new Promise(resolve => setTimeout(resolve, 1500));
       
+      const bookingId = 'booking_' + Date.now();
       const booking = {
-        id: 'booking_' + Date.now(),
-        userId: user?.id,
+        booking_id: bookingId,
+        bookingId: bookingId, // For compatibility
+        user_id: user?.id,
         ...bookingDetails,
+        serviceType: bookingDetails.service_type, // For compatibility
         status: 'confirmed',
-        createdAt: new Date().toISOString()
+        created_at: new Date().toISOString()
       };
       
-      setBookingData(booking);
-      setShowBookingConfirmation(true);
+      // Store in localStorage
+      const existingBookings = JSON.parse(localStorage.getItem('userBookings') || '[]');
+      existingBookings.push(booking);
+      localStorage.setItem('userBookings', JSON.stringify(existingBookings));
       
+      setBookingData(booking);
       trackUserBehavior('booking_submitted', booking);
       
-      addNotification('Booking confirmed successfully!', 'success');
-      
-      return { success: true, booking };
+      return { success: true, data: booking };
     } catch (error) {
       console.error('Booking error:', error);
-      addNotification('Booking failed. Please try again.', 'error');
       return { success: false, error: error.message };
     } finally {
       setLoading(false);
@@ -181,11 +185,13 @@ export const AppProvider = ({ children }) => {
     setShowLoginPopup(false);
     setShowBookingConfirmation(false);
     setShowTrackingResult(false);
+    setBookingConfirmationData(null);
+    setTrackingData(null);
   }, []);
 
   const addNotification = useCallback((message, type = 'info') => {
     const notification = {
-      id: 'notif_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9), // ✅ Unique ID
+      id: 'notif_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
       message,
       type,
       timestamp: new Date().toISOString()
@@ -206,6 +212,24 @@ export const AppProvider = ({ children }) => {
     setShowLoginPopup(true);
     trackUserBehavior('login_popup_opened');
   }, [trackUserBehavior]);
+
+  // Add the missing function
+  const openBookingConfirmation = useCallback((bookingData = null) => {
+    setBookingConfirmationData(bookingData);
+    setShowBookingConfirmation(true);
+  }, []);
+
+  // Add tracking result functions
+  const openTrackingResult = useCallback((data = null) => {
+    setTrackingData(data);
+    setShowTrackingResult(true);
+  }, []);
+
+  const closeTrackingResult = useCallback(() => {
+    setShowTrackingResult(false);
+    setTrackingData(null);
+  }, []);
+
   // Generate AI suggestions for project planning
   const generateAISuggestions = async (projectName, userInput) => {
     try {
@@ -246,6 +270,7 @@ export const AppProvider = ({ children }) => {
     showTrackingResult,
     trackingData,
     bookingData,
+    bookingConfirmationData,
     translations,
     switchLanguage,
     toggleTheme,
@@ -256,7 +281,15 @@ export const AppProvider = ({ children }) => {
     removeNotification,
     closePopup,
     openLoginPopup,
-    generateAISuggestions
+    openBookingConfirmation,
+    openTrackingResult,
+    closeTrackingResult,
+    generateAISuggestions,
+    
+    // Aliases for backward compatibility
+    isLoading: loading,
+    setIsLoading: setLoading,
+    trackingResult: trackingData
   };
 
   return (
