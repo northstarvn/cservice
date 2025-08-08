@@ -113,10 +113,16 @@ function App() {
         <AppProvider>
           <Router>
             <div className="App">
-              <Routes>
-                <Route path="/bookings" element={<MyBookings />} />
-                {/* other routes */}
-              </Routes>
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/chat" element={<Chat />} />
+              <Route path="/booking" element={<Booking />} />
+              <Route path="/bookings" element={<MyBookings />} />
+              <Route path="/tracking" element={<Tracking />} />
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/planning" element={<Planning />} />
+              <Route path="/login" element={<LoginRedirect />} />
+            </Routes>
             </div>
           </Router>
         </AppProvider>
