@@ -1,5 +1,6 @@
 // src/context/AuthContext.js
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { authApi } from '../utils/api';
 
 export const AuthContext = createContext();
 
@@ -17,61 +18,80 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
-  // Check for existing session on mount
+  // Check for existing session on mount and validate token
   useEffect(() => {
-    const checkAuthStatus = () => {
+    const validateToken = async () => {
       try {
-        const token = localStorage.getItem('authToken');
-        const userData = localStorage.getItem('userData');
+        const token = localStorage.getItem('auth_token');
         
-        if (token && userData) {
-          const parsedUser = JSON.parse(userData);
-          setUser(parsedUser);
+        if (token) {
+          // Validate token with backend
+          const userData = await authApi.getCurrentUser();
+          setUser(userData);
           setIsAuthenticated(true);
         }
       } catch (error) {
-        console.error('Error checking auth status:', error);
-        // Clear corrupted data
-        localStorage.removeItem('authToken');
-        localStorage.removeItem('userData');
+        console.error('Token validation failed:', error);
+        // Clear invalid token
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user_id');
+        setIsAuthenticated(false);
+        setUser(null);
       } finally {
         setLoading(false);
       }
     };
 
-    checkAuthStatus();
+    validateToken();
   }, []);
+
+  const register = async (username, password, email, fullName) => {
+    try {
+      setLoading(true);
+      
+      const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/users/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username,
+          password,
+          email,
+          full_name: fullName
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Registration failed');
+      }
+
+      const userData = await response.json();
+      
+      return { success: true, user: userData };
+    } catch (error) {
+      console.error('Registration error:', error);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const login = async (username, password) => {
     try {
       setLoading(true);
       
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Call real API
+      const response = await authApi.login({ username, password });
       
-      // Mock authentication - in real app, this would be an API call
-      if (username && password) {
-        const mockUser = {
-          id: 'user123',
-          username,
-          email: `${username}@example.com`,
-          fullName: username.charAt(0).toUpperCase() + username.slice(1),
-          preferredLanguage: 'en'
-        };
-        
-        const mockToken = 'mock-jwt-token-' + Date.now();
-        
-        // Store in localStorage
-        localStorage.setItem('authToken', mockToken);
-        localStorage.setItem('userData', JSON.stringify(mockUser));
-        
-        setUser(mockUser);
-        setIsAuthenticated(true);
-        
-        return { success: true, user: mockUser };
-      } else {
-        throw new Error('Invalid credentials');
-      }
+      // Get user data after successful login
+      const userData = await authApi.getCurrentUser();
+      
+      setUser(userData);
+      setIsAuthenticated(true);
+      
+      return { success: true, user: userData };
     } catch (error) {
       console.error('Login error:', error);
       return { success: false, error: error.message };
@@ -80,11 +100,9 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
     try {
-      // Clear localStorage
-      localStorage.removeItem('authToken');
-      localStorage.removeItem('userData');
+      await authApi.logout();
       
       // Reset state
       setUser(null);
@@ -97,14 +115,10 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const updateProfile = (profileData) => {
+  const updateProfile = async (profileData) => {
     try {
+      // You would call a real API here
       const updatedUser = { ...user, ...profileData };
-      
-      // Update localStorage
-      localStorage.setItem('userData', JSON.stringify(updatedUser));
-      
-      // Update state
       setUser(updatedUser);
       
       return { success: true, user: updatedUser };
@@ -115,12 +129,11 @@ export const AuthProvider = ({ children }) => {
   };
 
   const getAuthToken = () => {
-    return localStorage.getItem('authToken');
+    return localStorage.getItem('auth_token');
   };
 
   const isTokenValid = () => {
     const token = getAuthToken();
-    // In real app, you would validate the token with backend
     return !!token;
   };
 
@@ -128,6 +141,7 @@ export const AuthProvider = ({ children }) => {
     user,
     loading,
     isAuthenticated,
+    register,
     login,
     logout,
     updateProfile,

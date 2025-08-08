@@ -6,7 +6,7 @@ from app.db import Base, engine
 
 app = FastAPI(title="CService Booking Backend")
 
-# Configure CORS
+# Update CORS origins to include all possible frontend ports
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -14,6 +14,7 @@ app.add_middleware(
         "http://localhost:5173",  # Vite default port
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "http://localhost:8080",  # Additional port if needed
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],

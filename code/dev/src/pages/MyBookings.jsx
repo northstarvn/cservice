@@ -6,7 +6,7 @@ import { BookingListSkeleton } from '../components/LoadingSkeletons';
 import { Calendar, Clock, User, Package, AlertCircle, CheckCircle, XCircle, RotateCcw } from 'lucide-react';
 
 // API service for backend integration
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5173';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 class BookingApiService {
   constructor() {
@@ -14,7 +14,7 @@ class BookingApiService {
   }
 
   async getAuthHeaders() {
-    const token = localStorage.getItem('authToken');
+    const token = localStorage.getItem('auth_token'); // Changed from 'authToken'
     return {
       'Content-Type': 'application/json',
       ...(token && { Authorization: `Bearer ${token}` }),
@@ -416,8 +416,8 @@ const MyBookings = () => {
         </div>
       ) : (
         <div className="grid gap-6">
-          {filteredBookings.map((booking) => (
-            <BookingCard key={booking.id} booking={booking} />
+          {filteredBookings.map((booking, index) => (
+            <BookingCard key={booking.id || booking.booking_id || `booking-${index}`} booking={booking} />
           ))}
         </div>
       )}

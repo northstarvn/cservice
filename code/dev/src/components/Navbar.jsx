@@ -128,7 +128,7 @@ const Navbar = () => {
             {user ? (
               <div className="flex items-center space-x-2">
                 <span className="text-blue-100 text-sm">
-                  {translations?.welcome || 'Welcome'}, {user.name}
+                  {translations?.welcome || 'Welcome'}, {user.fullName || user.username}
                 </span>
                 <button
                   onClick={handleLogout}
@@ -203,7 +203,7 @@ const Navbar = () => {
               {user ? (
                 <div>
                   <div className="px-3 py-2 text-blue-100 text-sm">
-                    {translations?.welcome || 'Welcome'}, {user.name}
+                    {translations?.welcome || 'Welcome'}, {user.fullName || user.username}
                   </div>
                   <button
                     onClick={handleLogout}

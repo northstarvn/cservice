@@ -26,11 +26,16 @@ import { ROUTES } from './routes';
 
 export function LoginRedirect() {
   const { openLoginPopup } = useApp();
+  const { user } = useAuth(); // Add this
   const navigate = useNavigate();
 
   useEffect(() => {
-    openLoginPopup();
-  }, [openLoginPopup]);
+    if (!user) { // Only open popup if user is not authenticated
+      openLoginPopup();
+    } else {
+      navigate(ROUTES.HOME); // Redirect authenticated users
+    }
+  }, [openLoginPopup, user, navigate]);
 
   return null;
 }
@@ -111,25 +116,15 @@ function App() {
     <ErrorBoundary>
       <AuthProvider>
         <AppProvider>
-          <Router>
-            <div className="App">
-            <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/chat" element={<Chat />} />
-              <Route path="/booking" element={<Booking />} />
-              <Route path="/bookings" element={<MyBookings />} />
-              <Route path="/tracking" element={<Tracking />} />
-              <Route path="/profile" element={<Profile />} />
-              <Route path="/planning" element={<Planning />} />
-              <Route path="/login" element={<LoginRedirect />} />
-            </Routes>
-            </div>
-          </Router>
+          <ChatProvider>
+            <Router>
+              <AppContent />
+            </Router>
+          </ChatProvider>
         </AppProvider>
       </AuthProvider>
     </ErrorBoundary>
   );
 }
-
 export default App;
 

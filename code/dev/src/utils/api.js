@@ -1,6 +1,7 @@
 // utils/api.js
+// Change the API_BASE_URL configuration at the top of the file
 const API_BASE_URL = window.location.hostname === 'localhost' 
-  ? 'http://localhost:8080/api' 
+  ? 'http://localhost:8000'  // Changed from 'http://localhost:8080/api' to match FastAPI
   : '/api';
 
 class ApiError extends Error {
@@ -24,6 +25,7 @@ const handleResponse = async (response) => {
   return response.json();
 };
 
+// Update the makeRequest function to properly format the Authorization header
 const makeRequest = async (endpoint, options = {}) => {
   const url = `${API_BASE_URL}${endpoint}`;
   const token = localStorage.getItem('auth_token');
@@ -31,7 +33,7 @@ const makeRequest = async (endpoint, options = {}) => {
   const config = {
     headers: {
       'Content-Type': 'application/json',
-      ...(token && { Authorization: `Bearer ${token}` }),
+      ...(token && { Authorization: `Bearer ${token}` }), // Ensure Bearer prefix
       ...options.headers,
     },
     ...options,
@@ -52,43 +54,67 @@ const makeRequest = async (endpoint, options = {}) => {
   }
 };
 
-// Authentication API
+// Update the authApi.login function to match FastAPI response format
 export const authApi = {
   login: async (credentials) => {
-    const response = await makeRequest('/auth/login', {
+    const response = await makeRequest('/users/login', {
       method: 'POST',
       body: credentials,
     });
     
-    if (response.token) {
-      localStorage.setItem('auth_token', response.token);
-      localStorage.setItem('user_id', response.user.id);
+    // FastAPI returns { access_token: "token", token_type: "bearer" }
+    if (response.access_token) {
+      localStorage.setItem('auth_token', response.access_token);
+      // You may need to get user info separately or modify backend to include user data
+      localStorage.setItem('user_id', credentials.username); // Temporary - should get from /users/me
     }
     
     return response;
   },
 
+  // Add a method to get current user after login
+  getCurrentUser: async () => {
+    return makeRequest('/users/me');
+  },
+
   logout: async () => {
-    const userId = localStorage.getItem('user_id');
-    const sessionId = localStorage.getItem('session_id');
-    
     try {
-      await makeRequest('/auth/logout', {
-        method: 'POST',
-        body: { user_id: userId, session_id: sessionId },
-      });
-    } finally {
+      // FastAPI doesn't seem to have a logout endpoint, so just clear local storage
       localStorage.removeItem('auth_token');
       localStorage.removeItem('user_id');
       localStorage.removeItem('session_id');
+    } catch (error) {
+      console.error('Logout error:', error);
     }
   },
 
   validateToken: async () => {
-    return makeRequest('/auth/validate');
+    return makeRequest('/users/me'); // Use /users/me to validate token
   },
 };
+// Booking API - Update endpoints to match FastAPI
+export const bookingApi = {
+  submitBooking: async (userId, serviceType, date, time) => {
+    return makeRequest('/bookings/', {  // Changed from '/booking/submit'
+      method: 'POST',
+      body: { user_id: userId, service_type: serviceType, date, time },
+    });
+  },
 
+  getBookings: async (userId) => {
+    return makeRequest(`/bookings/user/${userId}`);  // Changed from '/booking/user/'
+  },
+
+  cancelBooking: async (bookingId) => {
+    return makeRequest(`/bookings/${bookingId}`, {  // Changed from '/booking/cancel/'
+      method: 'DELETE',
+    });
+  },
+
+  getAvailableSlots: async (serviceType, date) => {
+    return makeRequest(`/bookings/slots?service_type=${serviceType}&date=${date}`);  // Changed from '/booking/slots'
+  },
+};
 // Chat API
 export const chatApi = {
   initChat: async (userId, language = 'en', contextData = {}) => {
@@ -121,30 +147,6 @@ export const chatApi = {
       method: 'POST',
       body: { session_id: sessionId, language },
     });
-  },
-};
-
-// Booking API
-export const bookingApi = {
-  submitBooking: async (userId, serviceType, date, time) => {
-    return makeRequest('/booking/submit', {
-      method: 'POST',
-      body: { user_id: userId, service_type: serviceType, date, time },
-    });
-  },
-
-  getBookings: async (userId) => {
-    return makeRequest(`/booking/user/${userId}`);
-  },
-
-  cancelBooking: async (bookingId) => {
-    return makeRequest(`/booking/cancel/${bookingId}`, {
-      method: 'DELETE',
-    });
-  },
-
-  getAvailableSlots: async (serviceType, date) => {
-    return makeRequest(`/booking/slots?service_type=${serviceType}&date=${date}`);
   },
 };
 

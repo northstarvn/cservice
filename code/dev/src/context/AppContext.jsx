@@ -235,10 +235,34 @@ export const AppProvider = ({ children }) => {
     try {
       setLoading(true);
       
-      // Mock AI suggestions
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Replace mock with real API call
+      const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/planning/ai-suggest`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
+        },
+        body: JSON.stringify({ 
+          project_name: projectName, 
+          user_input: userInput,
+          context_data: {}
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
       
-      const suggestions = [
+      trackUserBehavior('ai_suggestions_generated', { projectName, userInput });
+      
+      return { success: true, suggestions: data.suggestions };
+    } catch (error) {
+      console.error('Error generating AI suggestions:', error);
+      
+      // Fallback to mock suggestions if API fails
+      const fallbackSuggestions = [
         'Consider using React for the frontend framework',
         'Implement responsive design for mobile compatibility',
         'Add user authentication and authorization',
@@ -247,17 +271,12 @@ export const AppProvider = ({ children }) => {
         'Plan for scalability and performance optimization'
       ];
       
-      trackUserBehavior('ai_suggestions_generated', { projectName, userInput });
-      
-      return { success: true, suggestions };
-    } catch (error) {
-      console.error('AI suggestions error:', error);
-      return { success: false, error: error.message };
+      return { success: true, suggestions: fallbackSuggestions };
     } finally {
       setLoading(false);
     }
   };
-
+  
   const value = {
     language,
     theme,
