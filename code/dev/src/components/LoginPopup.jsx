@@ -2,18 +2,20 @@ import React, { useState, useContext } from 'react';
 import { useNavigate } from 'react-router-dom'; 
 import { AuthContext } from '../context/AuthContext';
 import { AppContext } from '../context/AppContext';
+import { useApp } from '../context/AppContext';  // Fixed: useApp should be imported from AppContext, not AuthContext
 import { ROUTES } from '../routes';
 
-const LoginPopup = ({ isOpen, onClose }) => {
+const LoginPopup = ({ isOpen, onClose, onSwitchToSignup }) => {
   const navigate = useNavigate(); 
   const { login } = useContext(AuthContext);
-  const { addNotification } = useContext(AppContext); // ✅ Change from addNotification to addNotification
+  const { addNotification } = useContext(AppContext);
   const [formData, setFormData] = useState({
     username: '',
     password: ''
   });
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const { switchToSignupFromLogin } = useApp();
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -26,7 +28,7 @@ const LoginPopup = ({ isOpen, onClose }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!formData.username || !formData.password) {
-      addNotification('Please fill in all fields', 'error'); // ✅ Change to addNotification
+      addNotification('Please fill in all fields', 'error');
       return;
     }
 
@@ -35,25 +37,32 @@ const LoginPopup = ({ isOpen, onClose }) => {
       const response = await login(formData.username, formData.password);
 
       if (response.success) {
-        addNotification('Login successful!', 'success'); // ✅ Change to addNotification
+        addNotification('Login successful!', 'success');
         onClose();
         setFormData({ username: '', password: '' });
         navigate(ROUTES.HOME);
       } else {
-        addNotification(response.error || 'Login failed', 'error'); // ✅ Change to addNotification
+        addNotification(response.error || 'Login failed', 'error');
       }
     } catch (error) {
       console.error('Login error:', error);
-      addNotification('Login failed. Please try again.', 'error'); // ✅ Change to addNotification
+      addNotification('Login failed. Please try again.', 'error');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // ... rest of the component remains the same
   const handleClose = () => {
     setFormData({ username: '', password: '' });
     onClose();
+  };
+
+  const handleSwitchToSignup = () => {
+    if (onSwitchToSignup) {
+      onSwitchToSignup();
+    } else {
+      switchToSignupFromLogin();
+    }
   };
 
   if (!isOpen) return null;
@@ -157,10 +166,14 @@ const LoginPopup = ({ isOpen, onClose }) => {
           </div>
         </form>
 
+        {/* Updated signup link section */}
         <div className="mt-6 text-center">
           <p className="text-sm text-gray-600">
             Don't have an account? 
-            <button className="ml-1 text-blue-600 hover:text-blue-700 font-medium">
+            <button 
+              onClick={handleSwitchToSignup}
+              className="ml-1 text-blue-600 hover:text-blue-700 font-medium transition-colors duration-200"
+            >
               Sign up
             </button>
           </p>

@@ -23,6 +23,7 @@ import './styles/App.css';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ROUTES } from './routes';
+import SignupPopup from './components/SignupPopup';
 
 export function LoginRedirect() {
   const { openLoginPopup } = useApp();
@@ -41,15 +42,18 @@ export function LoginRedirect() {
 }
 
 const AppContent = () => {
-  const { 
+    const { 
     loading, 
     showLoginPopup, 
+    showSignupPopup,  // Add this line
     showBookingConfirmation, 
     showTrackingResult,
     bookingConfirmationData,
     theme,
     language,
-    closePopup
+    closePopup,
+    switchToLoginFromSignup,  // Add this line
+    switchToSignupFromLogin   // Add this line
   } = useApp();
   const { loading: authLoading } = useAuth();
 
@@ -66,7 +70,7 @@ const AppContent = () => {
     );
   }
 
-  return (
+   return (
     <div className={`min-h-screen ${theme === 'dark' ? 'dark' : ''}`}>
       <div className="bg-gray-50 dark:bg-gray-900 min-h-screen">
         <Navbar />
@@ -83,8 +87,21 @@ const AppContent = () => {
           </Routes>
         </main>
 
-        {/* Popups */}
-        {showLoginPopup && <LoginPopup isOpen={showLoginPopup} onClose={closePopup} />}
+        {/* Popups - UPDATE THIS SECTION */}
+        {showLoginPopup && (
+          <LoginPopup 
+            isOpen={showLoginPopup} 
+            onClose={closePopup}
+            onSwitchToSignup={switchToSignupFromLogin}  // Add this prop
+          />
+        )}
+        {showSignupPopup && (  // ADD THIS ENTIRE BLOCK
+          <SignupPopup 
+            isOpen={showSignupPopup} 
+            onClose={closePopup}
+            onSwitchToLogin={switchToLoginFromSignup}
+          />
+        )}
         {showBookingConfirmation && (
           <BookingConfirmationPopup 
             isOpen={showBookingConfirmation} 
@@ -94,16 +111,12 @@ const AppContent = () => {
         )}
         {showTrackingResult && <TrackingResultPopup />}
 
-        {/* Notifications */}
+        {/* Rest remains the same */}
         <NotificationContainer />
-
-        {/* Global Loading Overlay */}
+        
         {loading && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-xl">
-              <LoadingSpinner size="large" />
-              <p className="mt-4 text-gray-700 dark:text-gray-300">Processing...</p>
-            </div>
+            <LoadingSpinner size="large" color="white" />
           </div>
         )}
       </div>

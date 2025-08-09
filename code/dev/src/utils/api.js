@@ -17,7 +17,7 @@ const handleResponse = async (response) => {
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new ApiError(
-      errorData.message || 'An error occurred',
+      errorData.detail || errorData.message || 'An error occurred',
       response.status,
       errorData
     );
@@ -54,52 +54,47 @@ const makeRequest = async (endpoint, options = {}) => {
   }
 };
 
-export const login = async (credentials) => {
-  console.log('Sending login request:', credentials);
-  
-  const response = await fetch(`${API_BASE_URL}/users/login`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(credentials),
-  });
-  
-  if (!response.ok) {
-    const errorData = await response.json();
-    console.log('Login error:', errorData);
-    throw new ApiError(errorData.detail || 'Login failed');
-  }
-  
-  return response.json();
-};
-  
-// Update the authApi.login function to match FastAPI response format
+// Add this to the authApi object in api.js
+
 export const authApi = {
+  register: async (userData) => {
+    console.log('Sending registration request:', userData);
+    
+    const response = await makeRequest('/users/register', {
+      method: 'POST',
+      body: {
+        username: userData.username,
+        password: userData.password,
+        email: userData.email,
+        full_name: userData.fullName
+      },
+    });
+    
+    return response;
+  },
+
   login: async (credentials) => {
+    console.log('Sending login request:', credentials);
+    
     const response = await makeRequest('/users/login', {
       method: 'POST',
       body: credentials,
     });
     
-    // FastAPI returns { access_token: "token", token_type: "bearer" }
     if (response.access_token) {
       localStorage.setItem('auth_token', response.access_token);
-      // You may need to get user info separately or modify backend to include user data
-      localStorage.setItem('user_id', credentials.username); // Temporary - should get from /users/me
+      localStorage.setItem('user_id', credentials.username);
     }
     
     return response;
   },
 
-  // Add a method to get current user after login
   getCurrentUser: async () => {
     return makeRequest('/users/me');
   },
 
   logout: async () => {
     try {
-      // FastAPI doesn't seem to have a logout endpoint, so just clear local storage
       localStorage.removeItem('auth_token');
       localStorage.removeItem('user_id');
       localStorage.removeItem('session_id');
@@ -109,9 +104,10 @@ export const authApi = {
   },
 
   validateToken: async () => {
-    return makeRequest('/users/me'); // Use /users/me to validate token
+    return makeRequest('/users/me');
   },
 };
+
 // Booking API - Update endpoints to match FastAPI
 export const bookingApi = {
   submitBooking: async (userId, serviceType, date, time) => {
@@ -135,6 +131,7 @@ export const bookingApi = {
     return makeRequest(`/bookings/slots?service_type=${serviceType}&date=${date}`);  // Changed from '/booking/slots'
   },
 };
+
 // Chat API
 export const chatApi = {
   initChat: async (userId, language = 'en', contextData = {}) => {

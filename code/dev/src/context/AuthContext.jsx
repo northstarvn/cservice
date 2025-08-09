@@ -49,27 +49,15 @@ export const AuthProvider = ({ children }) => {
     try {
       setLoading(true);
       
-      const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/users/register`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username,
-          password,
-          email,
-          full_name: fullName
-        }),
+      // Use the authApi instead of direct fetch
+      const response = await authApi.register({
+        username,
+        password,
+        email,
+        fullName
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Registration failed');
-      }
-
-      const userData = await response.json();
       
-      return { success: true, user: userData };
+      return { success: true, user: response };
     } catch (error) {
       console.error('Registration error:', error);
       return { success: false, error: error.message };

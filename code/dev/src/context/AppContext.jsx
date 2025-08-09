@@ -34,6 +34,45 @@ export const AppProvider = ({ children }) => {
   });
 
   const [translations, setTranslations] = useState({});
+  const [showSignupPopup, setShowSignupPopup] = useState(false);
+
+  const trackUserBehavior = useCallback((eventType, eventData = {}) => {
+    const event = {
+      id: 'event_' + Date.now(),
+      userId: user?.id || 'anonymous',
+      eventType,
+      eventData,
+      timestamp: new Date().toISOString(),
+      page: window.location.pathname,
+      userAgent: navigator.userAgent,
+      language
+    };
+
+    // Update analytics
+    setAnalytics(prev => ({
+      ...prev,
+      userInteractions: prev.userInteractions + 1,
+      ...(eventType === 'page_view' && { pageViews: prev.pageViews + 1 }),
+      ...(eventType === 'chat_message' && { chatMessages: prev.chatMessages + 1 })
+    }));
+
+    console.log('Analytics Event:', event);
+  }, [user?.id, language]);
+
+  const openSignupPopup = useCallback(() => {
+    setShowSignupPopup(true);
+    trackUserBehavior('signup_popup_opened');
+  }, [trackUserBehavior]);
+
+  const switchToLoginFromSignup = useCallback(() => {
+    setShowSignupPopup(false);
+    setShowLoginPopup(true);
+  }, []);
+
+  const switchToSignupFromLogin = useCallback(() => {
+    setShowLoginPopup(false);
+    setShowSignupPopup(true);
+  }, []);
 
   // Detect mobile device
   useEffect(() => {
@@ -57,11 +96,25 @@ export const AppProvider = ({ children }) => {
   const switchLanguage = (newLanguage) => {
     setLanguage(newLanguage);
     loadTranslations(newLanguage);
-    trackUserBehavior('language_switch', { from: language, to: newLanguage });
+    
+    // Use setTimeout to defer the call until after component initialization
+    setTimeout(() => {
+      trackUserBehavior('language_switch', { from: language, to: newLanguage });
+    }, 0);
     
     if (user) {
       console.log('Updating user language preference to:', newLanguage);
     }
+  };
+
+  const toggleTheme = () => {
+    const newTheme = theme === 'light' ? 'dark' : 'light';
+    setTheme(newTheme);
+    
+    // Use setTimeout to defer the call until after component initialization
+    setTimeout(() => {
+      trackUserBehavior('theme_toggle', { theme: newTheme });
+    }, 0);
   };
 
   const loadTranslations = async (lang) => {
@@ -75,36 +128,6 @@ export const AppProvider = ({ children }) => {
       console.error('Error loading translations:', error);
     }
   };
-
-  const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    trackUserBehavior('theme_toggle', { theme: newTheme });
-  };
-
-  // Wrap trackUserBehavior in useCallback to prevent infinite re-renders
-  const trackUserBehavior = useCallback((eventType, eventData = {}) => {
-    const event = {
-      id: 'event_' + Date.now(),
-      userId: user?.id || 'anonymous',
-      eventType,
-      eventData,
-      timestamp: new Date().toISOString(),
-      page: window.location.pathname,
-      userAgent: navigator.userAgent,
-      language
-    };
-
-    // Update analytics
-    setAnalytics(prev => ({
-      ...prev,
-      userInteractions: prev.userInteractions + 1,
-      ...(eventType === 'page_view' && { pageViews: prev.pageViews + 1 }),
-      ...(eventType === 'chat_message' && { chatMessages: prev.chatMessages + 1 })
-    }));
-
-    console.log('Analytics Event:', event);
-  }, [user?.id, language]);
 
   // Track page views
   useEffect(() => {
@@ -183,11 +206,12 @@ export const AppProvider = ({ children }) => {
 
   const closePopup = useCallback(() => {
     setShowLoginPopup(false);
+    setShowSignupPopup(false);  // Add this line
     setShowBookingConfirmation(false);
     setShowTrackingResult(false);
     setBookingConfirmationData(null);
     setTrackingData(null);
-  }, []);
+    }, []);
 
   const addNotification = useCallback((message, type = 'info') => {
     const notification = {
@@ -276,7 +300,7 @@ export const AppProvider = ({ children }) => {
       setLoading(false);
     }
   };
-  
+
   const value = {
     language,
     theme,
@@ -291,6 +315,10 @@ export const AppProvider = ({ children }) => {
     bookingData,
     bookingConfirmationData,
     translations,
+    showSignupPopup,  // Add this
+    openSignupPopup,  // Add this
+    switchToLoginFromSignup,  // Add this
+    switchToSignupFromLogin,  // Add this
     switchLanguage,
     toggleTheme,
     trackUserBehavior,
