@@ -1,4 +1,3 @@
-// src/context/AuthContext.js
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { authApi } from '../utils/api';
 
@@ -24,20 +23,39 @@ export const AuthProvider = ({ children }) => {
       try {
         const token = localStorage.getItem('auth_token');
         
-        if (token) {
-          // Validate token with backend
-          const userData = await authApi.getCurrentUser();
-          setUser(userData);
-          setIsAuthenticated(true);
+        if (!token) {
+          // No token found, set loading to false immediately
+          setLoading(false);
+          return;
         }
+
+        console.log('Validating token...'); // Debug log
+        
+        // Add timeout to prevent hanging
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Request timeout')), 10000); // 10 second timeout
+        });
+
+        const userData = await Promise.race([
+          authApi.getCurrentUser(),
+          timeoutPromise
+        ]);
+
+        console.log('Token validation successful:', userData); // Debug log
+        setUser(userData);
+        setIsAuthenticated(true);
+        
       } catch (error) {
         console.error('Token validation failed:', error);
-        // Clear invalid token
+        // Clear invalid or expired token
         localStorage.removeItem('auth_token');
         localStorage.removeItem('user_id');
+        localStorage.removeItem('session_id');
         setIsAuthenticated(false);
         setUser(null);
       } finally {
+        // Always set loading to false, regardless of success or failure
+        console.log('Setting loading to false'); // Debug log
         setLoading(false);
       }
     };
@@ -49,7 +67,6 @@ export const AuthProvider = ({ children }) => {
     try {
       setLoading(true);
       
-      // Use the authApi instead of direct fetch
       const response = await authApi.register({
         username,
         password,
@@ -73,8 +90,23 @@ export const AuthProvider = ({ children }) => {
       // Call real API
       const response = await authApi.login({ username, password });
       
-      // Get user data after successful login
-      const userData = await authApi.getCurrentUser();
+      if (!response.access_token) {
+        throw new Error('No access token received');
+      }
+
+      console.log('Login successful, getting user data...'); // Debug log
+      
+      // Get user data after successful login with timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('User data fetch timeout')), 5000);
+      });
+
+      const userData = await Promise.race([
+        authApi.getCurrentUser(),
+        timeoutPromise
+      ]);
+      
+      console.log('User data retrieved:', userData); // Debug log
       
       setUser(userData);
       setIsAuthenticated(true);
@@ -82,7 +114,14 @@ export const AuthProvider = ({ children }) => {
       return { success: true, user: userData };
     } catch (error) {
       console.error('Login error:', error);
-      return { success: false, error: error.message };
+      // Clear any partial auth state on login failure
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('user_id');
+      localStorage.removeItem('session_id');
+      setUser(null);
+      setIsAuthenticated(false);
+      
+      return { success: false, error: error.message || 'Login failed' };
     } finally {
       setLoading(false);
     }
@@ -91,21 +130,18 @@ export const AuthProvider = ({ children }) => {
   const logout = async () => {
     try {
       await authApi.logout();
-      
-      // Reset state
-      setUser(null);
-      setIsAuthenticated(false);
-      
-      return { success: true };
     } catch (error) {
       console.error('Logout error:', error);
-      return { success: false, error: error.message };
+    } finally {
+      // Always clear state regardless of API call success
+      setUser(null);
+      setIsAuthenticated(false);
+      return { success: true };
     }
   };
 
   const updateProfile = async (profileData) => {
     try {
-      // You would call a real API here
       const updatedUser = { ...user, ...profileData };
       setUser(updatedUser);
       

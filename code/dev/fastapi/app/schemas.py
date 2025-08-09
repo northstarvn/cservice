@@ -1,13 +1,48 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional
-import enum
+from typing import Optional, List
+from enum import Enum
 
-class BookingStatus(str, enum.Enum):
+class ServiceTypeEnum(str, Enum):
+    consultation = "consultation"
+    delivery = "delivery"
+    meeting = "meeting"
+    project = "project"
+
+class BookingStatusEnum(str, Enum):
     pending = "pending"
     confirmed = "confirmed"
     cancelled = "cancelled"
     completed = "completed"
+
+class BookingCreate(BaseModel):
+    service_type: ServiceTypeEnum
+    title: str
+    description: Optional[str] = None
+    scheduled_date: datetime
+
+class BookingUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    scheduled_date: Optional[datetime] = None
+    status: Optional[BookingStatusEnum] = None
+
+class BookingOut(BaseModel):
+    id: int
+    service_type: ServiceTypeEnum
+    title: str
+    description: Optional[str]
+    scheduled_date: datetime
+    status: BookingStatusEnum
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class BookingList(BaseModel):
+    bookings: List[BookingOut]
+    total: int
 
 class UserBase(BaseModel):
     username: str
@@ -28,42 +63,7 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     username: str
 
-class BookingBase(BaseModel):
-    service_type: str
-    details: Optional[str] = None
-    scheduled_for: datetime
-
-class BookingCreate(BookingBase):
-    pass
-
-class BookingUpdate(BaseModel):
-    service_type: Optional[str] = None
-    details: Optional[str] = None
-    scheduled_for: Optional[datetime] = None
-    status: Optional[BookingStatus] = None
-
-class BookingOut(BookingBase):
-    id: int
-    status: BookingStatus
-    created_at: datetime
-    updated_at: datetime
-    user_id: int
-    model_config = {"from_attributes": True}
-
-class PaginatedBookings(BaseModel):
-    items: List[BookingOut]
-    total: int
-    page: int
-    per_page: int
-    pages: int
-
-    class Config:
-        from_attributes = True
-
 class UserLogin(BaseModel):
     username: str
     password: str        
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str    

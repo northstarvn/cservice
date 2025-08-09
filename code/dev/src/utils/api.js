@@ -54,8 +54,6 @@ const makeRequest = async (endpoint, options = {}) => {
   }
 };
 
-// Add this to the authApi object in api.js
-
 export const authApi = {
   register: async (userData) => {
     console.log('Sending registration request:', userData);
@@ -108,27 +106,71 @@ export const authApi = {
   },
 };
 
-// Booking API - Update endpoints to match FastAPI
+// ENHANCED Booking API - Updated to match new FastAPI backend
 export const bookingApi = {
-  submitBooking: async (userId, serviceType, date, time) => {
-    return makeRequest('/bookings/', {  // Changed from '/booking/submit'
+  // Create new booking
+  createBooking: async (bookingData) => {
+    return makeRequest('/bookings/', {
       method: 'POST',
-      body: { user_id: userId, service_type: serviceType, date, time },
+      body: {
+        service_type: bookingData.service_type,
+        details: bookingData.details,
+        scheduled_for: bookingData.scheduled_for
+      },
     });
   },
 
-  getBookings: async (userId) => {
-    return makeRequest(`/bookings/user/${userId}`);  // Changed from '/booking/user/'
+  // Get user's bookings with pagination and filters
+  getBookings: async (params = {}) => {
+    const { page = 1, per_page = 10, status, service_type } = params;
+    const queryParams = new URLSearchParams({
+      page: page.toString(),
+      per_page: per_page.toString(),
+    });
+    
+    if (status) queryParams.append('status', status);
+    if (service_type) queryParams.append('service_type', service_type);
+    
+    return makeRequest(`/bookings/?${queryParams}`);
   },
 
-  cancelBooking: async (bookingId) => {
-    return makeRequest(`/bookings/${bookingId}`, {  // Changed from '/booking/cancel/'
+  // Get specific booking by ID
+  getBooking: async (bookingId) => {
+    return makeRequest(`/bookings/${bookingId}`);
+  },
+
+  // Update existing booking
+  updateBooking: async (bookingId, updateData) => {
+    return makeRequest(`/bookings/${bookingId}`, {
+      method: 'PUT',
+      body: updateData,
+    });
+  },
+
+  // Delete booking
+  deleteBooking: async (bookingId) => {
+    return makeRequest(`/bookings/${bookingId}`, {
       method: 'DELETE',
     });
   },
 
+  // Legacy methods for backward compatibility
+  submitBooking: async (userId, serviceType, date, time) => {
+    // Convert legacy format to new format
+    const scheduled_for = new Date(`${date}T${time}`).toISOString();
+    return bookingApi.createBooking({
+      service_type: serviceType,
+      scheduled_for,
+      details: `Legacy booking for user ${userId}`
+    });
+  },
+
+  cancelBooking: async (bookingId) => {
+    return bookingApi.deleteBooking(bookingId);
+  },
+
   getAvailableSlots: async (serviceType, date) => {
-    return makeRequest(`/bookings/slots?service_type=${serviceType}&date=${date}`);  // Changed from '/booking/slots'
+    return makeRequest(`/bookings/slots?service_type=${serviceType}&date=${date}`);
   },
 };
 
@@ -303,7 +345,7 @@ export const api = {
   aiModel: aiModelApi,
 };
 
-// Utility functions
+// Enhanced utility functions
 export const apiUtils = {
   isAuthenticated: () => {
     return !!localStorage.getItem('auth_token');
@@ -352,6 +394,49 @@ export const apiUtils = {
       }
       throw error;
     }
+  },
+
+  // New utility functions for booking
+  formatBookingDate: (date) => {
+    return new Date(date).toISOString();
+  },
+
+  parseBookingDate: (dateString) => {
+    return new Date(dateString);
+  },
+
+  getBookingStatusColor: (status) => {
+    switch (status) {
+      case 'confirmed': return 'bg-green-100 text-green-800';
+      case 'pending': return 'bg-yellow-100 text-yellow-800';
+      case 'cancelled': return 'bg-red-100 text-red-800';
+      case 'completed': return 'bg-blue-100 text-blue-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  },
+
+  validateBookingData: (bookingData) => {
+    const errors = [];
+    
+    if (!bookingData.service_type) {
+      errors.push('Service type is required');
+    }
+    
+    if (!bookingData.scheduled_for) {
+      errors.push('Scheduled date and time is required');
+    } else {
+      const scheduledDate = new Date(bookingData.scheduled_for);
+      const now = new Date();
+      
+      if (scheduledDate <= now) {
+        errors.push('Scheduled date must be in the future');
+      }
+    }
+    
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
   },
 };
 

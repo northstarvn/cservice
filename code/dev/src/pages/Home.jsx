@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useApp } from '../context/AppContext';
+import { bookingApi, apiUtils } from '../utils/api';
 import { 
   MessageCircle, 
   Calendar, 
@@ -19,6 +20,33 @@ const Home = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { translations, language } = useApp();
+  const [recentBookings, setRecentBookings] = useState([]);
+  const [bookingsLoading, setBookingsLoading] = useState(false);
+
+  // Fetch recent bookings for logged-in users using your existing API
+  useEffect(() => {
+    if (user && apiUtils.isAuthenticated()) {
+      const fetchRecentBookings = async () => {
+        setBookingsLoading(true);
+        try {
+          const data = await bookingApi.getBookings({ page: 1, per_page: 3 });
+          // Handle both paginated and non-paginated responses safely
+          const bookings = data?.items || (Array.isArray(data) ? data : []);
+          setRecentBookings(bookings);
+        } catch (error) {
+          console.error('Failed to fetch bookings:', error);
+          const errorInfo = apiUtils.handleApiError(error);
+          console.error('Error details:', errorInfo);
+          // Don't set bookings on error, keep empty array
+          setRecentBookings([]);
+        } finally {
+          setBookingsLoading(false);
+        }
+      };
+      
+      fetchRecentBookings();
+    }
+  }, [user]);
 
   const features = [
     {
@@ -86,6 +114,39 @@ const Home = () => {
     }
   };
 
+  // Safe date parsing function
+  const formatBookingDate = (dateString) => {
+    try {
+      if (apiUtils.parseBookingDate) {
+        return apiUtils.parseBookingDate(dateString).toLocaleString();
+      }
+      return new Date(dateString).toLocaleString();
+    } catch (error) {
+      console.error('Error parsing date:', error);
+      return 'Invalid date';
+    }
+  };
+
+  // Safe status color function
+  const getBookingStatusColor = (status) => {
+    if (apiUtils.getBookingStatusColor) {
+      return apiUtils.getBookingStatusColor(status);
+    }
+    // Fallback implementation
+    switch (status) {
+      case 'confirmed': 
+        return 'bg-green-100 text-green-800';
+      case 'pending': 
+        return 'bg-yellow-100 text-yellow-800';
+      case 'cancelled': 
+        return 'bg-red-100 text-red-800';
+      case 'completed': 
+        return 'bg-blue-100 text-blue-800';
+      default: 
+        return 'bg-gray-100 text-gray-800';
+    }
+  };
+
   return (
     <div className={`min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 ${language === 'ar' ? 'rtl' : 'ltr'}`}>
       {/* Hero Section */}
@@ -141,6 +202,69 @@ const Home = () => {
         </div>
       </div>
 
+      {/* Recent Bookings Section for Logged-in Users */}
+      {user && apiUtils.isAuthenticated() && (
+        <div className="py-16 bg-gray-50">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex justify-between items-center mb-8">
+              <h2 className="text-3xl font-bold text-gray-900">
+                {translations?.recent_bookings || 'Recent Bookings'}
+              </h2>
+              <button
+                onClick={() => navigate('/booking')}
+                className="text-blue-600 hover:text-blue-800 flex items-center space-x-2"
+              >
+                <span>{translations?.view_all || 'View All'}</span>
+                <ArrowRight size={16} />
+              </button>
+            </div>
+
+            {bookingsLoading ? (
+              <div className="text-center py-8">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+              </div>
+            ) : recentBookings.length === 0 ? (
+              <div className="bg-white rounded-lg shadow p-8 text-center">
+                <Calendar size={48} className="mx-auto text-gray-400 mb-4" />
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">No Bookings Yet</h3>
+                <p className="text-gray-600 mb-4">Create your first booking to get started.</p>
+                <button
+                  onClick={() => navigate('/booking')}
+                  className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700"
+                >
+                  {translations?.create_booking || 'Create Booking'}
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {recentBookings.map((booking) => (
+                  <div key={booking.id} className="bg-white rounded-lg shadow hover:shadow-lg transition-shadow p-6">
+                    <div className="flex justify-between items-start mb-4">
+                      <div>
+                        <h3 className="font-semibold text-gray-900">{booking.service_type}</h3>
+                        <span className={`inline-block px-2 py-1 text-xs rounded-full ${getBookingStatusColor(booking.status)}`}>
+                          {booking.status}
+                        </span>
+                      </div>
+                      <Calendar size={20} className="text-gray-400" />
+                    </div>
+                    <div className="space-y-2 text-sm text-gray-600">
+                      <div className="flex items-center space-x-2">
+                        <Clock size={14} />
+                        <span>{formatBookingDate(booking.scheduled_for)}</span>
+                      </div>
+                      {booking.details && (
+                        <p className="text-gray-700 truncate">{booking.details}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Features Section */}
       <div className="py-16">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -193,7 +317,7 @@ const Home = () => {
         <div className="bg-gradient-to-r from-green-400 to-blue-500 py-16">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
             <h2 className="text-3xl font-bold text-white mb-4">
-              {translations?.welcome_back || 'Welcome Back'}, {user.name}!
+              {translations?.welcome_back || 'Welcome Back'}, {user.full_name || user.username}!
             </h2>
             <p className="text-xl text-green-100 mb-8">
               {translations?.personalized_experience || 'Continue your personalized customer service experience.'}
