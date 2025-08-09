@@ -54,6 +54,26 @@ const makeRequest = async (endpoint, options = {}) => {
   }
 };
 
+export const login = async (credentials) => {
+  console.log('Sending login request:', credentials);
+  
+  const response = await fetch(`${API_BASE_URL}/users/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(credentials),
+  });
+  
+  if (!response.ok) {
+    const errorData = await response.json();
+    console.log('Login error:', errorData);
+    throw new ApiError(errorData.detail || 'Login failed');
+  }
+  
+  return response.json();
+};
+  
 // Update the authApi.login function to match FastAPI response format
 export const authApi = {
   login: async (credentials) => {
