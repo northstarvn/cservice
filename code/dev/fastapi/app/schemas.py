@@ -1,22 +1,22 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from datetime import datetime
 from typing import Optional, List
 from enum import Enum
 
-class ServiceTypeEnum(str, Enum):
+class ServiceType(str, Enum):
     consultation = "consultation"
     delivery = "delivery"
     meeting = "meeting"
     project = "project"
 
-class BookingStatusEnum(str, Enum):
+class BookingStatus(str, Enum):
     pending = "pending"
     confirmed = "confirmed"
     cancelled = "cancelled"
     completed = "completed"
 
 class BookingCreate(BaseModel):
-    service_type: ServiceTypeEnum
+    service_type: ServiceType
     title: str
     description: Optional[str] = None
     scheduled_date: datetime
@@ -25,15 +25,15 @@ class BookingUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     scheduled_date: Optional[datetime] = None
-    status: Optional[BookingStatusEnum] = None
+    status: Optional[BookingStatus] = None
 
 class BookingOut(BaseModel):
     id: int
-    service_type: ServiceTypeEnum
+    service_type: ServiceType
     title: str
     description: Optional[str]
     scheduled_date: datetime
-    status: BookingStatusEnum
+    status: BookingStatus
     created_at: datetime
     updated_at: datetime
     
@@ -63,7 +63,25 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     username: str
 
+class BookingBase(BaseModel):
+    service_type: str
+    details: Optional[str] = None
+    scheduled_for: datetime
+
+class PaginatedBookings(BaseModel):
+    items: List[BookingOut]
+    total: int
+    page: int
+    per_page: int
+    pages: int
+
+    class Config:
+        from_attributes = True
+
 class UserLogin(BaseModel):
     username: str
     password: str        
 
+class Token(BaseModel):
+    access_token: str
+    token_type: str    

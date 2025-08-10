@@ -18,6 +18,20 @@ class ServiceType(enum.Enum):
     MEETING = "meeting"
     PROJECT = "project"
 
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    email = Column(String(100), unique=True, index=True, nullable=False)
+    full_name = Column(String(100))
+    hashed_password = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationship
+    bookings = relationship("Booking", back_populates="user")
+
 class Booking(Base):
     __tablename__ = "bookings"
     
@@ -33,8 +47,3 @@ class Booking(Base):
     
     # Relationship
     user = relationship("User", back_populates="bookings")
-
-# Add to existing User model
-class User(Base):
-    # ... existing fields ...
-    bookings = relationship("Booking", back_populates="user")
