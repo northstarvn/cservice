@@ -4,13 +4,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.routers import users, bookings
 from app.db import Base, engine
+from contextlib import asynccontextmanager
 import logging
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CService Booking Backend")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logging.info("Database tables created successfully")
+    except Exception as e:
+        logging.error(f"Database startup error: {e}", exc_info=True)
+        raise
+    
+    yield  # App runs here
+
+app = FastAPI(lifespan=lifespan,title="CService Booking Backend")
 
 # Enhanced CORS configuration
 app.add_middleware(
@@ -30,22 +45,16 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Global exception handler caught: {exc}")
+    logging.error(f"Global exception handler caught: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error occurred"}
+        content={"detail": "Internal server error"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
     )
-
-@app.on_event("startup")
-async def on_startup():
-    # Create all DB tables (in production use Alembic migrations)
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables created successfully")
-    except Exception as e:
-        logger.error(f"Error creating database tables: {e}")
-        raise
 
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
