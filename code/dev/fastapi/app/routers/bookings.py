@@ -17,8 +17,9 @@ async def create_booking(
     booking = models.Booking(
         user_id=current_user.id,
         service_type=booking_in.service_type,
-        details=booking_in.details,
-        scheduled_for=booking_in.scheduled_for
+        title=booking_in.title,                    # ✅ Correct field
+        description=booking_in.description,        # ✅ Correct field  
+        scheduled_date=booking_in.scheduled_date   # ✅ Correct field
     )
     
     db.add(booking)
