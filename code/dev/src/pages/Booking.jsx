@@ -35,7 +35,7 @@ const Booking = () => {
   const [formData, setFormData] = useState({
     service_type: 'consultation',
     details: '',
-    scheduled_for: ''
+    scheduled_date: ''
   });
 
   const serviceTypes = [
@@ -122,7 +122,7 @@ const Booking = () => {
       setFormData({
         service_type: 'consultation',
         details: '',
-        scheduled_for: ''
+        scheduled_date: ''
       });
       fetchBookings(pagination.page);
     } catch (err) {
@@ -138,7 +138,7 @@ const Booking = () => {
     setFormData({
       service_type: booking.service_type,
       details: booking.details || '',
-      scheduled_for: apiUtils.parseBookingDate(booking.scheduled_for).toISOString().slice(0, 16)
+      scheduled_date: apiUtils.parseBookingDate(booking.scheduled_date).toISOString().slice(0, 16)
     });
     setShowCreateForm(true);
   };
@@ -245,8 +245,8 @@ const Booking = () => {
                 </label>
                 <input
                   type="datetime-local"
-                  value={formData.scheduled_for}
-                  onChange={(e) => setFormData({...formData, scheduled_for: e.target.value})}
+                  value={formData.scheduled_date}
+                  onChange={(e) => setFormData({...formData, scheduled_date: e.target.value})}
                   className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   required
                 />
@@ -281,7 +281,7 @@ const Booking = () => {
                     setFormData({
                       service_type: 'consultation',
                       details: '',
-                      scheduled_for: ''
+                      scheduled_date: ''
                     });
                   }}
                   className="bg-gray-300 text-gray-700 px-6 py-2 rounded-lg hover:bg-gray-400"
@@ -361,7 +361,7 @@ const Booking = () => {
                       <div className="space-y-2 text-sm text-gray-600">
                         <div className="flex items-center space-x-2">
                           <Clock size={16} />
-                          <span>{apiUtils.parseBookingDate(booking.scheduled_for).toLocaleString()}</span>
+                          <span>{apiUtils.parseBookingDate(booking.scheduled_date).toLocaleString()}</span>
                         </div>
                         {booking.details && (
                           <p className="text-gray-700">{booking.details}</p>

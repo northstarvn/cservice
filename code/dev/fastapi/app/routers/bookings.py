@@ -18,7 +18,7 @@ async def create_booking(
         user_id=current_user.id,
         service_type=booking_in.service_type,
         title=booking_in.title,                    # ✅ Correct field
-        description=booking_in.description,        # ✅ Correct field  
+        details=booking_in.description,        # ✅ Correct field  
         scheduled_date=booking_in.scheduled_date   # ✅ Correct field
     )
     

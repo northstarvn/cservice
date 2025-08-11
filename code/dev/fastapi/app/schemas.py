@@ -18,12 +18,12 @@ class BookingStatus(str, Enum):
 class BookingCreate(BaseModel):
     service_type: ServiceType
     title: str
-    description: Optional[str] = None
+    details: Optional[str] = None
     scheduled_date: datetime
 
 class BookingUpdate(BaseModel):
     title: Optional[str] = None
-    description: Optional[str] = None
+    details: Optional[str] = None
     scheduled_date: Optional[datetime] = None
     status: Optional[BookingStatus] = None
 
@@ -31,7 +31,7 @@ class BookingOut(BaseModel):
     id: int
     service_type: ServiceType
     title: str
-    description: Optional[str]
+    details: Optional[str]
     scheduled_date: datetime
     status: BookingStatus
     created_at: datetime
@@ -66,7 +66,7 @@ class TokenData(BaseModel):
 class BookingBase(BaseModel):
     service_type: str
     details: Optional[str] = None
-    scheduled_for: datetime
+    scheduled_date: datetime
 
 class PaginatedBookings(BaseModel):
     items: List[BookingOut]

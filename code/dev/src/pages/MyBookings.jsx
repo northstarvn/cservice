@@ -136,7 +136,7 @@ const MyBookings = () => {
         } else if (sortBy === 'oldest') {
           return new Date(a.created_at) - new Date(b.created_at);
         } else if (sortBy === 'date') {
-          return new Date(a.scheduled_for) - new Date(b.scheduled_for);
+          return new Date(a.scheduled_date) - new Date(b.scheduled_date);
         }
         return 0;
       });
@@ -252,7 +252,7 @@ const MyBookings = () => {
   // Booking card component
   const BookingCard = ({ booking }) => {
     const StatusIcon = STATUS_ICONS[booking.status] || AlertCircle;
-    const { date, time } = formatDateTime(booking.scheduled_for);
+    const { date, time } = formatDateTime(booking.scheduled_date);
     const isProcessing = optimisticUpdates.has(booking.id);
     
     return (

@@ -115,7 +115,7 @@ export const bookingApi = {
       body: {
         service_type: bookingData.service_type,
         details: bookingData.details,
-        scheduled_for: bookingData.scheduled_for
+        scheduled_date: bookingData.scheduled_date
       },
     });
   },
@@ -157,10 +157,10 @@ export const bookingApi = {
   // Legacy methods for backward compatibility
   submitBooking: async (userId, serviceType, date, time) => {
     // Convert legacy format to new format
-    const scheduled_for = new Date(`${date}T${time}`).toISOString();
+    const scheduled_date = new Date(`${date}T${time}`).toISOString();
     return bookingApi.createBooking({
       service_type: serviceType,
-      scheduled_for,
+      scheduled_date,
       details: `Legacy booking for user ${userId}`
     });
   },
@@ -422,10 +422,10 @@ export const apiUtils = {
       errors.push('Service type is required');
     }
     
-    if (!bookingData.scheduled_for) {
+    if (!bookingData.scheduled_date) {
       errors.push('Scheduled date and time is required');
     } else {
-      const scheduledDate = new Date(bookingData.scheduled_for);
+      const scheduledDate = new Date(bookingData.scheduled_date);
       const now = new Date();
       
       if (scheduledDate <= now) {
