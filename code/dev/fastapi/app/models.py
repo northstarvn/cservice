@@ -1,20 +1,20 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Enum
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Enum as SAEnum, func
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
 from app.db import Base  # Import Base from db.py instead of creating new one
 
 class BookingStatus(enum.Enum):
-    PENDING = "pending"
-    CONFIRMED = "confirmed"
-    CANCELLED = "cancelled"
-    COMPLETED = "completed"
+    pending = "pending"
+    confirmed = "confirmed"
+    cancelled = "cancelled"
+    completed = "completed"
 
 class ServiceType(enum.Enum):
-    CONSULTATION = "consultation"
-    DELIVERY = "delivery"
-    MEETING = "meeting"
-    PROJECT = "project"
+    consultation = "consultation"
+    delivery = "delivery"
+    meeting = "meeting"
+    project = "project"
 
 class User(Base):
     __tablename__ = "users"
@@ -32,16 +32,21 @@ class User(Base):
 
 class Booking(Base):
     __tablename__ = "bookings"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    service_type = Column(Enum(ServiceType), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+
+    service_type = Column(SAEnum(ServiceType, name="servicetype", native_enum=True), nullable=False)
     title = Column(String(255), nullable=True)
-    details = Column(Text)
+    details = Column(Text, nullable=False, default="")
     scheduled_date = Column(DateTime, nullable=False)
-    status = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relationship
+
+    status = Column(
+        SAEnum(BookingStatus, name="bookingstatus", native_enum=True),
+        nullable=False,
+        default=BookingStatus.pending
+    )
+
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     user = relationship("User", back_populates="bookings")
