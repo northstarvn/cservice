@@ -1,6 +1,7 @@
 import os
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import text
 from dotenv import load_dotenv
 import logging
 
@@ -22,14 +23,6 @@ async def get_db():
             raise
         finally:
             await session.close()
-
-# Import models here so they're registered with Base
-# This ensures tables are created when Base.metadata.create_all() is called
-try:
-    from models import TestModel  # This will register the model
-    logging.info("Models imported successfully")
-except ImportError:
-    logging.warning("Models not found - create models.py to define your database tables")
 
 # Test connection function
 async def test_connection():

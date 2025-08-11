@@ -251,10 +251,10 @@ const Home = () => {
                     <div className="space-y-2 text-sm text-gray-600">
                       <div className="flex items-center space-x-2">
                         <Clock size={14} />
-                        <span>{formatBookingDate(booking.scheduled_for)}</span>
+                        <span>{formatBookingDate(booking.scheduled_date)}</span>
                       </div>
                       {booking.details && (
-                        <p className="text-gray-700 truncate">{booking.details}</p>
+                        <p className="text-gray-700 truncate">{booking.title}</p>
                       )}
                     </div>
                   </div>

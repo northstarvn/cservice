@@ -1,10 +1,8 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Enum
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
-
-Base = declarative_base()
+from app.db import Base  # Import Base from db.py instead of creating new one
 
 class BookingStatus(enum.Enum):
     PENDING = "pending"

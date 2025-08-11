@@ -1,8 +1,12 @@
+import uvicorn
+from fastapi import FastAPI, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from app.routers import users, bookings
+from app.db import Base, engine, get_db
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from db import engine, Base, get_db
 import logging
 
 # Configure logging
@@ -32,16 +36,39 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
     logger.info("Database engine disposed")
 
-app = FastAPI(
-    title="CService API",
-    description="A FastAPI application with PostgreSQL",
-    version="1.0.0",
-    lifespan=lifespan
+app = FastAPI(lifespan=lifespan,title="CService Booking Backend")
+
+# Enhanced CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # React default port
+        "http://localhost:5173",  # Vite default port
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",  # Additional port if needed
+        "http://localhost:5174",  # Alternative Vite port
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
 )
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World", "status": "running"}
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logging.error(f"Global exception handler caught: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+app.include_router(users.router, prefix="/users", tags=["users"])
+app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
 
 @app.get("/health")
 async def health_check(db: AsyncSession = Depends(get_db)):
@@ -63,18 +90,5 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             "error": str(e)
         }
 
-@app.get("/db-test")
-async def database_test(db: AsyncSession = Depends(get_db)):
-    """Test database operations"""
-    try:
-        # Test a simple query
-        result = await db.execute(text("SELECT 'Database is working!' as message, NOW() as timestamp"))
-        row = result.fetchone()
-        
-        return {
-            "message": row.message,
-            "timestamp": row.timestamp,
-            "status": "success"
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
