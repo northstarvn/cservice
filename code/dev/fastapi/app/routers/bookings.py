@@ -2,35 +2,43 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import and_, desc, func
+from sqlalchemy.exc import IntegrityError
 from typing import Optional
+from datetime import datetime
 from app import models, schemas, deps
 
 router = APIRouter()
 
 @router.post("/", response_model=schemas.BookingOut)
 async def create_booking(
-    booking_in: schemas.BookingCreate,
+    booking: schemas.BookingCreate,
     current_user: models.User = Depends(deps.get_current_user),
     db: AsyncSession = Depends(deps.get_db)
 ):
-    # Enforce status pending internally (ignore client-sent status to avoid casing issues)
-    booking = models.Booking(
-        user_id=current_user.id,
-        service_type=booking_in.service_type,  # Already normalized by schema
-        title=booking_in.title,
-        details=booking_in.details,
-        scheduled_date=booking_in.scheduled_date,
-        status=models.BookingStatus.pending
-    )
-    db.add(booking)
-    await db.commit()
-    await db.refresh(booking)
-    return booking
+    try:
+        db_booking = models.Booking(
+            user_id=current_user.id,
+            service_type=booking.service_type,
+            title=booking.title,
+            details=booking.details or "",
+            scheduled_date=booking.scheduled_date,
+            status=models.BookingStatus.pending
+        )
+        db.add(db_booking)
+        await db.commit()
+        await db.refresh(db_booking)
+        return db_booking
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create booking: {str(e)}"
+        )
 
 @router.get("/", response_model=schemas.PaginatedBookings)
-async def get_user_bookings(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=100),
+async def get_bookings(
+    page: int = 1,
+    per_page: int = 10,
     status: Optional[schemas.BookingStatus] = None,
     service_type: Optional[schemas.ServiceType] = None,
     current_user: models.User = Depends(deps.get_current_user),
@@ -88,29 +96,60 @@ async def update_booking(
     current_user: models.User = Depends(deps.get_current_user),
     db: AsyncSession = Depends(deps.get_db)
 ):
-    result = await db.execute(
-        select(models.Booking).where(
-            and_(models.Booking.id == booking_id, models.Booking.user_id == current_user.id)
+    try:
+        result = await db.execute(
+            select(models.Booking).where(
+                and_(models.Booking.id == booking_id, models.Booking.user_id == current_user.id)
+            )
         )
-    )
-    booking = result.scalar_one_or_none()
-    if not booking:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+        booking = result.scalar_one_or_none()
+        if not booking:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
 
-    data = booking_update.dict(exclude_unset=True)
-    columns = {c.name for c in models.Booking.__table__.columns}
-
-    for field, value in data.items():
-        if field in columns and value is not None:
-            if hasattr(value, "value"):
-                setattr(booking, field, value.value)
-            else:
-                setattr(booking, field, value)
-
-    await db.commit()
-    await db.refresh(booking)
-    return booking
-
+        # Get update data using model_dump instead of deprecated dict()
+        update_data = booking_update.model_dump(exclude_unset=True, exclude_none=True)
+        
+        # Update fields with proper enum handling
+        for field, value in update_data.items():
+            if hasattr(booking, field):
+                if field in ['service_type', 'status']:
+                    # Handle enum values properly
+                    if hasattr(value, 'value'):
+                        setattr(booking, field, value.value)
+                    elif isinstance(value, str):
+                        # Convert string to enum if needed
+                        setattr(booking, field, value)
+                    else:
+                        setattr(booking, field, value)
+                else:
+                    setattr(booking, field, value)
+        
+        # Ensure updated_at is set
+        booking.updated_at = datetime.utcnow()
+        
+        await db.commit()
+        await db.refresh(booking)
+        return booking
+        
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid data: {str(e)}"
+        )
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Database constraint violation: {str(e)}"
+        )
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update booking: {str(e)}"
+        )
+    
 @router.delete("/{booking_id}")
 async def delete_booking(
     booking_id: int,

@@ -15,35 +15,23 @@ class BookingStatus(str, Enum):
     cancelled = "cancelled"
     completed = "completed"
 
-class ServiceType(str, Enum):
-    cleaning = "cleaning"
-    maintenance = "maintenance"
-    consultation = "consultation"
-
 def _normalize_enum(v, enum_cls):
     if v is None:
         return v
     if isinstance(v, enum_cls):
         return v
     if isinstance(v, str):
-        low = v.lower()
-        if low in enum_cls._value2member_map_:
-            return enum_cls(low)
-    return v
+        # Try exact match first
+        try:
+            return enum_cls(v.lower())
+        except ValueError:
+            # Try name matching
+            for member in enum_cls:
+                if member.name.lower() == v.lower():
+                    return member
+            raise ValueError(f"Invalid {enum_cls.__name__}: {v}")
+    raise ValueError(f"Invalid type for {enum_cls.__name__}: {type(v)}")
 
-# BookingCreate should NOT have status (server sets it)
-class BookingCreate(BaseModel):
-    service_type: ServiceType
-    title: Optional[str] = None
-    details: str
-    scheduled_date: datetime
-
-    @field_validator("service_type", mode="before")
-    @classmethod
-    def norm_service_type(cls, v):
-        return _normalize_enum(v, ServiceType)
-
-# Allow partial updates; normalize enums
 class BookingUpdate(BaseModel):
     service_type: Optional[ServiceType] = None
     title: Optional[str] = None
@@ -54,14 +42,28 @@ class BookingUpdate(BaseModel):
     @field_validator("service_type", mode="before")
     @classmethod
     def norm_service_type(cls, v):
+        if v is None:
+            return v
         return _normalize_enum(v, ServiceType)
 
     @field_validator("status", mode="before")
     @classmethod
     def norm_status(cls, v):
+        if v is None:
+            return v
         return _normalize_enum(v, BookingStatus)
+    
+class BookingCreate(BaseModel):
+    service_type: ServiceType
+    title: Optional[str] = None
+    details: str = ""
+    scheduled_date: datetime
 
-# REQUIRED: enable ORM attribute reading
+    @field_validator("service_type", mode="before")
+    @classmethod
+    def norm_service_type(cls, v):
+        return _normalize_enum(v, ServiceType)
+
 class BookingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -75,25 +77,21 @@ class BookingOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-# If you return User objects elsewhere, also add from_attributes to UserOut
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    username: str
     email: str
+    full_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
-# Paginated wrapper DOES NOT need from_attributes
 class PaginatedBookings(BaseModel):
     items: List[BookingOut]
     total: int
     page: int
     per_page: int
     pages: int
-
-class BookingList(BaseModel):
-    bookings: List[BookingOut]
-    total: int
 
 class UserBase(BaseModel):
     username: str
@@ -112,8 +110,4 @@ class TokenData(BaseModel):
 
 class UserLogin(BaseModel):
     username: str
-    password: str        
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str    
+    password: str

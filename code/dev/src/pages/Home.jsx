@@ -30,14 +30,17 @@ const Home = () => {
         setBookingsLoading(true);
         try {
           const data = await bookingApi.getBookings({ page: 1, per_page: 3 });
-          // Handle both paginated and non-paginated responses safely
           const bookings = data?.items || (Array.isArray(data) ? data : []);
           setRecentBookings(bookings);
         } catch (error) {
           console.error('Failed to fetch bookings:', error);
-          const errorInfo = apiUtils.handleApiError(error);
-          console.error('Error details:', errorInfo);
-          // Don't set bookings on error, keep empty array
+          // Handle specific error types
+          if (error.status === 422) {
+            console.error('Validation error:', error.message);
+          } else if (error.status === 401) {
+            console.error('Authentication error - redirecting to login');
+            // You might want to redirect to login here
+          }
           setRecentBookings([]);
         } finally {
           setBookingsLoading(false);
@@ -115,8 +118,10 @@ const Home = () => {
   };
 
   // Safe date parsing function
-  const formatBookingDate = (dateString) => {
+  const formatBookingDate = (booking) => {
     try {
+      // Handle both 'scheduled_for' and 'scheduled_date' field names
+      const dateString = booking.scheduled_for || booking.scheduled_date;
       if (apiUtils.parseBookingDate) {
         return apiUtils.parseBookingDate(dateString).toLocaleString();
       }

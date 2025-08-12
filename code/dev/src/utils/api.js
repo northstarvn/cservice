@@ -13,18 +13,6 @@ class ApiError extends Error {
   }
 }
 
-const handleResponse = async (response) => {
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new ApiError(
-      errorData.detail || errorData.message || 'An error occurred',
-      response.status,
-      errorData
-    );
-  }
-  return response.json();
-};
-
 // Update the makeRequest function to properly format the Authorization header
 const makeRequest = async (endpoint, options = {}) => {
   const url = `${API_BASE_URL}${endpoint}`;
@@ -106,20 +94,72 @@ export const authApi = {
   },
 };
 
-// ENHANCED Booking API - Updated to match new FastAPI backend
+const handleResponse = async (response) => {
+  if (!response.ok) {
+    let errorDetail = 'An error occurred';
+    try {
+      const errorData = await response.json();
+      errorDetail = errorData.detail || errorData.message || errorDetail;
+      
+      // Handle validation errors specifically
+      if (response.status === 422) {
+        if (Array.isArray(errorDetail)) {
+          errorDetail = errorDetail.map(err => err.msg).join(', ');
+        }
+      }
+    } catch (e) {
+      // If response isn't JSON, use status text
+      errorDetail = response.statusText || errorDetail;
+    }
+    
+    throw new ApiError(errorDetail, response.status);
+  }
+  return response.json();
+};
+
+
 export const bookingApi = {
   // Create new booking
   createBooking: async (bookingData) => {
+    // Ensure the data matches the expected schema
+    const formattedData = {
+      service_type: bookingData.service_type,
+      title: bookingData.title || null,
+      details: bookingData.details || "",
+      scheduled_date: bookingData.scheduled_date
+    };
+    
     return makeRequest('/bookings/', {
       method: 'POST',
-      body: {
-        service_type: bookingData.service_type,
-        details: bookingData.details,
-        scheduled_date: bookingData.scheduled_date
-      },
+      body: JSON.stringify(formattedData)
     });
   },
-
+  
+  updateBooking: async (id, bookingData) => {
+    // Only send fields that have changed
+    const updateData = {};
+    
+    if (bookingData.service_type !== undefined) {
+      updateData.service_type = bookingData.service_type;
+    }
+    if (bookingData.title !== undefined) {
+      updateData.title = bookingData.title;
+    }
+    if (bookingData.details !== undefined) {
+      updateData.details = bookingData.details;
+    }
+    if (bookingData.scheduled_date !== undefined) {
+      updateData.scheduled_date = bookingData.scheduled_date;
+    }
+    if (bookingData.status !== undefined) {
+      updateData.status = bookingData.status;
+    }
+    
+    return makeRequest(`/bookings/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updateData)
+    });
+  },
   // Get user's bookings with pagination and filters
   getBookings: async (params = {}) => {
     const { page = 1, per_page = 10, status, service_type } = params;
@@ -137,14 +177,6 @@ export const bookingApi = {
   // Get specific booking by ID
   getBooking: async (bookingId) => {
     return makeRequest(`/bookings/${bookingId}`);
-  },
-
-  // Update existing booking
-  updateBooking: async (bookingId, updateData) => {
-    return makeRequest(`/bookings/${bookingId}`, {
-      method: 'PUT',
-      body: updateData,
-    });
   },
 
   // Delete booking
