@@ -2,7 +2,7 @@ import uvicorn
 from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import users, bookings
+from app.routers import users, bookings, chat
 from app.db import Base, engine, get_db
 from contextlib import asynccontextmanager
 from sqlalchemy import text
@@ -69,6 +69,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
+app.include_router(chat.router, prefix="/", tags=["chat"])
 
 @app.get("/health")
 async def health_check(db: AsyncSession = Depends(get_db)):

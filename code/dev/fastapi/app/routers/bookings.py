@@ -5,7 +5,8 @@ from sqlalchemy import and_, desc, func
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
 from datetime import datetime
-from app import models, schemas, deps
+from app import models, deps
+from app.schemas import schemas
 
 router = APIRouter()
 

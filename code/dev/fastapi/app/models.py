@@ -4,6 +4,14 @@ from datetime import datetime
 import enum
 from app.db import Base  # Import Base from db.py instead of creating new one
 
+class ChatHistory(Base):
+    __tablename__ = "chat_history"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    message = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
 class BookingStatus(enum.Enum):
     pending = "pending"
     confirmed = "confirmed"
