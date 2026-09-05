@@ -1,17 +1,34 @@
+import os
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+import platform
+
 import uvicorn
-from fastapi import FastAPI, Request, Depends
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import users, bookings, chat
-from app.db import Base, engine, get_db
-from contextlib import asynccontextmanager
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-import logging
+
+from app.db import Base, engine, get_db
+from app.routers import bookings, chat, users
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+APP_NAME = os.getenv("CSERVICE_APP_NAME", "CService Booking Backend")
+APP_VERSION = os.getenv("CSERVICE_APP_VERSION", "0.1.0")
+APP_ENV = os.getenv("CSERVICE_ENV", os.getenv("ENV", "development"))
+APP_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CSERVICE_CORS_ORIGINS",
+        "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173,http://localhost:8080,http://localhost:5174",
+    ).split(",")
+    if origin.strip()
+]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -36,19 +53,17 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
     logger.info("Database engine disposed")
 
-app = FastAPI(lifespan=lifespan,title="CService Booking Backend")
+app = FastAPI(
+    lifespan=lifespan,
+    title=APP_NAME,
+    version=APP_VERSION,
+    description="Backend services for customer support, bookings, chat analytics, and retention workflows.",
+)
 
 # Enhanced CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # React default port
-        "http://localhost:5173",  # Vite default port
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "http://localhost:8080",  # Additional port if needed
-        "http://localhost:5174",  # Alternative Vite port
-    ],
+    allow_origins=APP_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -69,27 +84,101 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
-app.include_router(chat.router, prefix="/", tags=["chat"])
+app.include_router(chat.router, tags=["chat"])
+
+
+@app.get("/meta")
+async def app_metadata():
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "cors_origins": APP_CORS_ORIGINS,
+        "features": [
+            "auth",
+            "bookings",
+            "booking_events",
+            "chat",
+            "chat_history_summary",
+            "retention",
+        ],
+    }
+
+
+@app.get("/meta/features")
+async def app_feature_summary():
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "endpoints": {
+            "health": "/health",
+            "metadata": "/meta",
+            "booking_analytics": "/bookings/analytics/summary",
+            "booking_events": "/bookings/analytics/events",
+            "booking_export": "/bookings/analytics/export",
+            "chat_history": "/chat/history",
+            "retention_dashboard": "/retention/dashboard",
+            "retention_maintenance": "/retention/maintenance",
+        },
+    }
 
 @app.get("/health")
 async def health_check(db: AsyncSession = Depends(get_db)):
     try:
-        # Test database connection
-        result = await db.execute(text("SELECT version()"))
-        db_version = result.scalar()
+        result = await db.execute(text("SELECT 1"))
+        database_ok = result.scalar() == 1
         
         return {
             "status": "healthy",
-            "database": "connected",
-            "postgresql_version": db_version,
-            "timestamp": "2025-08-10 11:21:40"
+            "app": {
+                "name": APP_NAME,
+                "version": APP_VERSION,
+                "environment": APP_ENV,
+            },
+            "database": {
+                "connected": database_ok,
+            },
+            "cors": {
+                "allowed_origins": APP_CORS_ORIGINS,
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
         return {
             "status": "unhealthy",
-            "database": "disconnected",
+            "app": {
+                "name": APP_NAME,
+                "version": APP_VERSION,
+                "environment": APP_ENV,
+            },
+            "database": {
+                "connected": False,
+            },
             "error": str(e)
         }
+
+
+@app.get("/meta/runtime")
+async def runtime_metadata():
+    return {
+        "app": {
+            "name": APP_NAME,
+            "version": APP_VERSION,
+            "environment": APP_ENV,
+        },
+        "runtime": {
+            "python": platform.python_version(),
+            "implementation": platform.python_implementation(),
+            "system": platform.system(),
+            "release": platform.release(),
+        },
+        "observability": {
+            "logging": "standard",
+            "health_endpoint": "/health",
+            "metadata_endpoint": "/meta",
+        },
+    }
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

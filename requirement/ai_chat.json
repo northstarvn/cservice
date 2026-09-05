@@ -1,148 +1,92 @@
 {
   "ai_chat": {
     "id": "ai_chat_module",
-    "description": "AI virtual assistant for customer support with adaptive conversation.",
-    "components": [
-      {
-        "id": "chat_popup",
-        "type": "popup",
-        "trigger": "start_chat_button",
-        "content": {
-          "header": {
-            "title": "AI Assistant",
-            "icon": "fa-robot",
-            "close_button": {
-              "id": "close_popup_button",
-              "icon": "fa-times"
-            }
-          },
-          "body": {
-            "id": "chat_container",
-            "type": "chat_window",
-            "features": {
-              "input_field": {
-                "id": "chat_input",
-                "placeholder": "Type your message...",
-                "validation": "non_empty"
-              },
-              "message_display": {
-                "id": "chat_messages",
-                "data_source": "chat_history",
-                "formats": [
-                  {
-                    "type": "user_message",
-                    "style": "bg-blue-100 text-right"
-                  },
-                  {
-                    "type": "ai_message",
-                    "style": "bg-gray-100 text-left"
-                  }
-                ]
-              },
-              "action_buttons": [
-                {
-                  "id": "send_message_button",
-                  "icon": "fa-paper-plane",
-                  "action": "send_message"
-                },
-                {
-                  "id": "attach_file_button",
-                  "icon": "fa-paperclip",
-                  "action": "upload_file"
-                }
-              ]
-            }
-          }
-        }
-      }
-    ],
+    "description": "Backend-backed AI assistant for customer support, retention analysis, and loyalty improvement.",
     "backend_integration": {
-      "endpoint": "/api/ai-chat",
+      "endpoint": "/chat",
       "methods": [
-        {
-          "id": "start_session",
-          "method": "POST",
-          "url": "/api/ai-chat/start",
-          "payload": {
-            "user_id": "string",
-            "language": "string",
-            "session_id": "uuid"
-          }
-        },
         {
           "id": "send_message",
           "method": "POST",
-          "url": "/api/ai-chat/message",
+          "url": "/chat",
           "payload": {
-            "session_id": "uuid",
-            "message": "string",
-            "meta_data": {
-              "timestamp": "datetime",
-              "context": "object"
-            }
+            "message": "string"
           },
           "response": {
-            "ai_reply": "string",
-            "suggestions": ["string"]
-          }
-        }
-      ],
-      "data_storage": [
-        {
-          "type": "nosql",
-          "database": "mongodb",
-          "collection": "chat_history",
-          "schema": {
-            "session_id": "uuid",
-            "messages": [
-              {
-                "sender": "string",
-                "content": "string",
-                "timestamp": "datetime"
-              }
-            ]
+            "text": "string",
+            "sentiment": {
+              "label": "string",
+              "score": "float"
+            },
+            "suggestions": ["string"],
+            "vector": ["float"],
+            "insights": ["object"],
+            "summary": "object",
+            "improvement_pack": "object"
           }
         },
         {
-          "type": "vector",
-          "database": "pinecone",
-          "index": "chat_vectors",
-          "schema": {
-            "session_id": "uuid",
-            "message_vector": "array<float>",
-            "metadata": "object"
-          }
+          "id": "chat_history",
+          "method": "GET",
+          "url": "/chat/history"
+        },
+        {
+          "id": "chat_insights",
+          "method": "GET",
+          "url": "/chat/insights"
+        },
+        {
+          "id": "interaction_signals",
+          "method": "GET",
+          "url": "/chat/signals"
+        },
+        {
+          "id": "system_priorities",
+          "method": "GET",
+          "url": "/chat/system-priorities"
+        },
+        {
+          "id": "interaction_trends",
+          "method": "GET",
+          "url": "/chat/trends"
+        },
+        {
+          "id": "retention_cohorts",
+          "method": "GET",
+          "url": "/chat/retention-cohorts"
+        },
+        {
+          "id": "churn_prediction",
+          "method": "GET",
+          "url": "/chat/churn-prediction"
+        },
+        {
+          "id": "lifecycle_stages",
+          "method": "GET",
+          "url": "/chat/lifecycle-stages"
+        },
+        {
+          "id": "improvement_pack",
+          "method": "GET",
+          "url": "/chat/improvement-pack"
+        },
+        {
+          "id": "retention_snapshots",
+          "method": "GET",
+          "url": "/chat/snapshots"
+        },
+        {
+          "id": "retention_snapshot_delta",
+          "method": "GET",
+          "url": "/chat/snapshots/delta"
         }
       ]
     },
-    "unit_tests": [
-      {
-        "id": "chat_popup_test",
-        "description": "Verify chat popup renders and handles input.",
-        "test_cases": [
-          {
-            "id": "input_validation",
-            "input": "chat_input.value",
-            "expected_output": "Non-empty string"
-          },
-          {
-            "id": "send_button_action",
-            "input": "send_message_button.click",
-            "expected_output": "Calls /api/ai-chat/message"
-          }
-        ]
-      },
-      {
-        "id": "backend_integration_test",
-        "description": "Test AI chat API endpoints.",
-        "test_cases": [
-          {
-            "id": "start_session_response",
-            "input": "POST /api/ai-chat/start",
-            "expected_output": "200 OK, session_id returned"
-          }
-        ]
-      }
+    "backend_notes": [
+      "Keep existing chat history storage intact.",
+      "Preserve additive retention analytics behavior.",
+      "Do not disable auth, bookings, or chat response flow.",
+      "Snapshot persistence is stored in the FastAPI backend database."
     ]
   }
 }

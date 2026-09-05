@@ -5,7 +5,6 @@ from sqlalchemy.future import select
 from app.db import get_db
 from app import models, security
 import jwt
-from jwt import PyJWTError
 
 # Security scheme
 security_scheme = HTTPBearer()
@@ -30,7 +29,7 @@ async def get_current_user(
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
-    except PyJWTError:
+    except Exception:
         raise credentials_exception
     
     # Get user from database
@@ -41,3 +40,12 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
+
+async def get_current_admin_user(current_user: models.User = Depends(get_current_user)) -> models.User:
+    if not bool(getattr(current_user, "is_admin", False)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    return current_user

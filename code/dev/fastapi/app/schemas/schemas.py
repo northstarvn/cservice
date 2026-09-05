@@ -77,6 +77,85 @@ class BookingOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+
+class BookingEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    booking_id: int
+    user_id: int
+    event_type: str
+    from_status: Optional[str] = None
+    to_status: Optional[str] = None
+    note: str
+    created_at: datetime
+
+
+class BookingAuditSummary(BaseModel):
+    booking_id: int
+    user_id: int
+    total_events: int
+    created_events: int
+    status_updates: int
+    latest_event_at: Optional[datetime] = None
+
+
+class BookingTransitionResult(BaseModel):
+    booking: BookingOut
+    event: BookingEventOut
+
+
+class BookingHistoryItem(BaseModel):
+    booking: BookingOut
+    events: List[BookingEventOut]
+
+
+class BookingHistoryReport(BaseModel):
+    booking_id: int
+    user_id: int
+    current_status: BookingStatus
+    event_count: int
+    items: List[BookingEventOut]
+
+
+class AnalyticsEventCount(BaseModel):
+    event_type: str
+    count: int
+
+
+class AdminAnalyticsSummary(BaseModel):
+    generated_at: datetime
+    total_users: int
+    total_bookings: int
+    bookings_by_status: dict[str, int]
+    booking_events_total: int
+    booking_events_by_type: List[AnalyticsEventCount]
+    recent_bookings: int
+    recent_events: int
+
+
+class BookingEventFilterSummary(BaseModel):
+    generated_at: datetime
+    total_events: int
+    page: int
+    per_page: int
+    pages: int
+    event_type: Optional[str] = None
+    booking_id: Optional[int] = None
+    user_id: Optional[int] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    statuses: dict[str, int]
+    events: List[BookingEventOut]
+
+
+class BookingExportReport(BaseModel):
+    generated_at: datetime
+    total_bookings: int
+    total_events: int
+    bookings: List[BookingOut]
+    events: List[BookingEventOut]
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -85,6 +164,7 @@ class UserOut(BaseModel):
     full_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    is_admin: bool = False
 
 class PaginatedBookings(BaseModel):
     items: List[BookingOut]
@@ -104,6 +184,7 @@ class UserCreate(UserBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    expires_in: int
 
 class TokenData(BaseModel):
     username: str
@@ -111,3 +192,12 @@ class TokenData(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class PasswordChangeResult(BaseModel):
+    message: str

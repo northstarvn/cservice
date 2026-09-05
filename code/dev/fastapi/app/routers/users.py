@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
@@ -60,8 +59,36 @@ async def login(user_credentials: schemas.UserLogin, db: AsyncSession = Depends(
         )
     
     access_token = security.create_access_token(data={"sub": user.username})
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": security.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
 
 @router.get("/me", response_model=schemas.UserOut)
 async def read_users_me(current_user: models.User = Depends(deps.get_current_user)):
     return current_user
+
+
+@router.post("/me/password", response_model=schemas.PasswordChangeResult)
+async def change_password(
+    payload: schemas.PasswordChange,
+    current_user: models.User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not security.verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+
+    if payload.current_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from the current password",
+        )
+
+    current_user.hashed_password = security.get_password_hash(payload.new_password)
+    await db.commit()
+
+    return {"message": "Password updated successfully"}
