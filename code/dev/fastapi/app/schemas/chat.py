@@ -226,6 +226,54 @@ class RetentionMaintenanceReport(BaseModel):
     results: List[RetentionMaintenanceResult]
 
 
+class EcosystemSubserviceStatus(BaseModel):
+    name: str
+    purpose: str
+    routes: List[str]
+    status: str
+    health_endpoint: Optional[str] = None
+    notes: List[str] = []
+
+
+class EcosystemStatusReport(BaseModel):
+    name: str
+    version: str
+    environment: str
+    generated_at: datetime
+    overall_status: str
+    subservices: Dict[str, EcosystemSubserviceStatus]
+
+
+class AuthenticatedProbeTarget(BaseModel):
+    route: str
+    method: str
+    requires_auth: bool
+    expected_status: int
+
+
+class AuthenticatedProbeReport(BaseModel):
+    generated_at: datetime
+    scope: str
+    actor: str
+    targets: List[AuthenticatedProbeTarget]
+    status: str
+    notes: List[str]
+
+
+class CapabilitySummaryItem(BaseModel):
+    key: str
+    study_theme: str
+    feature: str
+    signal_focus: List[str]
+    route: str
+
+
+class CapabilitySummaryReport(BaseModel):
+    generated_at: datetime
+    title: str
+    items: List[CapabilitySummaryItem]
+
+
 class UserActivityReport(BaseModel):
     user_id: int
     window_days: int

@@ -2622,10 +2622,19 @@ async def get_system_priorities(
             }
         )
 
+    total_signals = sum(item["signal_count"] for item in priorities)
+    top_priority = priorities[0]["area"] if priorities else "none"
+
     return {
         "user_id": current_user.id,
         "focus": "loyalty and retention improvements",
         "priorities": priorities,
+        "summary": {
+            "total_signals": total_signals,
+            "tracked_areas": len(priorities),
+            "top_priority": top_priority,
+            "service_health": "ready" if priorities else "insufficient_signal_data",
+        },
     }
 
 

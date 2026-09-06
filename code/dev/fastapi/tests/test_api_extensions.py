@@ -15,6 +15,72 @@ from app.routers.bookings import get_booking_history, get_booking_analytics_summ
 from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
 
 
+def test_meta_ecosystem_exposes_backend_subservices():
+    response = TestClient(app).get("/meta/ecosystem")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "chat_intelligence" in payload["subservices"]
+    assert "retention_ops" in payload["subservices"]
+    assert "/chat/admin/snapshot-operations-gonogo" in payload["subservices"]["retention_ops"]["routes"]
+    assert payload["overall_status"] == "ready"
+    assert payload["subservices"]["chat_intelligence"]["status"] == "ready"
+    assert payload["subservices"]["retention_ops"]["health_endpoint"] == "/chat/admin/snapshot-health-score"
+    assert payload["subservices"]["identity"]["notes"]
+
+
+def test_authenticated_probe_routes_exposes_route_level_checks():
+    async def _fake_get_current_user():
+        return FakeUser()
+
+    app.dependency_overrides[deps.get_current_user] = _fake_get_current_user
+    try:
+        response = TestClient(app).get("/meta/probe/routes")
+    finally:
+        app.dependency_overrides.pop(deps.get_current_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["actor"] == "tester"
+    assert payload["targets"]
+    assert payload["targets"][0]["requires_auth"] is True
+    assert payload["targets"][0]["route"] == "/users/me"
+    assert "/chat/retention-dashboard" in {target["route"] for target in payload["targets"]}
+    assert "/chat/snapshots/trends" in {target["route"] for target in payload["targets"]}
+
+
+def test_system_priorities_includes_summary_contract():
+    class _PrioritySession:
+        async def execute(self, query):
+            class _Result:
+                def all(self_inner):
+                    return [("reliability", 2, 4.5), ("support", 1, 2.0)]
+
+            return _Result()
+
+    async def _fake_get_db():
+        yield _PrioritySession()
+
+    async def _fake_get_current_user():
+        return FakeUser()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_user] = _fake_get_current_user
+    try:
+        response = TestClient(app).get("/chat/system-priorities")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_signals"] == 3
+    assert payload["summary"]["tracked_areas"] == 2
+    assert payload["summary"]["top_priority"] == "reliability"
+    assert payload["summary"]["service_health"] == "ready"
+
+
 @dataclass
 class FakeUser:
     id: int = 1
