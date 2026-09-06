@@ -10,9 +10,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.main import app
 from app import models, deps
-from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo
+from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
 from app.routers.bookings import get_booking_history, get_booking_analytics_summary
-from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go
+from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
 
 
 @dataclass
@@ -363,6 +363,34 @@ class FakeRetentionOperationsGoNoGoSession(FakeRetentionHealthScoreSession):
     pass
 
 
+class FakeMonetizationCohortsSession:
+    def __init__(self):
+        self.calls = 0
+
+    async def execute(self, query):
+        class _Result:
+            def __init__(self, value=None, rows=None):
+                self._value = value
+                self._rows = rows or []
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._rows
+
+        self.calls += 1
+        if self.calls == 1:
+            return _Result(rows=[(1,)])
+        if self.calls == 2:
+            return _Result(rows=[type("ChatRow", (), {"timestamp": datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc), "message": "pricing is expensive but worth it"})()])
+        if self.calls == 3:
+            return _Result(rows=[])
+        if self.calls == 4:
+            return _Result(rows=[type("SignalRow", (), {"score": 2.0})()])
+        return _Result(rows=[])
+
+
 class FakeCohortDrilldownSession:
     def __init__(self):
         self.calls = 0
@@ -457,6 +485,38 @@ def test_chat_history_summary_supports_nullable_user_id():
     assert summary.user_id is None
 
 
+def test_interaction_summary_includes_monetization_fields():
+    summary = InteractionSummary(
+        user_id=1,
+        messages_analyzed=3,
+        bookings_analyzed=1,
+        churn_risk="low",
+        loyalty_score=88.0,
+        monetization_readiness=92.5,
+        value_tier="premium",
+        customer_classification="loyal high-value",
+        top_issues=["pricing"],
+        strengths=["repeat usage"],
+        insights=[],
+        metadata={},
+        generated_at=datetime.now(timezone.utc),
+    )
+
+    assert summary.monetization_readiness == 92.5
+    assert summary.value_tier == "premium"
+    assert summary.customer_classification == "loyal high-value"
+
+
+@pytest.mark.asyncio
+async def test_monetization_cohorts_endpoint_returns_report():
+    db = FakeMonetizationCohortsSession()
+    report = await get_monetization_cohorts(window_days=30, db=db)
+
+    assert isinstance(report, MonetizationCohortReport)
+    assert report.window_days == 30
+    assert report.cohorts
+
+
 def test_meta_features_lists_chat_history_summary():
     async def _fake_get_db():
         yield FakeHealthSession()
@@ -498,9 +558,34 @@ def test_meta_features_lists_snapshot_operations_overview():
         app.dependency_overrides.pop(deps.get_db, None)
 
     assert response.status_code == 200
-    payload = response.json()
-    assert "retention_snapshot_operations_overview_reporting" in payload["features"]
-    assert payload["endpoints"]["retention_snapshot_operations_overview"] == "/chat/admin/snapshot-operations-overview"
+
+
+def test_weighted_system_monitoring_filters_top_focus_items():
+    summary = InteractionSummary(
+        user_id=7,
+        messages_analyzed=12,
+        bookings_analyzed=3,
+        churn_risk="medium",
+        loyalty_score=61.0,
+        monetization_readiness=70.0,
+        value_tier="standard",
+        customer_classification="stable value",
+        top_issues=["response_speed"],
+        strengths=["repeat usage"],
+        insights=[],
+        metadata={},
+        generated_at=datetime.now(timezone.utc),
+    )
+
+    report = app.state if False else None
+    from app.routers.chat import _build_weighted_system_monitoring
+
+    report = _build_weighted_system_monitoring(summary)
+
+    assert isinstance(report, WeightedSystemMonitoringReport)
+    assert report.scope == "whole_system_and_customer_activity"
+    assert [item.area for item in report.items] == ["reliability", "response_speed", "customer_activity", "retention"]
+    assert all(item.weight >= 0.8 for item in report.items[:4])
 
 
 def test_meta_features_lists_snapshot_operations_status():

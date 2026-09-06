@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "role-mimic harness",
+      "type": "shell",
+      "command": "python3",
+      "args": ["tests/ai_harness/run_role_mimic.py"],
+      "group": "test",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -60,8 +60,7 @@ from app.schemas.chat import (
     RetentionSnapshotStalenessReport,
     RetentionSnapshotStalenessTrendItem,
     RetentionSnapshotStalenessTrendReport,
-    RetentionSnapshotHealthScore,decide and go
-    
+    RetentionSnapshotHealthScore,
     RetentionSnapshotHealthSummary,
     RetentionSnapshotHealthRisk,
     RetentionSnapshotHealthRecommendation,
@@ -73,8 +72,12 @@ from app.schemas.chat import (
     RetentionSnapshotOperationsExecutionState,
     RetentionSnapshotOperationsLaunchReadiness,
     RetentionSnapshotOperationsGoNoGo,
+    MonetizationCohortReport,
+    WeightedSystemMonitoringReport,
+    WeightedFocusItem,
 )
 from app.schemas.schemas import UserOut
+from app.services.chat_analytics import build_monetization_cohorts
 from fastapi.responses import JSONResponse
 import requests,os
 from dotenv import load_dotenv
@@ -109,6 +112,124 @@ RETENTION_KEYWORDS = {
     "recommend": "recommendations",
     "help": "support",
     "support": "support",
+}
+
+PREDEFINED_POLICY_AREAS = [
+    "response_speed",
+    "clarity",
+    "reliability",
+    "booking_flow",
+    "support",
+    "pricing",
+    "retention",
+    "sentiment_recovery",
+    "onboarding",
+    "notification_quality",
+    "self_service",
+    "handoff",
+    "trust",
+    "follow_up",
+]
+
+POLICY_CONFIGS = {
+    "response_speed": {
+        "recommendation": "Reduce wait times and make response status visible to users.",
+        "next_step": "Add response-time tracking and auto-acknowledgements for long-running requests.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "backend and ops",
+    },
+    "clarity": {
+        "recommendation": "Rewrite confusing flows and simplify user-facing prompts.",
+        "next_step": "Review the most repeated support phrases and shorten the required form copy.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "product and content",
+    },
+    "reliability": {
+        "recommendation": "Stabilize error-prone journeys before expanding features.",
+        "next_step": "Log failure points by endpoint and surface recoverable errors to users.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "backend engineering",
+    },
+    "booking_flow": {
+        "recommendation": "Make booking changes easier and reduce abandonment in pending states.",
+        "next_step": "Track booking drop-offs, cancellations, and time-to-confirmation.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product and frontend",
+    },
+    "support": {
+        "recommendation": "Offer more proactive support and clearer escalation paths.",
+        "next_step": "Add guided help for frequent questions and route high-friction cases sooner.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "customer support",
+    },
+    "pricing": {
+        "recommendation": "Clarify pricing and value messaging to reduce hesitation.",
+        "next_step": "Test pricing explanations and highlight service outcomes more clearly.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product strategy",
+    },
+    "retention": {
+        "recommendation": "Create a closed-loop retention workflow for unresolved interactions.",
+        "next_step": "Trigger follow-up prompts when the same concern repeats across sessions.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "growth and CRM",
+    },
+    "sentiment_recovery": {
+        "recommendation": "Route negative sentiment into a recovery flow before the issue escalates.",
+        "next_step": "Escalate negative messages to a fast human follow-up queue.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "support and success",
+    },
+    "onboarding": {
+        "recommendation": "Tighten onboarding so first-time users reach value faster.",
+        "next_step": "Reduce the number of first-run steps and clarify the first success milestone.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "product and onboarding",
+    },
+    "notification_quality": {
+        "recommendation": "Make notifications more timely, relevant, and easier to act on.",
+        "next_step": "Audit notification timing, duplication, and message usefulness.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product and communications",
+    },
+    "self_service": {
+        "recommendation": "Expand self-service coverage so users can resolve common issues independently.",
+        "next_step": "Document the top repeated requests and add guided resolution paths.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "support operations",
+    },
+    "handoff": {
+        "recommendation": "Improve handoff quality between automated and human support.",
+        "next_step": "Pass context, history, and intent into escalation workflows.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "support engineering",
+    },
+    "trust": {
+        "recommendation": "Strengthen trust signals around reliability, refunds, and commitments.",
+        "next_step": "Surface clearer status updates and promise handling policies.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product strategy",
+    },
+    "follow_up": {
+        "recommendation": "Build stronger follow-up loops for unresolved customer needs.",
+        "next_step": "Schedule proactive check-ins when issues remain open across sessions.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "customer success",
+    },
 }
 
 
@@ -155,7 +276,7 @@ def _score_area(messages: list[str], bookings: list[models.Booking], area: str) 
 
 
 def _build_interaction_insights(messages: list[str], bookings: list[models.Booking], sentiment: Sentiment | None) -> list[InteractionInsight]:
-    areas = ["response_speed", "clarity", "reliability", "booking_flow", "support", "pricing", "retention"]
+    areas = PREDEFINED_POLICY_AREAS
     ranking = []
     for area in areas:
         score, evidence = _score_area(messages, bookings, area)
@@ -166,34 +287,14 @@ def _build_interaction_insights(messages: list[str], bookings: list[models.Booki
     for area, score, evidence in ranking[:4]:
         if score <= 0:
             continue
-        if area == "response_speed":
-            recommendation = "Reduce wait times and make response status visible to users."
-            next_step = "Add response-time tracking and auto-acknowledgements for long-running requests."
-            priority = "high"
-        elif area == "clarity":
-            recommendation = "Rewrite confusing flows and simplify user-facing prompts."
-            next_step = "Review the most repeated support phrases and shorten the required form copy."
-            priority = "high"
-        elif area == "reliability":
-            recommendation = "Stabilize error-prone journeys before expanding features."
-            next_step = "Log failure points by endpoint and surface recoverable errors to users."
-            priority = "high"
-        elif area == "booking_flow":
-            recommendation = "Make booking changes easier and reduce abandonment in pending states."
-            next_step = "Track booking drop-offs, cancellations, and time-to-confirmation."
-            priority = "medium"
-        elif area == "support":
-            recommendation = "Offer more proactive support and clearer escalation paths."
-            next_step = "Add guided help for frequent questions and route high-friction cases sooner."
-            priority = "medium"
-        elif area == "pricing":
-            recommendation = "Clarify pricing and value messaging to reduce hesitation."
-            next_step = "Test pricing explanations and highlight service outcomes more clearly."
-            priority = "medium"
-        else:
-            recommendation = "Create a closed-loop retention workflow for unresolved interactions."
-            next_step = "Trigger follow-up prompts when the same concern repeats across sessions."
-            priority = "high"
+        config = POLICY_CONFIGS.get(area, {
+            "recommendation": "Create a closed-loop retention workflow for unresolved interactions.",
+            "next_step": "Trigger follow-up prompts when the same concern repeats across sessions.",
+            "priority": "high",
+        })
+        recommendation = config["recommendation"]
+        next_step = config["next_step"]
+        priority = config["priority"]
 
         evidence_list = list(dict.fromkeys(evidence))[:4]
         insights.append(
@@ -271,6 +372,55 @@ def _build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: 
         loyalty_score -= 10.0
     loyalty_score = max(0.0, round(loyalty_score, 2))
 
+    recency_bonus = 0.0
+    if chat_rows:
+        recency_bonus += 6.0
+    if len(chat_rows) >= 3:
+        recency_bonus += 4.0
+    completed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "completed"]
+    confirmed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "confirmed"]
+    cancelled_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "cancelled"]
+    if completed_bookings:
+        recency_bonus += min(len(completed_bookings) * 8.0, 20.0)
+    if confirmed_bookings:
+        recency_bonus += min(len(confirmed_bookings) * 4.0, 12.0)
+    if cancelled_bookings:
+        recency_bonus -= min(len(cancelled_bookings) * 5.0, 15.0)
+    if sentiment and sentiment.label == "positive":
+        recency_bonus += 4.0
+
+    pricing_signals = sum(1 for item in insights if item.area == "pricing")
+    support_signals = sum(1 for item in insights if item.area in {"support", "clarity", "response_speed"})
+    reliability_signals = sum(1 for item in insights if item.area == "reliability")
+
+    monetization_readiness = loyalty_score
+    monetization_readiness += recency_bonus
+    monetization_readiness += min(pricing_signals * 6.0, 12.0)
+    monetization_readiness += min(len(completed_bookings) * 3.0, 9.0)
+    monetization_readiness -= min(support_signals * 4.0, 12.0)
+    monetization_readiness -= min(reliability_signals * 5.0, 15.0)
+    monetization_readiness = max(0.0, min(100.0, round(monetization_readiness, 2)))
+
+    if monetization_readiness >= 85:
+        value_tier = "premium"
+    elif monetization_readiness >= 70:
+        value_tier = "growth"
+    elif monetization_readiness >= 50:
+        value_tier = "standard"
+    else:
+        value_tier = "care"
+
+    if loyalty_score >= 80 and monetization_readiness >= 80:
+        customer_classification = "loyal high-value"
+    elif loyalty_score >= 70 and monetization_readiness >= 60:
+        customer_classification = "loyal growth-ready"
+    elif loyalty_score >= 55 and monetization_readiness >= 55:
+        customer_classification = "stable value"
+    elif monetization_readiness >= 65:
+        customer_classification = "conversion-ready"
+    else:
+        customer_classification = "needs attention"
+
     if loyalty_score >= 80:
         churn_risk = "low"
     elif loyalty_score >= 55:
@@ -284,6 +434,9 @@ def _build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: 
         bookings_analyzed=len(bookings),
         churn_risk=churn_risk,
         loyalty_score=loyalty_score,
+        monetization_readiness=monetization_readiness,
+        value_tier=value_tier,
+        customer_classification=customer_classification,
         top_issues=top_issues,
         strengths=strengths or ["interaction history is still too small to infer strong patterns"],
         insights=insights,
@@ -301,34 +454,7 @@ def _build_system_improvement_pack(user_id: int, chat_rows: list[models.ChatHist
     summary = _build_summary(user_id, chat_rows, bookings, sentiment)
     insights = summary.insights
     item_map = {
-        "response_speed": {
-            "impact": "high",
-            "owner_hint": "backend and ops",
-        },
-        "clarity": {
-            "impact": "high",
-            "owner_hint": "product and content",
-        },
-        "reliability": {
-            "impact": "high",
-            "owner_hint": "backend engineering",
-        },
-        "booking_flow": {
-            "impact": "medium",
-            "owner_hint": "product and frontend",
-        },
-        "support": {
-            "impact": "medium",
-            "owner_hint": "customer support",
-        },
-        "pricing": {
-            "impact": "medium",
-            "owner_hint": "product strategy",
-        },
-        "retention": {
-            "impact": "high",
-            "owner_hint": "growth and CRM",
-        },
+        **{area: {"impact": config["impact"], "owner_hint": config["owner_hint"]} for area, config in POLICY_CONFIGS.items()},
         "sentiment": {
             "impact": "high",
             "owner_hint": "support and success",
@@ -372,6 +498,51 @@ def _build_system_improvement_pack(user_id: int, chat_rows: list[models.ChatHist
         generated_at=datetime.now(timezone.utc),
         focus=focus,
         items=items,
+        summary=summary,
+    )
+
+
+def _build_weighted_system_monitoring(summary: InteractionSummary) -> WeightedSystemMonitoringReport:
+    areas = []
+    for area, weight, importance, focus in [
+        ("reliability", 1.0, "high", "stabilize error-prone journeys first"),
+        ("response_speed", 0.95, "high", "reduce waiting and improve perceived responsiveness"),
+        ("customer_activity", 0.9, "high", "protect engagement and repeat usage"),
+        ("retention", 0.85, "high", "close the loop on unresolved concerns"),
+    ]:
+        rationale = []
+        if area == "reliability":
+            rationale.append("Reliability is the strongest driver of churn prevention.")
+            if any(issue in {"reliability", "support", "clarity"} for issue in summary.top_issues):
+                rationale.append("Recent issues point to stability and support friction.")
+        elif area == "response_speed":
+            rationale.append("Slower responses reduce trust and satisfaction.")
+            if "response_speed" in summary.top_issues:
+                rationale.append("Response speed appears in the summary top issues.")
+        elif area == "customer_activity":
+            rationale.append("Returning activity is a proxy for healthy engagement.")
+            if summary.messages_analyzed > 0 or summary.bookings_analyzed > 0:
+                rationale.append("There is recent interaction history to monitor.")
+        else:
+            rationale.append("Retention improves when unresolved needs are followed up consistently.")
+            if summary.churn_risk in {"medium", "high"}:
+                rationale.append("Churn risk indicates follow-up is important.")
+
+        areas.append(
+            WeightedFocusItem(
+                area=area,
+                weight=weight,
+                importance=importance,
+                rationale=rationale,
+                focus=focus,
+            )
+        )
+
+    return WeightedSystemMonitoringReport(
+        user_id=summary.user_id,
+        generated_at=summary.generated_at,
+        scope="whole_system_and_customer_activity",
+        items=areas,
         summary=summary,
     )
 
@@ -2192,6 +2363,16 @@ async def get_retention_snapshot_operations_go_no_go(
     current_user: models.User = Depends(deps.get_current_admin_user),
 ):
     return await _build_retention_snapshot_operations_go_no_go(db, window_days, stale_after_days)
+
+
+
+@router.get("/chat/admin/monetization-cohorts", response_model=MonetizationCohortReport)
+async def get_monetization_cohorts(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_monetization_cohorts(db, window_days)
 
 def analyze_sentiment(text: str):
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}

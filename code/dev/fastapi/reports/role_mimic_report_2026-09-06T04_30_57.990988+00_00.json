@@ -1,0 +1,43 @@
+{
+  "failed": 0,
+  "generated_at": "2026-09-06T04:30:57.990988+00:00",
+  "passed": 5,
+  "results": [
+    {
+      "detail": "Public pages are visible.",
+      "intent": "discover",
+      "passed": true,
+      "role": "guest",
+      "signal": "public_access"
+    },
+    {
+      "detail": "Booking flow reached confirmation.",
+      "intent": "book",
+      "passed": true,
+      "role": "customer",
+      "signal": "booking_flow"
+    },
+    {
+      "detail": "Open issues surfaced.",
+      "intent": "triage",
+      "passed": true,
+      "role": "support_agent",
+      "signal": "support_workbench"
+    },
+    {
+      "detail": "Team summary available.",
+      "intent": "review",
+      "passed": true,
+      "role": "manager",
+      "signal": "management_view"
+    },
+    {
+      "detail": "Retention audit available.",
+      "intent": "govern",
+      "passed": true,
+      "role": "admin",
+      "signal": "admin_controls"
+    }
+  ],
+  "role_count": 5
+}

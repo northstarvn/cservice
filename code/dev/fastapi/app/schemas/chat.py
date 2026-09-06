@@ -23,6 +23,9 @@ class InteractionSummary(BaseModel):
     bookings_analyzed: int
     churn_risk: str
     loyalty_score: float
+    monetization_readiness: float
+    value_tier: str
+    customer_classification: str
     top_issues: List[str]
     strengths: List[str]
     insights: List[InteractionInsight]
@@ -44,6 +47,22 @@ class SystemImprovementPack(BaseModel):
     generated_at: datetime
     focus: str
     items: List[SystemImprovementItem]
+    summary: InteractionSummary
+
+
+class WeightedFocusItem(BaseModel):
+    area: str
+    weight: float
+    importance: str
+    rationale: List[str]
+    focus: str
+
+
+class WeightedSystemMonitoringReport(BaseModel):
+    user_id: int
+    generated_at: datetime
+    scope: str
+    items: List[WeightedFocusItem]
     summary: InteractionSummary
 
 
@@ -69,8 +88,25 @@ class RetentionCohortItem(BaseModel):
     user_count: int
     avg_loyalty_score: float
     avg_signal_score: float
+    avg_monetization_readiness: float
     primary_risk: str
     recommended_action: str
+
+
+class MonetizationCohortItem(BaseModel):
+    cohort: str
+    user_count: int
+    avg_loyalty_score: float
+    avg_monetization_readiness: float
+    avg_signal_score: float
+    primary_risk: str
+    recommended_action: str
+
+
+class MonetizationCohortReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    cohorts: List[MonetizationCohortItem]
 
 
 class RetentionCohortReport(BaseModel):

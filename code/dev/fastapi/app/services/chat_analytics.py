@@ -7,8 +7,7 @@ import os
 
 import requests
 from dotenv import load_dotenv
-
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
@@ -20,6 +19,8 @@ from app.schemas.chat import (
     InteractionTrendReport,
     LifecycleStageItem,
     LifecycleStageReport,
+    MonetizationCohortItem,
+    MonetizationCohortReport,
     RetentionCohortItem,
     RetentionCohortReport,
     Sentiment,
@@ -52,13 +53,131 @@ RETENTION_KEYWORDS = {
     "support": "support",
 }
 
+PREDEFINED_POLICY_AREAS = [
+    "response_speed",
+    "clarity",
+    "reliability",
+    "booking_flow",
+    "support",
+    "pricing",
+    "retention",
+    "sentiment_recovery",
+    "onboarding",
+    "notification_quality",
+    "self_service",
+    "handoff",
+    "trust",
+    "follow_up",
+]
+
+POLICY_CONFIGS = {
+    "response_speed": {
+        "recommendation": "Reduce wait times and make response status visible to users.",
+        "next_step": "Add response-time tracking and auto-acknowledgements for long-running requests.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "backend and ops",
+    },
+    "clarity": {
+        "recommendation": "Rewrite confusing flows and simplify user-facing prompts.",
+        "next_step": "Review the most repeated support phrases and shorten the required form copy.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "product and content",
+    },
+    "reliability": {
+        "recommendation": "Stabilize error-prone journeys before expanding features.",
+        "next_step": "Log failure points by endpoint and surface recoverable errors to users.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "backend engineering",
+    },
+    "booking_flow": {
+        "recommendation": "Make booking changes easier and reduce abandonment in pending states.",
+        "next_step": "Track booking drop-offs, cancellations, and time-to-confirmation.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product and frontend",
+    },
+    "support": {
+        "recommendation": "Offer more proactive support and clearer escalation paths.",
+        "next_step": "Add guided help for frequent questions and route high-friction cases sooner.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "customer support",
+    },
+    "pricing": {
+        "recommendation": "Clarify pricing and value messaging to reduce hesitation.",
+        "next_step": "Test pricing explanations and highlight service outcomes more clearly.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product strategy",
+    },
+    "retention": {
+        "recommendation": "Create a closed-loop retention workflow for unresolved interactions.",
+        "next_step": "Trigger follow-up prompts when the same concern repeats across sessions.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "growth and CRM",
+    },
+    "sentiment_recovery": {
+        "recommendation": "Route negative sentiment into a recovery flow before the issue escalates.",
+        "next_step": "Escalate negative messages to a fast human follow-up queue.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "support and success",
+    },
+    "onboarding": {
+        "recommendation": "Tighten onboarding so first-time users reach value faster.",
+        "next_step": "Reduce the number of first-run steps and clarify the first success milestone.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "product and onboarding",
+    },
+    "notification_quality": {
+        "recommendation": "Make notifications more timely, relevant, and easier to act on.",
+        "next_step": "Audit notification timing, duplication, and message usefulness.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product and communications",
+    },
+    "self_service": {
+        "recommendation": "Expand self-service coverage so users can resolve common issues independently.",
+        "next_step": "Document the top repeated requests and add guided resolution paths.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "support operations",
+    },
+    "handoff": {
+        "recommendation": "Improve handoff quality between automated and human support.",
+        "next_step": "Pass context, history, and intent into escalation workflows.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "support engineering",
+    },
+    "trust": {
+        "recommendation": "Strengthen trust signals around reliability, refunds, and commitments.",
+        "next_step": "Surface clearer status updates and promise handling policies.",
+        "priority": "medium",
+        "impact": "medium",
+        "owner_hint": "product strategy",
+    },
+    "follow_up": {
+        "recommendation": "Build stronger follow-up loops for unresolved customer needs.",
+        "next_step": "Schedule proactive check-ins when issues remain open across sessions.",
+        "priority": "high",
+        "impact": "high",
+        "owner_hint": "customer success",
+    },
+}
+
 
 def normalize_text(text: str) -> str:
     return (text or "").strip().lower()
 
 
 def score_area(messages: list[str], bookings: list[models.Booking], area: str) -> tuple[float, list[str]]:
-    evidence = []
+    evidence: list[str] = []
     score = 0.0
     for message in messages:
         normalized = normalize_text(message)
@@ -91,12 +210,47 @@ def score_area(messages: list[str], bookings: list[models.Booking], area: str) -
         score += min(repeated * 0.5, 2.0)
         if repeated:
             evidence.append(f"{repeated} repeated messages suggest unresolved needs")
+    if area == "sentiment_recovery" and messages:
+        negative_terms = [word for word in ["angry", "frustrated", "upset", "disappointed", "bad"] if any(word in normalize_text(message) for message in messages)]
+        score += min(len(negative_terms) * 0.8, 2.4)
+        if negative_terms:
+            evidence.append("negative sentiment language detected in recent messages")
+    if area == "onboarding" and messages:
+        onboarding_terms = [word for word in ["how do i", "new here", "getting started", "first time", "setup"] if any(word in normalize_text(message) for message in messages)]
+        score += min(len(onboarding_terms) * 0.7, 2.1)
+        if onboarding_terms:
+            evidence.append("onboarding guidance requests detected")
+    if area == "notification_quality" and messages:
+        notification_terms = [word for word in ["notify", "notification", "alert", "remind", "reminder"] if any(word in normalize_text(message) for message in messages)]
+        score += min(len(notification_terms) * 0.6, 1.8)
+        if notification_terms:
+            evidence.append("notification and reminder language detected")
+    if area == "self_service" and messages:
+        self_service_terms = [word for word in ["faq", "self service", "self-service", "how to", "help center"] if any(word in normalize_text(message) for message in messages)]
+        score += min(len(self_service_terms) * 0.6, 1.8)
+        if self_service_terms:
+            evidence.append("self-service questions detected")
+    if area == "handoff" and messages:
+        handoff_terms = [word for word in ["agent", "transfer", "human", "someone", "escalate"] if any(word in normalize_text(message) for message in messages)]
+        score += min(len(handoff_terms) * 0.6, 1.8)
+        if handoff_terms:
+            evidence.append("handoff and escalation language detected")
+    if area == "trust" and messages:
+        trust_terms = [word for word in ["trust", "refund", "guarantee", "secure", "safe"] if any(word in normalize_text(message) for message in messages)]
+        score += min(len(trust_terms) * 0.5, 1.5)
+        if trust_terms:
+            evidence.append("trust-related concerns detected")
+    if area == "follow_up" and messages:
+        follow_up_terms = [word for word in ["follow up", "follow-up", "still waiting", "again", "remind"] if any(word in normalize_text(message) for message in messages)]
+        score += min(len(follow_up_terms) * 0.7, 2.1)
+        if follow_up_terms:
+            evidence.append("follow-up language detected")
 
     return score, evidence
 
 
 def build_interaction_insights(messages: list[str], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> list[InteractionInsight]:
-    areas = ["response_speed", "clarity", "reliability", "booking_flow", "support", "pricing", "retention"]
+    areas = PREDEFINED_POLICY_AREAS
     ranking = []
     for area in areas:
         score, evidence = score_area(messages, bookings, area)
@@ -107,34 +261,14 @@ def build_interaction_insights(messages: list[str], bookings: list[models.Bookin
     for area, score, evidence in ranking[:4]:
         if score <= 0:
             continue
-        if area == "response_speed":
-            recommendation = "Reduce wait times and make response status visible to users."
-            next_step = "Add response-time tracking and auto-acknowledgements for long-running requests."
-            priority = "high"
-        elif area == "clarity":
-            recommendation = "Rewrite confusing flows and simplify user-facing prompts."
-            next_step = "Review the most repeated support phrases and shorten the required form copy."
-            priority = "high"
-        elif area == "reliability":
-            recommendation = "Stabilize error-prone journeys before expanding features."
-            next_step = "Log failure points by endpoint and surface recoverable errors to users."
-            priority = "high"
-        elif area == "booking_flow":
-            recommendation = "Make booking changes easier and reduce abandonment in pending states."
-            next_step = "Track booking drop-offs, cancellations, and time-to-confirmation."
-            priority = "medium"
-        elif area == "support":
-            recommendation = "Offer more proactive support and clearer escalation paths."
-            next_step = "Add guided help for frequent questions and route high-friction cases sooner."
-            priority = "medium"
-        elif area == "pricing":
-            recommendation = "Clarify pricing and value messaging to reduce hesitation."
-            next_step = "Test pricing explanations and highlight service outcomes more clearly."
-            priority = "medium"
-        else:
-            recommendation = "Create a closed-loop retention workflow for unresolved interactions."
-            next_step = "Trigger follow-up prompts when the same concern repeats across sessions."
-            priority = "high"
+        config = POLICY_CONFIGS.get(area, {
+            "recommendation": "Create a closed-loop retention workflow for unresolved interactions.",
+            "next_step": "Trigger follow-up prompts when the same concern repeats across sessions.",
+            "priority": "high",
+        })
+        recommendation = config["recommendation"]
+        next_step = config["next_step"]
+        priority = config["priority"]
 
         evidence_list = list(dict.fromkeys(evidence))[:4]
         insights.append(
@@ -189,9 +323,7 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
     repeated_issues = [message for message, count in message_counter.items() if count > 1]
     insights = build_interaction_insights(messages, bookings, sentiment)
 
-    top_issues = []
-    for item in insights[:3]:
-        top_issues.append(item.area.replace("_", " "))
+    top_issues = [item.area.replace("_", " ") for item in insights[:3]]
     if repeated_issues:
         top_issues.append("repeated concerns")
 
@@ -212,6 +344,56 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
         loyalty_score -= 10.0
     loyalty_score = max(0.0, round(loyalty_score, 2))
 
+    completed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "completed"]
+    confirmed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "confirmed"]
+    cancelled_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "cancelled"]
+
+    recency_bonus = 0.0
+    if chat_rows:
+        recency_bonus += 6.0
+    if len(chat_rows) >= 3:
+        recency_bonus += 4.0
+    if completed_bookings:
+        recency_bonus += min(len(completed_bookings) * 8.0, 20.0)
+    if confirmed_bookings:
+        recency_bonus += min(len(confirmed_bookings) * 4.0, 12.0)
+    if cancelled_bookings:
+        recency_bonus -= min(len(cancelled_bookings) * 5.0, 15.0)
+    if sentiment and sentiment.label == "positive":
+        recency_bonus += 4.0
+
+    pricing_signals = sum(1 for item in insights if item.area == "pricing")
+    support_signals = sum(1 for item in insights if item.area in {"support", "clarity", "response_speed"})
+    reliability_signals = sum(1 for item in insights if item.area == "reliability")
+
+    monetization_readiness = loyalty_score
+    monetization_readiness += recency_bonus
+    monetization_readiness += min(pricing_signals * 6.0, 12.0)
+    monetization_readiness += min(len(completed_bookings) * 3.0, 9.0)
+    monetization_readiness -= min(support_signals * 4.0, 12.0)
+    monetization_readiness -= min(reliability_signals * 5.0, 15.0)
+    monetization_readiness = max(0.0, min(100.0, round(monetization_readiness, 2)))
+
+    if monetization_readiness >= 85:
+        value_tier = "premium"
+    elif monetization_readiness >= 70:
+        value_tier = "growth"
+    elif monetization_readiness >= 50:
+        value_tier = "standard"
+    else:
+        value_tier = "care"
+
+    if loyalty_score >= 80 and monetization_readiness >= 80:
+        customer_classification = "loyal high-value"
+    elif loyalty_score >= 70 and monetization_readiness >= 60:
+        customer_classification = "loyal growth-ready"
+    elif loyalty_score >= 55 and monetization_readiness >= 55:
+        customer_classification = "stable value"
+    elif monetization_readiness >= 65:
+        customer_classification = "conversion-ready"
+    else:
+        customer_classification = "support-first"
+
     if loyalty_score >= 80:
         churn_risk = "low"
     elif loyalty_score >= 55:
@@ -225,6 +407,9 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
         bookings_analyzed=len(bookings),
         churn_risk=churn_risk,
         loyalty_score=loyalty_score,
+        monetization_readiness=monetization_readiness,
+        value_tier=value_tier,
+        customer_classification=customer_classification,
         top_issues=top_issues,
         strengths=strengths or ["interaction history is still too small to infer strong patterns"],
         insights=insights,
@@ -232,11 +417,15 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
             "window_days": 30,
             "repeated_messages": len(repeated_issues),
             "booking_states": Counter(str(getattr(b.status, "value", b.status)) for b in bookings),
+            "completed_bookings": len(completed_bookings),
+            "confirmed_bookings": len(confirmed_bookings),
+            "cancelled_bookings": len(cancelled_bookings),
+            "pricing_signals": pricing_signals,
+            "support_signals": support_signals,
+            "reliability_signals": reliability_signals,
         },
         generated_at=datetime.now(timezone.utc),
     )
-
-
 
 
 async def build_churn_prediction(db: AsyncSession, user_id: int, window_days: int) -> ChurnPrediction:
@@ -277,9 +466,9 @@ async def build_churn_prediction(db: AsyncSession, user_id: int, window_days: in
         warning_reasons.append("The same concern appears multiple times in recent chats")
 
     pending_bookings = 0
-    for status_count in summary.metadata.get("booking_states", {}).items():
-        if status_count[0] in {"pending", "cancelled"}:
-            pending_bookings += int(status_count[1])
+    for status_name, count in summary.metadata.get("booking_states", {}).items():
+        if status_name in {"pending", "cancelled"}:
+            pending_bookings += int(count)
     if pending_bookings:
         risk_score += min(pending_bookings * 5.0, 15.0)
         warning_reasons.append("There are unresolved or cancelled bookings in the recent window")
@@ -379,38 +568,19 @@ async def load_signal_trends(db: AsyncSession, user_id: int, window_days: int) -
 
 async def build_retention_cohorts(db: AsyncSession, window_days: int) -> RetentionCohortReport:
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-
-    user_query = select(models.User.id)
-    user_result = await db.execute(user_query)
+    user_result = await db.execute(select(models.User.id))
     user_ids = [row[0] for row in user_result.all()]
 
     cohorts: dict[str, dict[str, float | int | str]] = {}
     for user_id in user_ids:
-        chat_query = (
-            select(models.ChatHistory)
-            .where(models.ChatHistory.user_id == user_id)
-            .where(models.ChatHistory.timestamp >= cutoff)
-            .order_by(desc(models.ChatHistory.timestamp))
-        )
-        booking_query = (
-            select(models.Booking)
-            .where(models.Booking.user_id == user_id)
-            .where(models.Booking.created_at >= cutoff)
-            .order_by(desc(models.Booking.created_at))
-        )
-        signal_query = (
-            select(models.InteractionSignal)
-            .where(models.InteractionSignal.user_id == user_id)
-            .where(models.InteractionSignal.created_at >= cutoff)
-        )
-
-        chat_rows = (await db.execute(chat_query)).scalars().all()
-        bookings = (await db.execute(booking_query)).scalars().all()
-        signals = (await db.execute(signal_query)).scalars().all()
-
+        chat_rows, bookings = await load_user_interaction_window(db, user_id, window_days)
+        signals = (await db.execute(
+            select(models.InteractionSignal).where(models.InteractionSignal.user_id == user_id).where(models.InteractionSignal.created_at >= cutoff)
+        )).scalars().all()
         latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
         summary = build_summary(user_id, chat_rows, bookings, latest_sentiment)
-        signal_score = round(sum(signal.score for signal in signals) / max(len(signals), 1), 2)
+        signal_values = [float(getattr(signal, "score", 0.0) or 0.0) for signal in signals]
+        signal_score = round(sum(signal_values) / max(len(signal_values), 1), 2)
         cohort_name, primary_risk, recommended_action = classify_loyalty_cohort(summary.loyalty_score, signal_score)
 
         if cohort_name not in cohorts:
@@ -447,17 +617,65 @@ async def build_retention_cohorts(db: AsyncSession, window_days: int) -> Retenti
     )
 
 
+async def build_monetization_cohorts(db: AsyncSession, window_days: int) -> MonetizationCohortReport:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    user_result = await db.execute(select(models.User.id))
+    user_ids = [row[0] for row in user_result.all()]
+
+    cohorts: dict[str, dict[str, float | int | str]] = {}
+    for user_id in user_ids:
+        chat_rows, bookings = await load_user_interaction_window(db, user_id, window_days)
+        signals = (await db.execute(
+            select(models.InteractionSignal).where(models.InteractionSignal.user_id == user_id).where(models.InteractionSignal.created_at >= cutoff)
+        )).scalars().all()
+        latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
+        summary = build_summary(user_id, chat_rows, bookings, latest_sentiment)
+        signal_values = [float(getattr(signal, "score", 0.0) or 0.0) for signal in signals]
+        signal_score = round(sum(signal_values) / max(len(signal_values), 1), 2)
+        cohort_name, primary_risk, recommended_action = classify_monetization_cohort(summary.loyalty_score, summary.monetization_readiness, signal_score)
+
+        if cohort_name not in cohorts:
+            cohorts[cohort_name] = {
+                "user_count": 0,
+                "total_loyalty": 0.0,
+                "total_readiness": 0.0,
+                "total_signal": 0.0,
+                "primary_risk": primary_risk,
+                "recommended_action": recommended_action,
+            }
+
+        cohorts[cohort_name]["user_count"] += 1
+        cohorts[cohort_name]["total_loyalty"] += summary.loyalty_score
+        cohorts[cohort_name]["total_readiness"] += summary.monetization_readiness
+        cohorts[cohort_name]["total_signal"] += signal_score
+
+    cohort_items = []
+    for cohort_name, values in sorted(cohorts.items(), key=lambda item: item[1]["user_count"], reverse=True):
+        user_count = int(values["user_count"])
+        cohort_items.append(
+            MonetizationCohortItem(
+                cohort=cohort_name,
+                user_count=user_count,
+                avg_loyalty_score=round(float(values["total_loyalty"]) / max(user_count, 1), 2),
+                avg_monetization_readiness=round(float(values["total_readiness"]) / max(user_count, 1), 2),
+                avg_signal_score=round(float(values["total_signal"]) / max(user_count, 1), 2),
+                primary_risk=str(values["primary_risk"]),
+                recommended_action=str(values["recommended_action"]),
+            )
+        )
+
+    return MonetizationCohortReport(
+        generated_at=datetime.now(timezone.utc),
+        window_days=window_days,
+        cohorts=cohort_items,
+    )
+
+
 async def build_system_improvement_pack(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> SystemImprovementPack:
     summary = build_summary(user_id, chat_rows, bookings, sentiment)
     insights = summary.insights
     item_map = {
-        "response_speed": {"impact": "high", "owner_hint": "backend and ops"},
-        "clarity": {"impact": "high", "owner_hint": "product and content"},
-        "reliability": {"impact": "high", "owner_hint": "backend engineering"},
-        "booking_flow": {"impact": "medium", "owner_hint": "product and frontend"},
-        "support": {"impact": "medium", "owner_hint": "customer support"},
-        "pricing": {"impact": "medium", "owner_hint": "product strategy"},
-        "retention": {"impact": "high", "owner_hint": "growth and CRM"},
+        **{area: {"impact": config["impact"], "owner_hint": config["owner_hint"]} for area, config in POLICY_CONFIGS.items()},
         "sentiment": {"impact": "high", "owner_hint": "support and success"},
     }
 
@@ -502,42 +720,6 @@ async def build_system_improvement_pack(user_id: int, chat_rows: list[models.Cha
     )
 
 
-async def build_lifecycle_stage_report(db: AsyncSession, window_days: int) -> LifecycleStageReport:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    user_rows = await db.execute(select(models.User.id))
-    user_ids = [row[0] for row in user_rows.all()]
-
-    stages: list[LifecycleStageItem] = []
-    for user_id in user_ids:
-        chat_rows, bookings = await load_user_interaction_window(db, user_id, window_days)
-        signal_query = (
-            select(models.InteractionSignal)
-            .where(models.InteractionSignal.user_id == user_id)
-            .where(models.InteractionSignal.created_at >= cutoff)
-        )
-        signals = (await db.execute(signal_query)).scalars().all()
-        latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
-        summary = build_summary(user_id, chat_rows, bookings, latest_sentiment)
-        churn_prediction = await build_churn_prediction(db, user_id, window_days)
-        stage, confidence, drivers, retention_focus = classify_lifecycle_stage(summary, churn_prediction, len(chat_rows), len(bookings))
-        stages.append(
-            LifecycleStageItem(
-                user_id=user_id,
-                stage=stage,
-                confidence=confidence,
-                drivers=drivers,
-                retention_focus=retention_focus,
-                churn_prediction=churn_prediction,
-            )
-        )
-
-    return LifecycleStageReport(
-        generated_at=datetime.now(timezone.utc),
-        window_days=window_days,
-        stages=stages,
-    )
-
-
 def classify_loyalty_cohort(loyalty_score: float, signal_score: float) -> tuple[str, str, str]:
     if loyalty_score >= 80 and signal_score < 2:
         return "champions", "low", "double down on proactive retention and referral nudges"
@@ -546,6 +728,18 @@ def classify_loyalty_cohort(loyalty_score: float, signal_score: float) -> tuple[
     if loyalty_score >= 40:
         return "at risk", "high", "prioritize recovery, support follow-up, and friction removal"
     return "critical", "high", "immediate outreach and issue-resolution workflows"
+
+
+def classify_monetization_cohort(loyalty_score: float, monetization_readiness: float, signal_score: float) -> tuple[str, str, str]:
+    if loyalty_score >= 80 and monetization_readiness >= 85 and signal_score < 2:
+        return "champion premium", "low", "protect the relationship, expand value, and test premium offers"
+    if monetization_readiness >= 70:
+        return "growth ready", "medium", "use tailored upsell, cross-sell, and value expansion journeys"
+    if loyalty_score >= 60:
+        return "stable value", "medium", "reinforce trust and measure offer responsiveness"
+    if monetization_readiness >= 50:
+        return "conversion ready", "high", "focus on education, proof, and low-friction entry offers"
+    return "support first", "high", "fix unresolved issues before monetization attempts"
 
 
 def classify_lifecycle_stage(summary: InteractionSummary, churn_prediction: ChurnPrediction, chat_count: int, booking_count: int) -> tuple[str, float, list[str], list[str]]:
