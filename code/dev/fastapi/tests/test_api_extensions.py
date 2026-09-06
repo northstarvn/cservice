@@ -531,6 +531,54 @@ def test_meta_features_lists_chat_history_summary():
     assert "chat-retention" == response.json()["domain"]
 
 
+def test_meta_capabilities_expose_study_driven_ai_catalog():
+    async def _fake_get_db():
+        yield FakeHealthSession()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    try:
+        response = TestClient(app).get("/meta/capabilities")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "capabilities" in payload
+    capability_ids = {item["id"] for item in payload["capabilities"]}
+    assert {
+        "youth_conversion_intelligence",
+        "market_penetration_adoption",
+        "device_experience_optimizer",
+        "cpc_economics_profiler",
+        "older_adult_value_model",
+        "low_penetration_engagement_engine",
+        "payment_logistics_intelligence",
+        "platform_channel_mapper",
+        "retention_forecast_engine",
+    }.issubset(capability_ids)
+
+
+def test_meta_capabilities_cover_study_concepts():
+    async def _fake_get_db():
+        yield FakeHealthSession()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    try:
+        response = TestClient(app).get("/meta/capabilities")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    themes = {item["study_theme"] for item in payload["capabilities"]}
+    assert any("Younger demographics" in theme for theme in themes)
+    assert any("Higher internet penetration" in theme for theme in themes)
+    assert any("mobile-only usage" in theme for theme in themes)
+    assert any("Lower average income" in theme for theme in themes)
+    assert any("Older adults" in theme for theme in themes)
+    assert any("Lower internet penetration" in theme for theme in themes)
+
+
 def test_meta_features_lists_snapshot_health_reporting():
     async def _fake_get_db():
         yield FakeHealthSession()

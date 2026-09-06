@@ -105,6 +105,11 @@ async def app_metadata():
     }
 
 
+@app.get("/meta/capabilities")
+async def app_capabilities():
+    return chat._build_capabilities_payload()
+
+
 @app.get("/meta/features")
 async def app_feature_summary():
     return {

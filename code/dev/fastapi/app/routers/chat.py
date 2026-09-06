@@ -232,6 +232,131 @@ POLICY_CONFIGS = {
     },
 }
 
+AI_CAPABILITIES = [
+    {
+        "id": "youth_conversion_intelligence",
+        "domain": "customer_segment_behavior",
+        "description": "Detect younger-user hesitation around large purchases and recommend trust-building nudges, smaller-entry offers, and social-proof content.",
+        "study_theme": "Younger demographics are less likely to make large purchases online.",
+        "signals": ["small cart value", "repeat short visits", "social referral traffic", "promo sensitivity"],
+        "outputs": ["segment readiness score", "offer sizing guidance", "trust messaging recommendations"],
+    },
+    {
+        "id": "market_penetration_adoption",
+        "domain": "regional_ecommerce_adoption",
+        "description": "Estimate whether internet reach is translating into actual commerce adoption and identify gaps in payments, logistics, and discovery.",
+        "study_theme": "Higher internet penetration does not always mean higher e-commerce adoption.",
+        "signals": ["traffic without conversion", "payment failure patterns", "shipping delays", "regional marketplace usage"],
+        "outputs": ["adoption gap score", "market readiness notes", "channel prioritization"],
+    },
+    {
+        "id": "device_experience_optimizer",
+        "domain": "cross_device_engagement",
+        "description": "Spot desktop-heavy or mobile-only behavior and recommend UX, performance, and content formatting changes for the dominant device path.",
+        "study_theme": "More developed regions have lower engagement in mobile-only usage.",
+        "signals": ["device mix", "browser usage", "session length by device", "desktop conversion lift"],
+        "outputs": ["device strategy summary", "responsive UX recommendations", "performance priorities"],
+    },
+    {
+        "id": "cpc_economics_profiler",
+        "domain": "advertising_efficiency",
+        "description": "Compare acquisition economics across regions and flag markets where low income does not imply low cost per click.",
+        "study_theme": "Lower average income can still produce higher CPC in advertising.",
+        "signals": ["cpc by geography", "conversion rate by geography", "auction pressure", "ad platform mix"],
+        "outputs": ["regional media plan", "budget pressure alerts", "acquisition efficiency score"],
+    },
+    {
+        "id": "older_adult_value_model",
+        "domain": "age_segment_value",
+        "description": "Identify older-adult engagement patterns and surface products, content, and support flows that improve confidence and completion rate.",
+        "study_theme": "Older adults can outperform younger groups in certain metrics.",
+        "signals": ["repeat usage", "help content usage", "higher completion rate", "support satisfaction"],
+        "outputs": ["senior-friendly journey advice", "confidence-building guidance", "feature prioritization"],
+    },
+    {
+        "id": "low_penetration_engagement_engine",
+        "domain": "emerging_market_engagement",
+        "description": "Detect high-intent engagement in low-penetration regions and recommend lightweight, mobile-first, and offline-aware experiences.",
+        "study_theme": "Lower internet penetration can still mean higher engagement per capita.",
+        "signals": ["per-capita engagement", "mobile network signals", "content depth", "messaging frequency"],
+        "outputs": ["per-capita engagement score", "distribution priorities", "lightweight UX recommendations"],
+    },
+    {
+        "id": "payment_logistics_intelligence",
+        "domain": "commerce_enablement",
+        "description": "Recommend local payment and logistics integrations based on regional conversion barriers and fulfillment reliability.",
+        "study_theme": "Payments and logistics shape adoption across emerging markets.",
+        "signals": ["checkout drop-off", "payment method preference", "delivery latency", "region-specific fulfillment failures"],
+        "outputs": ["integration shortlist", "checkout risk alerts", "fulfillment guidance"],
+    },
+    {
+        "id": "platform_channel_mapper",
+        "domain": "channel_selection",
+        "description": "Map audience behavior to the most relevant discovery and commerce channels, including social, marketplace, and search-led journeys.",
+        "study_theme": "Youth, regional commerce, and retention all depend on the right platform mix.",
+        "signals": ["traffic source mix", "social engagement", "marketplace referrals", "search conversion"],
+        "outputs": ["channel fit score", "platform recommendation", "campaign routing suggestions"],
+    },
+    {
+        "id": "retention_forecast_engine",
+        "domain": "customer_retention",
+        "description": "Forecast churn, repeat purchase likelihood, and follow-up urgency from interaction, booking, and sentiment patterns.",
+        "study_theme": "Retention and follow-up are recurring themes across the study.",
+        "signals": ["repeat messages", "booking completion", "negative sentiment", "resolution latency"],
+        "outputs": ["churn risk", "next-best-action", "follow-up queue priority"],
+    },
+]
+
+
+def _build_ai_capabilities_catalog() -> list[dict[str, object]]:
+    return [
+        {
+            **capability,
+            "priority": "high" if capability["id"] in {"retention_forecast_engine", "payment_logistics_intelligence", "device_experience_optimizer"} else "medium",
+            "enabled": True,
+        }
+        for capability in AI_CAPABILITIES
+    ]
+
+
+def _build_capabilities_payload() -> dict[str, object]:
+    return {
+        "name": "CService Booking Backend",
+        "version": os.getenv("CSERVICE_APP_VERSION", "0.1.0"),
+        "environment": os.getenv("CSERVICE_ENV", os.getenv("ENV", "development")),
+        "domain": "chat-retention",
+        "features": [
+            "youth_conversion_intelligence",
+            "market_penetration_adoption",
+            "device_experience_optimizer",
+            "cpc_economics_profiler",
+            "older_adult_value_model",
+            "low_penetration_engagement_engine",
+            "payment_logistics_intelligence",
+            "platform_channel_mapper",
+            "retention_forecast_engine",
+            "retention_snapshot_health_reporting",
+            "retention_snapshot_operations_status_reporting",
+            "retention_snapshot_operations_compliance_reporting",
+            "retention_snapshot_operations_posture_reporting",
+            "retention_snapshot_operations_automation_reporting",
+            "retention_snapshot_operations_execution_state_reporting",
+            "retention_snapshot_operations_launch_readiness_reporting",
+            "retention_snapshot_operations_gonogo_reporting",
+        ],
+        "capabilities": _build_ai_capabilities_catalog(),
+        "endpoints": {
+            "retention_snapshot_health_recommendation": "/chat/admin/snapshot-health-recommendation",
+            "retention_snapshot_operations_status": "/chat/admin/snapshot-operations-status",
+            "retention_snapshot_operations_compliance": "/chat/admin/snapshot-operations-compliance",
+            "retention_snapshot_operations_posture": "/chat/admin/snapshot-operations-posture",
+            "retention_snapshot_operations_automation": "/chat/admin/snapshot-operations-automation",
+            "retention_snapshot_operations_execution_state": "/chat/admin/snapshot-operations-execution-state",
+            "retention_snapshot_operations_launch_readiness": "/chat/admin/snapshot-operations-launch-readiness",
+            "retention_snapshot_operations_gonogo": "/chat/admin/snapshot-operations-gonogo",
+        },
+    }
+
 
 def _normalize_text(text: str) -> str:
     return (text or "").strip().lower()
@@ -2003,71 +2128,7 @@ async def retention_maintenance_report(
 
 @router.get("/meta/capabilities")
 async def chat_capabilities():
-    return {
-        "domain": "chat-retention",
-        "features": [
-            "sentiment_analysis",
-            "interaction_insights",
-            "retention_cohorts",
-            "retention_cohort_drilldown",
-            "lifecycle_staging",
-            "snapshot_reporting",
-            "snapshot_pruning",
-            "maintenance_reporting",
-            "user_activity_reporting",
-            "admin_activity_reporting",
-            "activity_timeline",
-            "ranked_users_reporting",
-            "admin_retention_trends",
-            "retention_snapshot_admin_reporting",
-            "retention_snapshot_comparison_reporting",
-            "retention_snapshot_momentum_reporting",
-            "retention_snapshot_volatility_reporting",
-            "retention_snapshot_volatility_summary_reporting",
-            "retention_snapshot_risk_profile_reporting",
-            "retention_snapshot_recommendation_reporting",
-            "retention_snapshot_action_plan_reporting",
-            "retention_snapshot_health_reporting",
-            "retention_snapshot_operations_overview_reporting",
-            "retention_snapshot_operations_status_reporting",
-            "retention_snapshot_operations_compliance_reporting",
-            "retention_snapshot_operations_posture_reporting",
-            "retention_snapshot_operations_automation_reporting",
-            "retention_snapshot_operations_execution_state_reporting",
-            "retention_snapshot_operations_launch_readiness_reporting",
-            "retention_snapshot_operations_gonogo_reporting",
-        ],
-        "endpoints": {
-            "chat": "/chat",
-            "history": "/chat/history",
-            "dashboard": "/retention/dashboard",
-            "maintenance": "/retention/maintenance",
-            "maintenance_report": "/retention/maintenance/report",
-            "activity": "/chat/activity",
-            "admin_activity": "/chat/admin-activity",
-            "activity_timeline": "/chat/activity/timeline",
-            "ranked_users": "/chat/admin/users",
-            "admin_retention_trends": "/chat/admin/retention-trends",
-            "retention_snapshot_admin": "/chat/admin/snapshot-summary",
-            "retention_snapshot_comparison": "/chat/admin/snapshot-comparison",
-            "retention_snapshot_momentum": "/chat/admin/snapshot-momentum",
-            "retention_snapshot_volatility": "/chat/admin/snapshot-volatility",
-            "retention_snapshot_volatility_summary": "/chat/admin/snapshot-volatility/summary",
-            "retention_snapshot_risk_profile": "/chat/admin/snapshot-risk-profile",
-            "retention_snapshot_recommendation": "/chat/admin/snapshot-recommendation",
-            "retention_snapshot_action_plan": "/chat/admin/snapshot-action-plan",
-            "retention_snapshot_health_recommendation": "/chat/admin/snapshot-health-recommendation",
-            "retention_snapshot_operations_overview": "/chat/admin/snapshot-operations-overview",
-            "retention_snapshot_operations_status": "/chat/admin/snapshot-operations-status",
-            "retention_snapshot_operations_compliance": "/chat/admin/snapshot-operations-compliance",
-            "retention_snapshot_operations_posture": "/chat/admin/snapshot-operations-posture",
-            "retention_snapshot_operations_automation": "/chat/admin/snapshot-operations-automation",
-            "retention_snapshot_operations_execution_state": "/chat/admin/snapshot-operations-execution-state",
-            "retention_snapshot_operations_launch_readiness": "/chat/admin/snapshot-operations-launch-readiness",
-            "retention_snapshot_operations_gonogo": "/chat/admin/snapshot-operations-gonogo",
-            "retention_cohort_drilldown": "/chat/retention-cohorts/{cohort}",
-        },
-    }
+    return _build_capabilities_payload()
 
 
 @router.get("/chat/activity", response_model=UserActivityReport)
