@@ -8,11 +8,12 @@ import os
 
 
 DEFAULT_ROLES = (
-    "guest",
-    "customer",
-    "support_agent",
-    "manager",
-    "admin",
+    "youth_conversion_intelligence",
+    "market_penetration_adoption",
+    "device_experience_optimizer",
+    "cpc_economics_profiler",
+    "older_adult_value_model",
+    "low_penetration_engagement",
 )
 
 
@@ -64,11 +65,42 @@ class RoleMimicHarness:
 
     def build_scenarios(self) -> list[RoleScenario]:
         base_scenarios = [
-            RoleScenario(role="guest", intent="discover", request="Show public entry points.", expected_signal="public_access"),
-            RoleScenario(role="customer", intent="book", request="Create a booking and confirm details.", expected_signal="booking_flow"),
-            RoleScenario(role="support_agent", intent="triage", request="Inspect open issues and suggest next steps.", expected_signal="support_workbench"),
-            RoleScenario(role="manager", intent="review", request="Summarize team performance and escalation risk.", expected_signal="management_view"),
-            RoleScenario(role="admin", intent="govern", request="Audit retention and operational health.", expected_signal="admin_controls"),
+            RoleScenario(
+                role="youth_conversion_intelligence",
+                intent="segment",
+                request="Identify why younger users avoid large purchases and suggest trust-building offers.",
+                expected_signal="segment_readiness_score",
+            ),
+            RoleScenario(
+                role="market_penetration_adoption",
+                intent="analyze",
+                request="Check whether internet reach is translating into e-commerce adoption across regions.",
+                expected_signal="adoption_gap_score",
+            ),
+            RoleScenario(
+                role="device_experience_optimizer",
+                intent="optimize",
+                request="Compare mobile and desktop engagement and recommend UX changes.",
+                expected_signal="device_strategy_summary",
+            ),
+            RoleScenario(
+                role="cpc_economics_profiler",
+                intent="budget",
+                request="Explain why lower-income regions may still have higher CPC and where ad spend should shift.",
+                expected_signal="cpc_risk_profile",
+            ),
+            RoleScenario(
+                role="older_adult_value_model",
+                intent="retain",
+                request="Assess older-adult engagement and recommend value cues that improve retention.",
+                expected_signal="older_adult_value_score",
+            ),
+            RoleScenario(
+                role="low_penetration_engagement",
+                intent="mobilize",
+                request="Measure per-capita engagement in low-penetration regions and suggest activation channels.",
+                expected_signal="engagement_per_capita_profile",
+            ),
         ]
         return [scenario for scenario in base_scenarios if scenario.role in self.roles]
 

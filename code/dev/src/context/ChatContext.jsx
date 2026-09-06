@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { useAuth } from './AuthContext';
 import { useApp } from './AppContext';
+import { chatApi } from '../utils/api';
 
 export const ChatContext = createContext();
 
@@ -16,29 +17,26 @@ export function ChatProvider({ children }) {
   const [currentLanguage, setCurrentLanguage] = useState("en");
   const [isVoiceMode, setIsVoiceMode] = useState(false);
 
-  const { isAuthenticated, user, token } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const { notify } = useApp();
 
   useEffect(() => {
     // Load history after login
     if (isAuthenticated && user) {
-      fetch("/chat/history", {
-        headers: {
-          "Authorization": `Bearer ${token}`
-        }
-      })
-        .then(res => res.json())
+        const sessionId = user.id || user.username;
+        chatApi.getChatHistory(sessionId)
         .then(data => {
-          setMessages(data.map(h => ({
-            text: h.response,
+            const historyItems = Array.isArray(data) ? data : data.items || data.history || [];
+            setMessages(historyItems.map(h => ({
+              text: h.response || h.text || h.message || "",
             isUser: false,
             timestamp: h.timestamp,
-            userMessage: h.message
+              userMessage: h.message || h.userMessage
           })));
         })
-        .catch(() => notify("Failed to load chat history"));
+          .catch(() => notify("Failed to load chat history"));
     }
-  }, [isAuthenticated, user, token, notify]);
+        }, [isAuthenticated, user, notify]);
 
   async function sendMessage(text) {
     if (!isAuthenticated) {
@@ -51,19 +49,12 @@ export function ChatProvider({ children }) {
       { text, isUser: true, timestamp: Date.now() }
     ]);
     try {
-      const res = await fetch("/chat/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify({ message: text }),
-      });
-      const data = await res.json();
+      const sessionId = user.id || user.username;
+      const data = await chatApi.sendMessage(sessionId, text, currentLanguage);
       setMessages((prev) => [
         ...prev,
         {
-          text: data.text,
+            text: data.text || data.response || data.message || "",
           isUser: false,
           timestamp: Date.now(),
           sentiment: data.sentiment,

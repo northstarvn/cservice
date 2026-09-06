@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import models
 from app.schemas.chat import (
     ChurnPrediction,
+    DissatisfactionRecoveryReport,
     InteractionInsight,
     InteractionSummary,
     InteractionTrendItem,
@@ -21,8 +22,11 @@ from app.schemas.chat import (
     LifecycleStageReport,
     MonetizationCohortItem,
     MonetizationCohortReport,
+    RecoverySignal,
     RetentionCohortItem,
     RetentionCohortReport,
+    RetentionSnapshotActionPlan,
+    RetentionSnapshotRecommendation,
     Sentiment,
     SystemImprovementItem,
     SystemImprovementPack,
@@ -426,6 +430,117 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
         },
         generated_at=datetime.now(timezone.utc),
     )
+
+
+def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> DissatisfactionRecoveryReport:
+    issue_weights = {
+        "repeated concerns": 2.0,
+        "support": 1.6,
+        "clarity": 1.4,
+        "response_speed": 1.4,
+        "reliability": 1.8,
+        "booking_flow": 1.5,
+        "pricing": 1.2,
+        "trust": 1.3,
+        "follow_up": 1.5,
+    }
+
+    recovery_signals: list[RecoverySignal] = []
+    primary_risks: list[str] = []
+    dissatisfaction_score = 0.0
+
+    for item in summary.insights:
+        if item.area == "sentiment":
+            dissatisfaction_score += item.score * 2.5
+            primary_risks.append("negative sentiment")
+            recovery_signals.append(
+                RecoverySignal(
+                    area="sentiment",
+                    intensity=round(min(item.score * 2.5, 5.0), 2),
+                    evidence=item.evidence[:3],
+                    recommended_action="Acknowledge the issue and route to fast follow-up.",
+                )
+            )
+            continue
+
+        weight = issue_weights.get(item.area, 1.0)
+        intensity = round(min(item.score * weight, 5.0), 2)
+        if intensity <= 0:
+            continue
+        dissatisfaction_score += intensity
+        primary_risks.append(item.area.replace("_", " "))
+        recovery_signals.append(
+            RecoverySignal(
+                area=item.area,
+                intensity=intensity,
+                evidence=item.evidence[:3],
+                recommended_action=item.next_step,
+            )
+        )
+
+    if sentiment and sentiment.label == "negative":
+        dissatisfaction_score += 4.0
+        if "negative sentiment" not in primary_risks:
+            primary_risks.insert(0, "negative sentiment")
+
+    dissatisfaction_score = round(min(dissatisfaction_score, 100.0), 2)
+    if dissatisfaction_score >= 18:
+        recovery_readiness = "critical"
+        action_plan = "Open a recovery case now, assign an owner, and contact the user within 24 hours."
+    elif dissatisfaction_score >= 10:
+        recovery_readiness = "high"
+        action_plan = "Trigger proactive follow-up and resolve the top issue before the next session."
+    elif dissatisfaction_score >= 5:
+        recovery_readiness = "moderate"
+        action_plan = "Monitor the issue closely and tighten the next-best-action flow."
+    else:
+        recovery_readiness = "low"
+        action_plan = "Keep the current support cadence and continue monitoring for recurrence."
+
+    return DissatisfactionRecoveryReport(
+        generated_at=datetime.now(timezone.utc),
+        window_days=30,
+        dissatisfaction_score=dissatisfaction_score,
+        recovery_readiness=recovery_readiness,
+        primary_risks=primary_risks[:5] or ["no major dissatisfaction signals detected"],
+        recovery_signals=recovery_signals[:5],
+        action_plan=action_plan,
+    )
+
+
+def build_loyalty_recovery_report(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> tuple[DissatisfactionRecoveryReport, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, str]:
+    dissatisfaction = build_dissatisfaction_recovery_report(summary, sentiment)
+    if dissatisfaction.recovery_readiness == "critical":
+        retention_risk = "critical"
+        recommendation = "Escalate retention recovery and remove friction from the dominant issue immediately."
+        action_plan = "Assign an owner, reach out within 24 hours, and close the loop with the user."
+    elif dissatisfaction.recovery_readiness == "high":
+        retention_risk = "high"
+        recommendation = "Prioritize recovery work on the highest-intensity dissatisfaction signals."
+        action_plan = "Schedule a same-week review and prepare a proactive follow-up message."
+    elif dissatisfaction.recovery_readiness == "moderate":
+        retention_risk = "moderate"
+        recommendation = "Monitor the issue and strengthen the follow-up loop before it compounds."
+        action_plan = "Review the top friction points and confirm the next action owner."
+    else:
+        retention_risk = "low"
+        recommendation = "Maintain the current retention cadence and continue reinforcing trust signals."
+        action_plan = "Continue monitoring and keep the user on the standard success path."
+
+    recommendation_model = RetentionSnapshotRecommendation(
+        generated_at=datetime.now(timezone.utc),
+        window_days=30,
+        risk_level=retention_risk,
+        recommendation=recommendation,
+    )
+    action_plan_model = RetentionSnapshotActionPlan(
+        generated_at=datetime.now(timezone.utc),
+        window_days=30,
+        risk_level=retention_risk,
+        action=action_plan,
+    )
+
+    return dissatisfaction, recommendation_model, action_plan_model, retention_risk
 
 
 async def build_churn_prediction(db: AsyncSession, user_id: int, window_days: int) -> ChurnPrediction:

@@ -1,7 +1,7 @@
 // src/context/AppContext.js
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
-import { i18n } from '../utils/I18n';  // Import the class
+import i18n from '../misc/i18n';
 
 export const AppContext = createContext();
 
@@ -232,6 +232,10 @@ export const AppProvider = ({ children }) => {
     setNotifications(prev => prev.filter(notif => notif.id !== id));
   }, []);
 
+  const notify = useCallback((message, type = 'info') => {
+    addNotification(message, type);
+  }, [addNotification]);
+
   const openLoginPopup = useCallback(() => {
     setShowLoginPopup(true);
     trackUserBehavior('login_popup_opened');
@@ -326,6 +330,7 @@ export const AppProvider = ({ children }) => {
     trackDelivery,
     addNotification,
     removeNotification,
+    notify,
     closePopup,
     openLoginPopup,
     openBookingConfirmation,

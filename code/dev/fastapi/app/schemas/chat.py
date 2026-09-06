@@ -431,6 +431,23 @@ class RetentionSnapshotActionPlan(BaseModel):
     action: str
 
 
+class RecoverySignal(BaseModel):
+    area: str
+    intensity: float
+    evidence: List[str]
+    recommended_action: str
+
+
+class DissatisfactionRecoveryReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    dissatisfaction_score: float
+    recovery_readiness: str
+    primary_risks: List[str]
+    recovery_signals: list[RecoverySignal]
+    action_plan: str
+
+
 class RetentionSnapshotAuditItem(BaseModel):
     snapshot_type: str
     total_snapshots: int
@@ -595,6 +612,17 @@ class RetentionSnapshotOperationsGoNoGo(BaseModel):
     stale_after_days: int
     decision: str
     overview: str
+
+
+class LoyaltyRecoveryReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    loyalty_score: float
+    churn_risk: str
+    recovery_readiness: str
+    dissatisfaction: DissatisfactionRecoveryReport
+    retention_recommendation: RetentionSnapshotRecommendation
+    action_plan: RetentionSnapshotActionPlan
 
 class Sentiment(BaseModel):
     label: str

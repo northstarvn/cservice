@@ -72,12 +72,14 @@ from app.schemas.chat import (
     RetentionSnapshotOperationsExecutionState,
     RetentionSnapshotOperationsLaunchReadiness,
     RetentionSnapshotOperationsGoNoGo,
+    LoyaltyRecoveryReport,
     MonetizationCohortReport,
     WeightedSystemMonitoringReport,
     WeightedFocusItem,
 )
 from app.schemas.schemas import UserOut
 from app.services.chat_analytics import build_monetization_cohorts
+from app.services.chat_analytics import build_dissatisfaction_recovery_report, build_loyalty_recovery_report
 from fastapi.responses import JSONResponse
 import requests,os
 from dotenv import load_dotenv
@@ -345,6 +347,38 @@ def _build_capabilities_payload() -> dict[str, object]:
             "retention_snapshot_operations_gonogo_reporting",
         ],
         "capabilities": _build_ai_capabilities_catalog(),
+        "roles": [
+            {
+                "id": "youth_conversion_intelligence",
+                "study_target": "Younger demographics are less likely to make large purchases online.",
+                "owner_hint": "growth and lifecycle",
+            },
+            {
+                "id": "market_penetration_adoption",
+                "study_target": "Higher internet penetration does not always mean higher e-commerce adoption.",
+                "owner_hint": "regional strategy",
+            },
+            {
+                "id": "device_experience_optimizer",
+                "study_target": "More developed regions have lower engagement in mobile-only usage.",
+                "owner_hint": "frontend and performance",
+            },
+            {
+                "id": "cpc_economics_profiler",
+                "study_target": "Lower average income can still produce higher CPC in advertising.",
+                "owner_hint": "marketing analytics",
+            },
+            {
+                "id": "older_adult_value_model",
+                "study_target": "Older adults are not only growing in usage but also outperform younger groups in certain metrics.",
+                "owner_hint": "retention and UX",
+            },
+            {
+                "id": "low_penetration_engagement_engine",
+                "study_target": "Regions with lower internet penetration can have users who are more engaged per capita.",
+                "owner_hint": "mobile growth",
+            },
+        ],
         "endpoints": {
             "retention_snapshot_health_recommendation": "/chat/admin/snapshot-health-recommendation",
             "retention_snapshot_operations_status": "/chat/admin/snapshot-operations-status",
@@ -1651,6 +1685,23 @@ async def _build_retention_snapshot_action_plan(db: AsyncSession, window_days: i
     )
 
 
+async def _build_loyalty_recovery_dashboard(db: AsyncSession, user_id: int, window_days: int) -> LoyaltyRecoveryReport:
+    chat_rows, bookings = await load_user_interaction_window(db, user_id, window_days)
+    latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
+    summary = build_summary(user_id, chat_rows, bookings, latest_sentiment)
+    dissatisfaction, recommendation, action_plan, recovery_risk = build_loyalty_recovery_report(summary, latest_sentiment)
+    return LoyaltyRecoveryReport(
+        generated_at=datetime.now(timezone.utc),
+        window_days=window_days,
+        loyalty_score=summary.loyalty_score,
+        churn_risk=summary.churn_risk,
+        recovery_readiness=recovery_risk,
+        dissatisfaction=dissatisfaction,
+        retention_recommendation=recommendation,
+        action_plan=action_plan,
+    )
+
+
 async def _build_retention_snapshot_audit_report(db: AsyncSession, window_days: int) -> RetentionSnapshotAuditReport:
     window_start = datetime.now(timezone.utc) - timedelta(days=window_days)
     audit_query = (
@@ -2718,6 +2769,15 @@ async def get_retention_dashboard(
     current_user: models.User = Depends(deps.get_current_user)
 ):
     return await _build_retention_dashboard(db, current_user.id, window_days)
+
+
+@router.get("/chat/recovery-dashboard", response_model=LoyaltyRecoveryReport)
+async def get_recovery_dashboard(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user)
+):
+    return await _build_loyalty_recovery_dashboard(db, current_user.id, window_days)
 
 
 @router.get("/chat/improvement-pack", response_model=SystemImprovementPack)

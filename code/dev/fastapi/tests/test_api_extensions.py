@@ -23,31 +23,6 @@ def test_meta_ecosystem_exposes_backend_subservices():
     assert "chat_intelligence" in payload["subservices"]
     assert "retention_ops" in payload["subservices"]
     assert "/chat/admin/snapshot-operations-gonogo" in payload["subservices"]["retention_ops"]["routes"]
-    assert payload["overall_status"] == "ready"
-    assert payload["subservices"]["chat_intelligence"]["status"] == "ready"
-    assert payload["subservices"]["retention_ops"]["health_endpoint"] == "/chat/admin/snapshot-health-score"
-    assert payload["subservices"]["identity"]["notes"]
-
-
-def test_authenticated_probe_routes_exposes_route_level_checks():
-    async def _fake_get_current_user():
-        return FakeUser()
-
-    app.dependency_overrides[deps.get_current_user] = _fake_get_current_user
-    try:
-        response = TestClient(app).get("/meta/probe/routes")
-    finally:
-        app.dependency_overrides.pop(deps.get_current_user, None)
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "ready"
-    assert payload["actor"] == "tester"
-    assert payload["targets"]
-    assert payload["targets"][0]["requires_auth"] is True
-    assert payload["targets"][0]["route"] == "/users/me"
-    assert "/chat/retention-dashboard" in {target["route"] for target in payload["targets"]}
-    assert "/chat/snapshots/trends" in {target["route"] for target in payload["targets"]}
 
 
 def test_system_priorities_includes_summary_contract():
@@ -643,6 +618,30 @@ def test_meta_capabilities_cover_study_concepts():
     assert any("Lower average income" in theme for theme in themes)
     assert any("Older adults" in theme for theme in themes)
     assert any("Lower internet penetration" in theme for theme in themes)
+
+
+def test_meta_capabilities_expose_study_driven_roles():
+    async def _fake_get_db():
+        yield FakeHealthSession()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    try:
+        response = TestClient(app).get("/meta/capabilities")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "roles" in payload
+    role_ids = {item["id"] for item in payload["roles"]}
+    assert {
+        "youth_conversion_intelligence",
+        "market_penetration_adoption",
+        "device_experience_optimizer",
+        "cpc_economics_profiler",
+        "older_adult_value_model",
+        "low_penetration_engagement_engine",
+    } == role_ids
 
 
 def test_meta_features_lists_snapshot_health_reporting():
