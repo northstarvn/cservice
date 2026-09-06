@@ -246,123 +246,86 @@ The repository is functionally a backend-first customer-service platform with an
 
 ## 11. Expansion Priorities
 
-The following expansion areas are ordered by expected backend impact on customer recovery, retention, cohort health, and operational clarity. They should extend the current booking-event, interaction-signal, recovery-report, and retention-snapshot model rather than replace it.
+The following expansion areas are forward-looking only. Existing implemented behavior belongs in the earlier architecture sections; this section should describe what still needs to be built or hardened.
 
 ### 11.1 Priority 1: Recovery and Dissatisfaction Loop
 
-Build a closed-loop recovery system that detects dissatisfaction early, records the cause, and routes it into explicit recovery outputs.
+To do:
 
-Target outcomes:
-
-- More negative sentiment converted into actionable recovery items
-- Faster follow-up for repeated complaints and escalations
-- Better visibility into policy areas such as response speed, clarity, reliability, handoff, and follow-up
-- Lower churn caused by avoidable friction
-
-Current implementation evidence:
-
-- `fastapi/app/services/chat_analytics.py` builds dissatisfaction and loyalty recovery reports from interaction summaries
-- `fastapi/app/schemas/chat.py` now exposes recovery summary models alongside the dashboard and retention report types
-- `fastapi/app/routers/chat.py` already serves the recovery dashboard and retention dashboard as first-class backend routes
-
-Suggested implementation layers:
-
-- Backend: sentiment scoring, interaction-insight ranking, explicit recovery reports, stored interaction signals, and policy-area recommendations
-- Service layer: `build_dissatisfaction_recovery_report`, `build_loyalty_recovery_report`, `_build_interaction_insights`, `_store_interaction_signals`, and retention-snapshot summaries
-- Metrics: complaint recurrence, time-to-recovery, unresolved issue rate, recovery acceptance rate, and signal volume by policy area
+- Strengthen sentiment scoring so negative, mixed, and repeated-friction messages produce different recovery paths instead of one generic escalation
+- Rank interaction insights with a clearer weighting model that favors recent messages, repeated complaints, booking friction, and support-language signals
+- Add recovery outputs that name the likely policy area, the recommended owner, the next action, and the evidence snippet that triggered the recommendation
+- Store interaction signals with enough context to explain the recovery decision later, including source, area, score, recommendation, and a short evidence summary
+- Measure complaint recurrence, time-to-recovery, unresolved issue rate, recovery acceptance rate, and signal volume by policy area so the loop can be compared across releases
 
 ### 11.2 Priority 2: Loyalty Cohorts and Repeat-Use Intelligence
 
-Increase repeat engagement by turning interaction history into measurable loyalty cohorts and repeat-usage signals.
+To do:
 
-Target outcomes:
-
-- More stable retention cohorts across the user base
-- Higher completion rate for core journeys and booking flows
-- Better separation between champions, stable users, at-risk users, and critical users
-- Higher retention among users with recurring unresolved issues
-
-Suggested implementation layers:
-
-- Backend: loyalty scoring from interaction summaries, churn-risk classification, retention cohorts, signal-backed cohort membership, and monetization readiness
-- Service layer: `_build_retention_cohorts`, `build_churn_prediction`, `build_lifecycle_stage_report`, `build_monetization_cohorts`, and retention-dashboard assembly
-- Metrics: repeat session rate, cohort migration rate, task re-entry after completion, positive snapshot delta rate, and signal-score trend by cohort
+- Expand loyalty scoring so cohorts are driven by both interaction history and stored signals, not just message counts or booking totals
+- Split users into named cohorts with a clear rule for each one, such as champions, stable users, at-risk users, and critical users, then explain the rule in the report output
+- Add drilldowns that show why a user landed in a cohort, including loyalty score, signal score, churn prediction, recent booking state, and the strongest friction area
+- Keep monetization readiness separate from loyalty so a user can be valuable but still need recovery, and so the two signals do not get collapsed into one score
+- Measure repeat session rate, cohort migration rate, task re-entry after completion, positive snapshot delta rate, and signal-score trend by cohort
 
 ### 11.3 Priority 3: Booking Lifecycle Safety
 
-Reduce avoidable ambiguity in booking creation, booking edits, event history, and admin analytics so the lifecycle model remains safe and auditable.
+To do:
 
-Target outcomes:
+- Tighten booking CRUD so each create, edit, and delete path validates the same core booking shape before persistence and produces the same history trail
+- Record booking events for the transition points that matter most: create, status change, edit, cancel, and complete
+- Add audit summaries that can explain who changed what, when the change happened, and which state moved to which state
+- Make admin summaries derive from the same persisted booking and event records so lifecycle totals stay aligned with the actual booking history
+- Track validation failure rate, retry frequency, transition rejection rate, event-count accuracy, and audit completeness
 
-- Lower transition errors across booking states
-- More predictable event histories
-- Reduced support load from ambiguous booking outcomes
-- Better perceived reliability in confirmed, pending, cancelled, and completed states
+### 11.4 Priority 4: Monitoring, Capability, and Platform Insight Products
 
-Suggested implementation layers:
+To do:
 
-- Backend: booking CRUD, booking history, booking audit summaries, admin event summaries, and booking transition enforcement
-- Service layer: `apply_booking_updates`, `touch_booking`, `create_booking_event`, `ensure_booking_transition_allowed`, and `transition_booking`
-- Metrics: validation failure rate, retry frequency, transition rejection rate, event-count accuracy, and audit completeness
-
-### 11.4 Priority 4: Monitoring and Insight Products
-
-Use the backend's existing insight and monitoring surfaces as first-class products rather than incidental reports.
-
-Target outcomes:
-
-- Better visibility into top issues, recommended actions, and owner hints
-- Stronger admin understanding of current system posture
-- Better route-level and capability-level observability
-- More actionable summaries for support and operations teams
-
-Suggested implementation layers:
-
-- Backend: interaction summaries, system improvement packs, weighted monitoring reports, trend reports, capability payloads, and AI capability catalogs
-- Service layer: `_build_summary`, `_build_system_improvement_pack`, `_build_weighted_system_monitoring`, `_load_signal_trends`, and `_build_ai_capabilities_catalog`
-- Metrics: insight adoption rate, monitoring completeness, recommendation coverage, and trend-report freshness
+- Extend interaction summaries so they can explain the most important issues, the strongest positives, and the recommended focus area in a form that is useful for admins and support
+- Turn system improvement packs into actionable work items with an owner hint, impact level, rationale, and a concrete recommendation instead of a broad summary
+- Keep weighted monitoring reports tied to a small set of high-value dimensions such as reliability, response speed, customer activity, and retention so the weighting remains interpretable
+- Keep capability payloads and AI capability catalogs aligned with actual routes and actual outputs, not aspirational product language
+- Track insight adoption rate, monitoring completeness, recommendation coverage, and trend-report freshness
 
 ### 11.5 Priority 5: Retention Snapshot Operations
 
-Make retention snapshots more operational by emphasizing health, momentum, volatility, readiness, and action planning.
+To do:
 
-Target outcomes:
-
-- Stronger long-term confidence in the service
-- Lower perceived risk when making a booking or starting a chat
-- Better acceptance of suggested actions from snapshot reports
-- More reliable retention-health and operations reporting
-
-Suggested implementation layers:
-
-- Backend: retention snapshot reports, deltas, trends, dashboard summaries, health summaries, volatility summaries, and operations-oriented snapshot variants
-- Service layer: `prune_retention_snapshots`, `prune_and_report_retention_snapshots`, `build_retention_snapshot_report`, `build_retention_snapshot_delta`, `build_retention_snapshot_trends`, and `build_retention_dashboard`
-- Metrics: retention snapshot freshness, delta coverage, trend coverage, stale-snapshot rate, and operations readiness completeness
+- Expand retention snapshot reports so they include the latest snapshot, the prior snapshot, and the change in loyalty, churn risk, and lifecycle stage in a single readable flow
+- Build trend and volatility views that group snapshot types consistently, so fresh versus stale patterns can be compared without ambiguity
+- Add operations-oriented variants that translate freshness, staleness, and volatility into clear statuses such as watch, hold, escalate, or go/no-go
+- Make pruning and maintenance outputs explicit so admins can see how many snapshots were kept, removed, or left untouched during the cleanup run
+- Track retention snapshot freshness, delta coverage, trend coverage, stale-snapshot rate, and operations readiness completeness
 
 ## 12. Expansion Guardrails
 
-These priorities should improve recovery, retention, and operations visibility without introducing brittle coupling or misleading metrics.
+These guardrails describe what future work must preserve. Existing implementations already belong in the earlier sections.
 
 ### 12.1 Keep recovery outputs explicit
 
-The backend should keep dissatisfaction, loyalty, and recovery outputs explicit. Reports should show why a user was classified a certain way instead of hiding the signal behind an opaque score.
+Do not add recovery, loyalty, or churn outputs that hide the evidence behind an opaque score. Each output should show the main trigger, the strongest evidence, and the action the system expects the user or operator to take next.
 
 ### 12.2 Keep each layer measurable
 
-Every recovery, cohort, monitoring, and snapshot flow should emit traceable fields so the team can compare outcomes over time. If a report cannot point to concrete inputs such as signals, bookings, or snapshots, it should be treated as provisional.
+Make every recovery, cohort, monitoring, capability, and snapshot flow traceable. If a report cannot point to concrete inputs such as signals, bookings, snapshots, or route metadata, treat it as provisional. Prefer payloads that include counts, score deltas, and timestamps over narrative-only summaries.
 
 ### 12.3 Preserve router and service boundaries
 
-Booking routers, chat routers, retention services, and schema contracts should remain separable so the codebase stays maintainable as the reporting surface expands.
+Keep booking routers, chat routers, retention services, and schema contracts separable so future reporting work does not blur ownership. New analysis should usually land in a service helper first, then be exposed through a router, then be formalized in schema.
 
 ### 12.4 Protect booking and snapshot state
 
-Booking status changes, booking-event creation, and retention-snapshot writes should remain explicitly validated so the system does not drift into inconsistent states.
+Validate booking status changes, booking-event creation, and retention-snapshot writes explicitly so the system does not drift into inconsistent states. State-changing paths should reject invalid transitions before commit and should leave an auditable trail when they succeed.
 
 ### 12.5 Keep insight surfaces honest
 
-New backend features should expose metadata, summaries, or reports only when the underlying data is actually present and fresh enough to support them. This is especially important for recovery, cohort, and retention dashboards because they can otherwise imply a stronger signal than the database supports. The current recovery and retention reports already follow this rule by deriving their output from chat history, booking state, and persisted snapshots.
+Only expose metadata, summaries, or reports when the underlying data is actually present and fresh enough to support them. If the time window is too small, the signal count too low, or the snapshot set too stale, the response should say that directly.
 
-### 12.6 Keep revision structure stable
+### 12.6 Keep platform metadata consistent
 
-Future updates should extend these priorities with new backend evidence rather than rewriting the whole document.
+Keep capability summaries, ecosystem status, and feature lists aligned with the router and service layer. If metadata advertises a route or capability, that route should exist and its output shape should match the advertised purpose.
+
+### 12.7 Keep revision structure stable
+
+Extend these priorities with new to-dos rather than rewriting the whole document.
