@@ -9,15 +9,15 @@
 
 ## 1. Executive View
 
-This repository is a customer-service product split across a React/Vite frontend and a FastAPI backend. The system presents service booking, chat support, tracking, profile management, and project-planning experiences, while the backend also exposes deeper analytics, retention, lifecycle, and ecosystem metadata that are only partially surfaced in the UI.
+This repository is a backend-centered customer-service platform built around FastAPI, async SQLAlchemy, and a set of domain routers for users, bookings, chat, and system metadata. The backend also exposes deeper analytics, retention, lifecycle, and ecosystem metadata that define the product's operational intelligence layer.
 
-The implementation is best understood as three overlapping systems:
+The implementation is best understood as three overlapping backend systems:
 
-1. Customer-facing experience layer
-2. Account, booking, and conversation state layer
-3. Analytics, retention, and operational insight layer
+1. Identity, account, and auth control plane
+2. Booking, chat, and interaction state plane
+3. Analytics, retention, and operational insight plane
 
-The current workspace contains both implemented surfaces and requirement artifacts that describe a broader intended product. The document therefore distinguishes between:
+The current workspace contains both implemented backend surfaces and requirement artifacts that describe a broader intended product. The document therefore distinguishes between:
 
 - Implemented behavior
 - Intended behavior from requirement files
@@ -27,20 +27,11 @@ The current workspace contains both implemented surfaces and requirement artifac
 
 ### 2.1 Frontend
 
-The frontend is a React application built with Vite and styled primarily through Tailwind utility classes plus a shared CSS file. It routes through a single app shell and uses context providers for auth, app state, and chat state.
-
-Primary entry chain:
-
-- `src/main.jsx`
-- `src/App.jsx`
-- `src/context/AuthContext.jsx`
-- `src/context/AppContext.jsx`
-- `src/context/ChatContext.jsx`
-- `src/pages/*`
+The frontend exists in the repository, but it is outside the scope of this revision. This concept map focuses on backend implementation and backend-adjacent requirement artifacts only.
 
 ### 2.2 Backend
 
-The backend is a FastAPI application with async SQLAlchemy, token-based auth, and routers for users, bookings, and chat. It also exposes metadata and capability endpoints that describe a richer ecosystem than the visible UI currently uses.
+The backend is a FastAPI application with async SQLAlchemy, token-based auth, domain routers, service helpers, and metadata endpoints. It is organized around user identity, booking lifecycle management, chat analytics, retention intelligence, and ecosystem readiness reporting.
 
 Primary entry chain:
 
@@ -50,6 +41,18 @@ Primary entry chain:
 - `fastapi/app/routers/users.py`
 - `fastapi/app/routers/bookings.py`
 - `fastapi/app/routers/chat.py`
+
+Primary service layer:
+
+- `fastapi/app/services/bookings.py`
+- `fastapi/app/services/chat_analytics.py`
+- `fastapi/app/services/retention.py`
+
+Primary schema layer:
+
+- `fastapi/app/schemas/schemas.py`
+- `fastapi/app/schemas/chat.py`
+- `fastapi/app/deps.py`
 
 ### 2.3 Requirement Layer
 
@@ -61,124 +64,6 @@ Key artifacts:
 - `requirement/services_and_planning.json`
 - `requirement/multilingual_and_testing.json`
 - `requirement/security_spec.js`
-- `requirement/mobile_spec.js`
-- `requirement/tracking_rtl_spec.js`
-
-## 3. Frontend Concept Model
-
-### 3.1 Shell and Boot
-
-The application boots from `src/main.jsx`, which mounts `App`. `App` wraps the app in error handling and three context providers, then places the router around the interactive content.
-
-At this level, the shell is responsible for:
-
-- Establishing app-wide state
-- Supplying auth state
-- Supplying chat state
-- Rendering the persistent navbar
-- Mounting route-driven screens
-- Managing login, signup, and booking popups
-
-### 3.2 Context Layer
-
-#### Auth Context
-
-`src/context/AuthContext.jsx` owns session validation, login, registration, logout, and profile update state. It stores the current user and token lifecycle behavior in local storage-backed flows.
-
-Conceptually, it is the source of truth for:
-
-- Is the user authenticated?
-- Who is the current user?
-- Is the app still validating a token?
-- How does the app log in or out?
-
-#### App Context
-
-`src/context/AppContext.jsx` owns global UX concerns such as language, theme, mobile detection, notifications, loading, analytics counters, and popup state.
-
-Conceptually, it is the source of truth for:
-
-- Which language is active?
-- Which theme is active?
-- Which modal or popup is open?
-- Is the UI in a loading state?
-- What lightweight analytics events are being tracked?
-
-#### Chat Context
-
-`src/context/ChatContext.jsx` owns the conversational workflow: message history, chat submission, suggestions, sentiment, voice mode, and language selection.
-
-Conceptually, it is the source of truth for:
-
-- What messages have been exchanged?
-- Is chat loading?
-- What suggested replies exist?
-- Is voice mode active?
-- What language should speech recognition use?
-
-### 3.3 Route Layer
-
-Current React routes in `src/App.jsx` are:
-
-- `/` -> Home
-- `/chat` -> Chat
-- `/booking` -> Booking
-- `/bookings` -> MyBookings
-- `/tracking` -> Tracking
-- `/profile` -> Profile
-- `/planning` -> Planning
-- `/login` -> Login redirect flow
-
-The route list is stable enough to describe the current UI map, but it does not fully match the paths described in the requirement folder.
-
-### 3.4 Screen Layer
-
-#### Home
-
-The home page is a marketing and navigation hub. It promotes four core actions:
-
-- AI chat
-- Booking
-- Tracking
-- Project planning
-
-It also shows recent bookings for authenticated users.
-
-#### Chat
-
-The chat page is the conversational support surface. It displays messages, suggestions, sentiment, and an optional voice-recognition mode.
-
-#### Booking
-
-The booking page is the transactional scheduling surface. It supports creation, editing, deletion, filtering, and pagination for user bookings.
-
-#### Tracking
-
-The tracking page is a shipment/delivery lookup surface. It uses a mock tracking flow and displays a result popup.
-
-#### Profile
-
-The profile page is the account management surface. It allows editing display name, email, and preferred language, plus logout and a few auxiliary account actions.
-
-#### Planning
-
-The planning page is an idea-capture and AI-suggestion surface. It accepts project name and requirements, then generates heuristic suggestions.
-
-### 3.5 Component Layer
-
-Reusable components fall into a few groups:
-
-- Navigation and global UI: `Navbar`, `NotificationContainer`, `LoadingSpinner`, `LoadingSkeletons`, `ErrorBoundary`
-- Authentication popups: `LoginPopup`, `SignupPopup`
-- Booking overlays: `BookingConfirmationPopup`
-- Tracking overlays: `TrackingResultPopup`
-- Support widgets: `Popup`, `DebugAuth`
-
-The component set suggests a modal-heavy product with shared chrome and multiple task-specific surfaces.
-
-### 3.6 Style Layer
-
-The visual system is not centralized in one design system file. It combines Tailwind utility classes, a global stylesheet in `src/styles/App.css`, and some component-local inline styles. This makes the app visually functional but conceptually fragmented.
 
 ## 4. Backend Concept Model
 
@@ -194,142 +79,141 @@ At a conceptual level, the backend startup owns:
 - Global error shaping
 - Router registration
 
-### 4.2 Domain Model
+### 4.2 Data and Domain Substrate
 
-`fastapi/app/models.py` defines the persistent business objects:
+`fastapi/app/models.py` defines the persisted data model that everything else builds on. The important clusters are:
 
-- `User`
-- `Booking`
-- `BookingEvent`
-- `ChatHistory`
-- `InteractionSignal`
-- `RetentionSnapshot`
+- Identity and access: `User`
+- Conversation history: `ChatHistory`
+- Booking lifecycle: `Booking`, `BookingEvent`, `BookingStatus`, `ServiceType`
+- Behavioral signals: `InteractionSignal`
+- Retention history: `RetentionSnapshot`
 
-These objects indicate that the backend is not just a CRUD booking service. It is also designed to preserve interaction signals, audit booking transitions, and track retention health over time.
+These objects show that the backend is not only transactional. It also preserves state transitions and interaction traces so the system can explain customer behavior over time.
 
-### 4.3 User and Auth API
+### 4.3 Identity and Auth API
 
 `fastapi/app/routers/users.py` supports registration, login, current-user lookup, and password change. This is the account control plane for the app.
 
-### 4.4 Booking API
+`fastapi/app/deps.py` resolves the authenticated user from the bearer token and enforces the admin boundary when needed.
 
-`fastapi/app/routers/bookings.py` supports booking creation, listing, reading, editing, deleting, and audit/history summaries. It also exposes admin-style summary analytics.
+Important behaviors:
 
-This router is the clearest implementation of a lifecycle model rather than a simple booking form.
+- JWT decoding via the shared security secret
+- Database-backed user lookup by username
+- Admin-only enforcement through `get_current_admin_user`
 
-### 4.5 Chat API
+### 4.4 Booking Lifecycle API
 
-`fastapi/app/routers/chat.py` is the broadest surface. It includes chat history, sentiment analysis, interaction insights, retention dashboards, maintenance reports, risk profiles, system priorities, monetization cohorts, and operational readiness views.
+`fastapi/app/routers/bookings.py` supports booking creation, listing, reading, editing, deleting, and audit/history summaries. It also exposes admin-style summary analytics. The router is backed by `fastapi/app/services/bookings.py`, which contains reusable lifecycle rules.
+
+Important service behavior:
+
+- Booking updates are normalized before persistence
+- Status transitions are validated before mutation
+- Transition helpers record booking events alongside state changes
+- Ownership checks are centralized in the service layer
+
+This router is the clearest implementation of a lifecycle model rather than a simple CRUD surface.
+
+### 4.5 Chat Analytics and Recovery API
+
+`fastapi/app/routers/chat.py` is the broadest surface. It includes chat history, sentiment analysis, interaction insights, retention dashboards, maintenance reports, risk profiles, system priorities, monetization cohorts, and operational readiness views. The heavy lifting is concentrated in `fastapi/app/services/chat_analytics.py` and `fastapi/app/services/retention.py`.
+
+Important service behavior:
+
+- Sentiment scoring drives recovery classification
+- Keyword and history analysis produce policy-area insights
+- Retention snapshots summarize loyalty, churn risk, and lifecycle stage
+- Retention reports can derive deltas and trends from persisted snapshots
 
 The chat router is therefore both a conversation API and a business-intelligence API.
 
+### 4.6 Metadata and Ecosystem Layer
+
+`fastapi/app/main.py` exposes capability and ecosystem endpoints that describe the backend as a system of cooperating subservices.
+
+This layer is important because it turns the backend into an observable platform rather than a hidden API.
+
+Key surfaces:
+
+- `/meta` for app identity
+- `/meta/capabilities` for capability summaries
+- `/meta/ecosystem` for subservice status
+- `/meta/probe/routes` for authenticated route probing
+
+### 4.7 Schema Layer
+
+`fastapi/app/schemas/schemas.py` and `fastapi/app/schemas/chat.py` define the shape of all request and response payloads.
+
+This layer is the contract boundary between routers, services, and clients. It formalizes:
+
+- Booking lifecycle payloads
+- User and token payloads
+- Analytics and retention reports
+- Ecosystem and capability reports
+
 ## 5. Requirement-Layer Intent
 
-The requirement files describe a more formal customer-service product language than the current routing suggests.
+The requirement files describe a more formal customer-service product language than the backend currently exposes directly.
 
-### 5.1 Intended Navigation
+### 5.1 Intended Service Scope
 
-`requirement/core_structure.json` describes a menu centered on:
+`requirement/core_structure.json` and `requirement/services_and_planning.json` describe a broader customer-service system centered on booking, chat assistance, planning, and language-aware behavior. These artifacts are useful as product intent, but they are not the primary implementation surface in this revision.
 
-- Home
-- AI Assistant
-- Services
-- Project Planning
-- Profile
-- Language switching
+### 5.2 Intended Multilingual Model
 
-This is a useful conceptual map even where the current UI uses different paths or names.
-
-### 5.2 Intended Screens
-
-The requirement set expects:
-
-- A home screen with AI chat and service cards
-- A dedicated AI chat screen
-- A services booking screen
-- A project-planning screen with AI-generated requirements
-- A language selector with localized content
-- A testing strategy around these user journeys
-
-### 5.3 Intended Multilingual Model
-
-The multilingual spec expects language files and selector-driven switching among at least English, Spanish, and French. Current implementation has language flags and switching, but translation loading is still partial and localized content is not yet fully centralized.
+The multilingual spec expects language files and selector-driven switching among at least English, Spanish, and French. Backend support for language-aware behavior exists only indirectly through stored user preferences and request handling patterns; a centralized localization service is not yet evident in the backend.
 
 ## 6. Layered Walkthrough From User Intent to Data
 
-### Layer 1: User goal
+### Layer 1: Incoming request
 
-A user arrives wanting support, a booking, tracking, or help planning a project.
+A client or internal tool sends requests for auth, bookings, chat, or metadata.
 
-### Layer 2: Navigation choice
+### Layer 2: Dependency resolution
 
-The user picks a route or popup via the navbar, home page, or login flow.
+FastAPI dependencies resolve the current user and database session.
 
-### Layer 3: Context selection
+### Layer 3: Domain mutation or read
 
-The app resolves auth, language, theme, and modal state through contexts.
+Routers validate the request, apply business rules, and load or mutate the relevant model.
 
-### Layer 4: Screen behavior
+### Layer 4: Persistence
 
-The visible page renders the requested task surface and may invoke API calls.
+SQLAlchemy persists the change or reads back the requested state.
 
-### Layer 5: Backend exchange
+### Layer 5: Derived analytics
 
-The frontend talks to FastAPI for identity, bookings, chat, and history.
+Services and metadata endpoints compute summaries, retention views, cohort reports, or capability descriptions.
 
-### Layer 6: Persistence and analytics
+### Layer 6: Operational insight
 
-The backend stores the business object or history item, computes summary outputs, and can expose analytic or retention views.
-
-### Layer 7: Operational insight
-
-The metadata endpoints and retention/chat analytics present the same product from an operational viewpoint rather than a user-facing one.
+Metadata routes surface ecosystem readiness, health summaries, and authenticated route probes for internal coordination.
 
 ## 7. Stable Gap Register
 
 These are the main gaps that should remain visible across revisions.
 
-### 7.1 Route mismatch
+### 7.1 Requirement-to-backend mismatch
 
-The requirement files describe `/ai-chat`, `/services`, and `/project-planning`, while the current app uses `/chat`, `/booking`, and `/planning`.
+The requirement files describe a broader product surface than the backend currently exposes through implemented routes.
 
-### 7.2 Duplicate conceptual flows
+### 7.2 Chat contract uncertainty
 
-The codebase contains overlapping implementations for some ideas, especially around chat, planning, booking, and translation. Some paths are context-driven and some are page-driven, which suggests partial migration or parallel prototypes.
+Any client code that consumes the chat API should be verified against the actual backend chat router before treating the contract as stable.
 
-### 7.3 Incomplete app-context contract
+### 7.3 Translation and locale gaps
 
-Some pages expect helpers such as notification and loading setters that are not clearly present in the current context contract. This is a likely source of drift.
+The requirements imply a stronger localization layer than the backend currently implements. User preference storage exists, but centralized localization services are not yet explicit.
 
-### 7.4 Chat integration uncertainty
+### 7.4 Backend breadth exceeds implemented UI
 
-The chat UI and chat context expect auth token plumbing and endpoints that need careful verification against the backend contract.
-
-### 7.5 Translation system fragmentation
-
-There are multiple i18n-related files and references, but translation loading and language ownership are not yet centralized.
-
-### 7.6 Backend breadth exceeds frontend surface
-
-The backend already exposes rich retention and ecosystem endpoints, but the visible UI does not yet map to most of them.
+The backend exposes rich retention and ecosystem endpoints, but many of them are only visible through metadata rather than through dedicated product flows.
 
 ## 8. Evidence Index
 
 This section is the stable entry point for future revision passes.
-
-### Frontend anchors
-
-- [src/App.jsx](src/App.jsx)
-- [src/main.jsx](src/main.jsx)
-- [src/context/AuthContext.jsx](src/context/AuthContext.jsx)
-- [src/context/AppContext.jsx](src/context/AppContext.jsx)
-- [src/context/ChatContext.jsx](src/context/ChatContext.jsx)
-- [src/pages/Home.jsx](src/pages/Home.jsx)
-- [src/pages/Booking.jsx](src/pages/Booking.jsx)
-- [src/pages/Chat.jsx](src/pages/Chat.jsx)
-- [src/pages/Planning.jsx](src/pages/Planning.jsx)
-- [src/pages/Tracking.jsx](src/pages/Tracking.jsx)
-- [src/pages/Profile.jsx](src/pages/Profile.jsx)
 
 ### Backend anchors
 
@@ -357,117 +241,121 @@ Use the same document shape for future updates:
 
 ## 10. Current Assessment
 
-The repository is functionally a customer-service platform with an underlayer of analytics and retention intelligence. The product story is coherent, but the implementation is not perfectly unified yet. The strongest conceptual boundary is the backend domain model, while the weakest boundary is the mismatch between requirements, frontend route names, and context contracts.
+The repository is functionally a backend-first customer-service platform with an underlayer of analytics and retention intelligence. The product story is coherent, but the implementation is not perfectly unified yet. The strongest conceptual boundary is the backend domain model, while the weakest boundary is the mismatch between requirements and the currently implemented backend contract.
 
 ## 11. Expansion Priorities
 
-The following expansion areas are ordered by expected impact on customer loyalty, repeat usage, and dissatisfaction reduction over time. The goal is to make the platform more habit-forming in a product sense by increasing perceived usefulness, reducing friction, and closing unresolved loops faster.
+The following expansion areas are ordered by expected backend impact on customer recovery, retention, cohort health, and operational clarity. They should extend the current booking-event, interaction-signal, and retention-snapshot model rather than replace it.
 
-### 11.1 Priority 1: Dissatisfaction Prevention Loop
+### 11.1 Priority 1: Recovery and Dissatisfaction Loop
 
-Build a closed-loop dissatisfaction system that detects friction early, records the cause, and routes it into a visible recovery path.
-
-Target outcomes:
-
-- Fewer unresolved negative experiences
-- Faster response to repeated complaints
-- Better visibility into recurring pain points
-- Lower churn caused by avoidable frustration
-
-Suggested implementation layers:
-
-- Frontend: lightweight complaint capture, contextual feedback prompts, and visible status updates
-- Backend: sentiment and interaction signal aggregation, escalation routing, and follow-up state tracking
-- Metrics: complaint recurrence, time-to-recovery, and unresolved issue rate
-
-### 11.2 Priority 2: Loyalty and Repeat-Use Design
-
-Increase repeat engagement by making the platform feel progressively more useful the longer someone uses it.
+Build a closed-loop recovery system that detects dissatisfaction early, records the cause, and routes it into explicit recovery outputs.
 
 Target outcomes:
 
-- More return visits
-- Higher completion rate for core journeys
-- Greater trust in the platform as a default support destination
-- Higher retention among users with prior unresolved issues
+- More negative sentiment converted into actionable recovery items
+- Faster follow-up for repeated complaints and escalations
+- Better visibility into policy areas such as response speed, clarity, reliability, handoff, and follow-up
+- Lower churn caused by avoidable friction
 
 Suggested implementation layers:
 
-- Frontend: personalized recent activity, saved preferences, and proactive next-step suggestions
-- Backend: user journey history, repeat-intent detection, and loyalty scoring based on resolved interactions
-- Metrics: repeat session rate, retention cohorts, and task re-entry after completion
+- Backend: sentiment scoring, interaction-insight ranking, explicit recovery reports, stored interaction signals, and policy-area recommendations
+- Service layer: `build_dissatisfaction_recovery_report`, `build_loyalty_recovery_report`, `_build_interaction_insights`, `_store_interaction_signals`, and retention-snapshot summaries
+- Metrics: complaint recurrence, time-to-recovery, unresolved issue rate, recovery acceptance rate, and signal volume by policy area
 
-### 11.3 Priority 3: Friction Removal and Confidence Building
+### 11.2 Priority 2: Loyalty Cohorts and Repeat-Use Intelligence
 
-Reduce avoidable uncertainty in booking, chat, tracking, and profile workflows so users complete actions with less hesitation.
+Increase repeat engagement by turning interaction history into measurable loyalty cohorts and repeat-usage signals.
 
 Target outcomes:
 
-- Lower abandonment across key flows
-- More confident first-time usage
-- Reduced support load from simple confusion
-- Better perceived reliability
+- More stable retention cohorts across the user base
+- Higher completion rate for core journeys and booking flows
+- Better separation between champions, stable users, at-risk users, and critical users
+- Higher retention among users with recurring unresolved issues
 
 Suggested implementation layers:
 
-- Frontend: clearer empty states, stronger inline guidance, and fewer ambiguous labels
-- Backend: validation messages that are specific and actionable
-- Metrics: form drop-off, retry frequency, and error recovery rate
+- Backend: loyalty scoring from interaction summaries, churn-risk classification, retention cohorts, signal-backed cohort membership, and monetization readiness
+- Service layer: `_build_retention_cohorts`, `build_churn_prediction`, `build_lifecycle_stage_report`, `build_monetization_cohorts`, and retention-dashboard assembly
+- Metrics: repeat session rate, cohort migration rate, task re-entry after completion, positive snapshot delta rate, and signal-score trend by cohort
 
-### 11.4 Priority 4: Personalized Re-engagement
+### 11.3 Priority 3: Booking Lifecycle Safety
 
-Use past behavior to re-engage users with the next most relevant action instead of a generic landing experience.
+Reduce avoidable ambiguity in booking creation, booking edits, event history, and admin analytics so the lifecycle model remains safe and auditable.
 
 Target outcomes:
 
-- More useful home-page personalization
-- Better follow-up after resolved issues or bookings
-- Increased click-through to high-value features
-- Better continuity across visits
+- Lower transition errors across booking states
+- More predictable event histories
+- Reduced support load from ambiguous booking outcomes
+- Better perceived reliability in confirmed, pending, cancelled, and completed states
 
 Suggested implementation layers:
 
-- Frontend: personalized cards, reminders, and contextual shortcuts
-- Backend: user-level summaries, event-based triggers, and recommendation signals
-- Metrics: personalized CTA conversion, reminder response rate, and repeat task completion
+- Backend: booking CRUD, booking history, booking audit summaries, admin event summaries, and booking transition enforcement
+- Service layer: `apply_booking_updates`, `touch_booking`, `create_booking_event`, `ensure_booking_transition_allowed`, and `transition_booking`
+- Metrics: validation failure rate, retry frequency, transition rejection rate, event-count accuracy, and audit completeness
 
-### 11.5 Priority 5: Trust Accumulation Over Time
+### 11.4 Priority 4: Monitoring and Insight Products
 
-Make trust visible through stable history, explainable decisions, and consistent follow-through.
+Use the backend's existing insight and monitoring surfaces as first-class products rather than incidental reports.
+
+Target outcomes:
+
+- Better visibility into top issues, recommended actions, and owner hints
+- Stronger admin understanding of current system posture
+- Better route-level and capability-level observability
+- More actionable summaries for support and operations teams
+
+Suggested implementation layers:
+
+- Backend: interaction summaries, system improvement packs, weighted monitoring reports, trend reports, capability payloads, and AI capability catalogs
+- Service layer: `_build_summary`, `_build_system_improvement_pack`, `_build_weighted_system_monitoring`, `_load_signal_trends`, and `_build_ai_capabilities_catalog`
+- Metrics: insight adoption rate, monitoring completeness, recommendation coverage, and trend-report freshness
+
+### 11.5 Priority 5: Retention Snapshot Operations
+
+Make retention snapshots more operational by emphasizing health, momentum, volatility, readiness, and action planning.
 
 Target outcomes:
 
 - Stronger long-term confidence in the service
 - Lower perceived risk when making a booking or starting a chat
-- Better acceptance of suggestions and recovery actions
-- More positive retention sentiment
+- Better acceptance of suggested actions from snapshot reports
+- More reliable retention-health and operations reporting
 
 Suggested implementation layers:
 
-- Frontend: transparent status indicators and history views
-- Backend: audit trails, booking events, and retention snapshots
-- Metrics: support satisfaction, resolved-case confidence, and return-after-resolution rate
+- Backend: retention snapshot reports, deltas, trends, dashboard summaries, health summaries, volatility summaries, and operations-oriented snapshot variants
+- Service layer: `prune_retention_snapshots`, `prune_and_report_retention_snapshots`, `build_retention_snapshot_report`, `build_retention_snapshot_delta`, `build_retention_snapshot_trends`, and `build_retention_dashboard`
+- Metrics: retention snapshot freshness, delta coverage, trend coverage, stale-snapshot rate, and operations readiness completeness
 
 ## 12. Expansion Guardrails
 
-These priorities should improve loyalty without creating unhealthy dependency or obscuring user control.
+These priorities should improve recovery, retention, and operations visibility without introducing brittle coupling or misleading metrics.
 
-### 12.1 Supportive engagement, not coercive engagement
+### 12.1 Keep recovery outputs explicit
 
-The product should encourage return use by being useful, reliable, and personalized. It should not rely on manipulative patterns that pressure users into repeated visits.
+The backend should keep dissatisfaction, loyalty, and recovery outputs explicit. Reports should show why a user was classified a certain way instead of hiding the signal behind an opaque score.
 
-### 12.2 Dissatisfaction must be measurable
+### 12.2 Keep each layer measurable
 
-Every recovery flow should produce a traceable signal so the team can see whether dissatisfaction is trending down over time.
+Every recovery, cohort, monitoring, and snapshot flow should emit traceable fields so the team can compare outcomes over time. If a report cannot point to concrete inputs such as signals, bookings, or snapshots, it should be treated as provisional.
 
-### 12.3 Loyalty must remain linked to value
+### 12.3 Preserve router and service boundaries
 
-Repeat use should come from faster resolution, better outcomes, and reduced effort, not from friction that traps the user in the system.
+Booking routers, chat routers, retention services, and schema contracts should remain separable so the codebase stays maintainable as the reporting surface expands.
 
-### 12.4 Recovery should shorten future effort
+### 12.4 Protect booking and snapshot state
 
-A resolved problem should make the next interaction easier by saving context, learning preferences, or improving defaults.
+Booking status changes, booking-event creation, and retention-snapshot writes should remain explicitly validated so the system does not drift into inconsistent states.
 
-### 12.5 Expansion should stay revision-friendly
+### 12.5 Keep insight surfaces honest
 
-New loyalty features should be added as sublayers beneath this section, not by rewriting the earlier architecture map.
+New backend features should expose metadata, summaries, or reports only when the underlying data is actually present and fresh enough to support them. This is especially important for recovery, cohort, and retention dashboards because they can otherwise imply a stronger signal than the database supports.
+
+### 12.6 Keep revision structure stable
+
+Future updates should extend these priorities with new backend evidence rather than rewriting the whole document.
