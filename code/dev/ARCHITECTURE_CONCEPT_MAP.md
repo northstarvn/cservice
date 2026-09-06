@@ -2,7 +2,7 @@
 
 ## Revision Control
 
-- Revision ID: `r0`
+- Revision ID: `r1`
 - Scope: repository-wide conceptual model for the current workspace state
 - Purpose: provide a stable, top-down structure that can be revised repeatedly without changing the document's shape
 - Reading rule: each layer reveals only the next level of detail; missing pieces are listed explicitly as gaps instead of being inferred
@@ -118,12 +118,13 @@ This router is the clearest implementation of a lifecycle model rather than a si
 
 ### 4.5 Chat Analytics and Recovery API
 
-`fastapi/app/routers/chat.py` is the broadest surface. It includes chat history, sentiment analysis, interaction insights, retention dashboards, maintenance reports, risk profiles, system priorities, monetization cohorts, and operational readiness views. The heavy lifting is concentrated in `fastapi/app/services/chat_analytics.py` and `fastapi/app/services/retention.py`.
+`fastapi/app/routers/chat.py` is the broadest surface. It includes chat history, sentiment analysis, interaction insights, dissatisfaction recovery, loyalty recovery, retention dashboards, maintenance reports, risk profiles, system priorities, monetization cohorts, and operational readiness views. The heavy lifting is concentrated in `fastapi/app/services/chat_analytics.py` and `fastapi/app/services/retention.py`.
 
 Important service behavior:
 
 - Sentiment scoring drives recovery classification
 - Keyword and history analysis produce policy-area insights
+- Recovery reports turn dissatisfaction signals into explicit action plans and retention recommendations
 - Retention snapshots summarize loyalty, churn risk, and lifecycle stage
 - Retention reports can derive deltas and trends from persisted snapshots
 
@@ -150,7 +151,7 @@ This layer is the contract boundary between routers, services, and clients. It f
 
 - Booking lifecycle payloads
 - User and token payloads
-- Analytics and retention reports
+- Analytics, recovery, and retention reports
 - Ecosystem and capability reports
 
 ## 5. Requirement-Layer Intent
@@ -199,9 +200,9 @@ These are the main gaps that should remain visible across revisions.
 
 The requirement files describe a broader product surface than the backend currently exposes through implemented routes.
 
-### 7.2 Chat contract uncertainty
+### 7.2 Chat contract stabilization
 
-Any client code that consumes the chat API should be verified against the actual backend chat router before treating the contract as stable.
+The chat API now exposes explicit recovery and retention schema contracts for dissatisfaction, loyalty, and retention dashboard flows. Clients should still validate against the router, but the contract is no longer only implied by downstream service behavior.
 
 ### 7.3 Translation and locale gaps
 
@@ -209,7 +210,7 @@ The requirements imply a stronger localization layer than the backend currently 
 
 ### 7.4 Backend breadth exceeds implemented UI
 
-The backend exposes rich retention and ecosystem endpoints, but many of them are only visible through metadata rather than through dedicated product flows.
+The backend exposes rich retention and ecosystem endpoints, and the recovery/retention dashboard surface is now explicit in the schema layer. Some deeper operational views are still primarily visible through metadata rather than through dedicated product flows.
 
 ## 8. Evidence Index
 
@@ -245,7 +246,7 @@ The repository is functionally a backend-first customer-service platform with an
 
 ## 11. Expansion Priorities
 
-The following expansion areas are ordered by expected backend impact on customer recovery, retention, cohort health, and operational clarity. They should extend the current booking-event, interaction-signal, and retention-snapshot model rather than replace it.
+The following expansion areas are ordered by expected backend impact on customer recovery, retention, cohort health, and operational clarity. They should extend the current booking-event, interaction-signal, recovery-report, and retention-snapshot model rather than replace it.
 
 ### 11.1 Priority 1: Recovery and Dissatisfaction Loop
 
@@ -257,6 +258,12 @@ Target outcomes:
 - Faster follow-up for repeated complaints and escalations
 - Better visibility into policy areas such as response speed, clarity, reliability, handoff, and follow-up
 - Lower churn caused by avoidable friction
+
+Current implementation evidence:
+
+- `fastapi/app/services/chat_analytics.py` builds dissatisfaction and loyalty recovery reports from interaction summaries
+- `fastapi/app/schemas/chat.py` now exposes recovery summary models alongside the dashboard and retention report types
+- `fastapi/app/routers/chat.py` already serves the recovery dashboard and retention dashboard as first-class backend routes
 
 Suggested implementation layers:
 
@@ -354,7 +361,7 @@ Booking status changes, booking-event creation, and retention-snapshot writes sh
 
 ### 12.5 Keep insight surfaces honest
 
-New backend features should expose metadata, summaries, or reports only when the underlying data is actually present and fresh enough to support them. This is especially important for recovery, cohort, and retention dashboards because they can otherwise imply a stronger signal than the database supports.
+New backend features should expose metadata, summaries, or reports only when the underlying data is actually present and fresh enough to support them. This is especially important for recovery, cohort, and retention dashboards because they can otherwise imply a stronger signal than the database supports. The current recovery and retention reports already follow this rule by deriving their output from chat history, booking state, and persisted snapshots.
 
 ### 12.6 Keep revision structure stable
 

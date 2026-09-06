@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -232,7 +232,7 @@ class EcosystemSubserviceStatus(BaseModel):
     routes: List[str]
     status: str
     health_endpoint: Optional[str] = None
-    notes: List[str] = []
+    notes: List[str] = Field(default_factory=list)
 
 
 class EcosystemStatusReport(BaseModel):
@@ -448,6 +448,22 @@ class DissatisfactionRecoveryReport(BaseModel):
     action_plan: str
 
 
+class RecoverySnapshotImpact(BaseModel):
+    area: str
+    score: float
+    evidence: List[str]
+    action: str
+
+
+class RecoverySnapshotSummary(BaseModel):
+    generated_at: datetime
+    window_days: int
+    recovery_readiness: str
+    primary_risks: List[str]
+    impacts: List[RecoverySnapshotImpact]
+    action_plan: str
+
+
 class RetentionSnapshotAuditItem(BaseModel):
     snapshot_type: str
     total_snapshots: int
@@ -623,6 +639,14 @@ class LoyaltyRecoveryReport(BaseModel):
     dissatisfaction: DissatisfactionRecoveryReport
     retention_recommendation: RetentionSnapshotRecommendation
     action_plan: RetentionSnapshotActionPlan
+
+
+class Section11ExpansionSummary(BaseModel):
+    generated_at: datetime
+    window_days: int
+    dissatisfaction_recovery: DissatisfactionRecoveryReport
+    loyalty_recovery: LoyaltyRecoveryReport
+    recovery_snapshot: RecoverySnapshotSummary
 
 class Sentiment(BaseModel):
     label: str
