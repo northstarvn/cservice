@@ -1122,3 +1122,14 @@ async def test_retention_snapshot_operations_go_no_go_labels_state():
     assert isinstance(report, RetentionSnapshotOperationsGoNoGo)
     assert report.decision == "hold"
     assert report.overview.startswith("Snapshot operations need a targeted review")
+
+
+@pytest.mark.asyncio
+async def test_retention_snapshot_operations_report_exposes_audit_totals():
+    report = await get_retention_snapshot_operations_report(db=FakeRetentionOperationsGoNoGoSession(), current_user=FakeUser(is_admin=True), stale_after_days=14, window_days=30)
+
+    assert isinstance(report, RetentionSnapshotOperationsReport)
+    assert report.total_snapshots == 8
+    assert report.stale_snapshots == 4
+    assert report.recent_snapshots == 4
+    assert report.stale_ratio == 0.5

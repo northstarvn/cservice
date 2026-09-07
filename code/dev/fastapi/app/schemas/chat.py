@@ -11,6 +11,8 @@ class InteractionInsight(BaseModel):
     priority: str
     score: float
     evidence: List[str]
+    evidence_summary: str
+    source: str
     recommendation: str
     next_step: str
 
@@ -91,6 +93,7 @@ class RetentionCohortItem(BaseModel):
     avg_monetization_readiness: float
     primary_risk: str
     recommended_action: str
+    cohort_rule: str
 
 
 class MonetizationCohortItem(BaseModel):
@@ -101,6 +104,7 @@ class MonetizationCohortItem(BaseModel):
     avg_signal_score: float
     primary_risk: str
     recommended_action: str
+    cohort_rule: str
 
 
 class MonetizationCohortReport(BaseModel):
@@ -121,7 +125,10 @@ class RetentionCohortMember(BaseModel):
     cohort: str
     loyalty_score: float
     signal_score: float
+    monetization_readiness: float
     primary_risk: str
+    strongest_risk_area: str
+    recent_booking_state: str
 
 
 class RetentionCohortDrilldownReport(BaseModel):
@@ -179,6 +186,8 @@ class RetentionSnapshotDelta(BaseModel):
     previous_snapshot_id: Optional[int]
     current_snapshot_id: Optional[int]
     loyalty_score_delta: float
+    churn_risk_delta: str
+    lifecycle_stage_delta: str
     churn_risk_changed: bool
     lifecycle_stage_changed: bool
     previous_created_at: Optional[datetime]
@@ -192,6 +201,24 @@ class RetentionSnapshotTrendItem(BaseModel):
     avg_loyalty_score: float
     avg_churn_risk_score: float
     latest_created_at: Optional[datetime]
+
+
+class RetentionSnapshotOperationItem(BaseModel):
+    label: str
+    status: str
+    count: int
+    details: List[str]
+    recommended_owner: str
+
+
+class RetentionSnapshotOperationsReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    total_snapshots: int
+    stale_snapshots: int
+    recent_snapshots: int
+    stale_ratio: float
+    items: List[RetentionSnapshotOperationItem]
 
 
 class RetentionSnapshotTrendReport(BaseModel):
@@ -208,6 +235,9 @@ class RetentionDashboard(BaseModel):
     snapshot_report: RetentionSnapshotReport
     snapshot_delta: RetentionSnapshotDelta
     snapshot_trends: RetentionSnapshotTrendReport
+    snapshot_operations_report: Optional[RetentionSnapshotOperationsReport] = None
+    trend_coverage: Optional[float] = None
+    delta_coverage: Optional[float] = None
 
 
 class RetentionMaintenanceResult(BaseModel):
@@ -435,6 +465,7 @@ class RecoverySignal(BaseModel):
     area: str
     intensity: float
     evidence: List[str]
+    evidence_summary: str
     recommended_action: str
 
 
@@ -504,6 +535,8 @@ class RetentionSnapshotTypeBreakdownReport(BaseModel):
 class RetentionSnapshotStalenessItem(BaseModel):
     snapshot_type: str
     stale_snapshots: int
+    fresh_snapshots: int
+    staleness_rate: float
     latest_created_at: Optional[datetime]
 
 
@@ -518,6 +551,8 @@ class RetentionSnapshotStalenessReport(BaseModel):
 class RetentionSnapshotStalenessTrendItem(BaseModel):
     bucket: str
     stale_snapshots: int
+    fresh_snapshots: int
+    staleness_rate: float
 
 
 class RetentionSnapshotStalenessTrendReport(BaseModel):

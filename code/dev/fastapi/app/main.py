@@ -138,6 +138,7 @@ async def app_ecosystem():
             "retention_ops": {
                 "routes": [
                     "/chat/admin/snapshot-health-score",
+                    "/chat/admin/snapshot-operations-report",
                     "/chat/admin/snapshot-operations-status",
                     "/chat/admin/snapshot-operations-compliance",
                     "/chat/admin/snapshot-operations-launch-readiness",

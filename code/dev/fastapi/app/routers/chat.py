@@ -72,6 +72,7 @@ from app.schemas.chat import (
     RetentionSnapshotOperationsExecutionState,
     RetentionSnapshotOperationsLaunchReadiness,
     RetentionSnapshotOperationsGoNoGo,
+    RetentionSnapshotOperationsReport,
     LoyaltyRecoveryReport,
     MonetizationCohortReport,
     WeightedSystemMonitoringReport,
@@ -79,6 +80,7 @@ from app.schemas.chat import (
 )
 from app.schemas.schemas import UserOut
 from app.services.chat_analytics import build_monetization_cohorts
+from app.services.chat_analytics import build_retention_snapshot_operations_report
 from app.services.chat_analytics import build_dissatisfaction_recovery_report, build_loyalty_recovery_report
 from fastapi.responses import JSONResponse
 import requests,os
@@ -381,6 +383,7 @@ def _build_capabilities_payload() -> dict[str, object]:
         ],
         "endpoints": {
             "retention_snapshot_health_recommendation": "/chat/admin/snapshot-health-recommendation",
+            "retention_snapshot_operations_report": "/chat/admin/snapshot-operations-report",
             "retention_snapshot_operations_status": "/chat/admin/snapshot-operations-status",
             "retention_snapshot_operations_compliance": "/chat/admin/snapshot-operations-compliance",
             "retention_snapshot_operations_posture": "/chat/admin/snapshot-operations-posture",
@@ -1793,11 +1796,26 @@ async def _build_retention_snapshot_staleness_report(db: AsyncSession, window_da
         .group_by(models.RetentionSnapshot.snapshot_type)
         .order_by(models.RetentionSnapshot.snapshot_type)
     )
+    fresh_query = (
+        select(
+            models.RetentionSnapshot.snapshot_type,
+            func.count(models.RetentionSnapshot.id),
+        )
+        .where(models.RetentionSnapshot.created_at >= stale_cutoff)
+        .where(models.RetentionSnapshot.created_at >= window_start)
+        .group_by(models.RetentionSnapshot.snapshot_type)
+    )
     rows = (await db.execute(stale_query)).all()
+    fresh_rows = {}
+    for row in (await db.execute(fresh_query)).all():
+        snapshot_type = str(row[0])
+        fresh_rows[snapshot_type] = int(row[1] or 0)
     items = [
         RetentionSnapshotStalenessItem(
             snapshot_type=str(snapshot_type),
             stale_snapshots=int(stale_snapshots or 0),
+            fresh_snapshots=fresh_rows.get(str(snapshot_type), 0),
+            staleness_rate=(int(stale_snapshots or 0) / max(1, int(stale_snapshots or 0) + fresh_rows.get(str(snapshot_type), 0))),
             latest_created_at=latest_created_at,
         )
         for snapshot_type, stale_snapshots, latest_created_at in rows
@@ -1817,10 +1835,14 @@ async def _build_retention_snapshot_staleness_trend(db: AsyncSession, window_day
         RetentionSnapshotStalenessTrendItem(
             bucket="stale",
             stale_snapshots=report.total_stale_snapshots,
+            fresh_snapshots=0,
+            staleness_rate=1.0 if report.total_stale_snapshots else 0.0,
         ),
         RetentionSnapshotStalenessTrendItem(
             bucket="fresh",
             stale_snapshots=0,
+            fresh_snapshots=sum(item.fresh_snapshots for item in report.items),
+            staleness_rate=0.0,
         ),
     ]
     return RetentionSnapshotStalenessTrendReport(
@@ -2080,6 +2102,8 @@ async def _build_retention_snapshot_delta(db: AsyncSession, user_id: int, window
             previous_snapshot_id=None,
             current_snapshot_id=None,
             loyalty_score_delta=0.0,
+            churn_risk_delta="none",
+            lifecycle_stage_delta="none",
             churn_risk_changed=False,
             lifecycle_stage_changed=False,
             previous_created_at=None,
@@ -2093,6 +2117,8 @@ async def _build_retention_snapshot_delta(db: AsyncSession, user_id: int, window
         previous_snapshot_id=previous.id if previous else None,
         current_snapshot_id=current.id,
         loyalty_score_delta=round(current.loyalty_score - (previous.loyalty_score if previous else current.loyalty_score), 2),
+        churn_risk_delta=f"{previous.churn_risk if previous else current.churn_risk}->{current.churn_risk}",
+        lifecycle_stage_delta=f"{previous.lifecycle_stage if previous else current.lifecycle_stage}->{current.lifecycle_stage}",
         churn_risk_changed=bool(previous and previous.churn_risk != current.churn_risk),
         lifecycle_stage_changed=bool(previous and previous.lifecycle_stage != current.lifecycle_stage),
         previous_created_at=previous.created_at if previous else None,
@@ -2405,6 +2431,16 @@ async def get_retention_snapshot_operations_overview(
     current_user: models.User = Depends(deps.get_current_admin_user),
 ):
     return await _build_retention_snapshot_operations_overview(db, window_days, stale_after_days)
+
+
+@router.get("/chat/admin/snapshot-operations-report", response_model=RetentionSnapshotOperationsReport)
+async def get_retention_snapshot_operations_report(
+    window_days: int = Query(default=30, ge=7, le=365),
+    stale_after_days: int = Query(default=14, ge=1, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_retention_snapshot_operations_report(db, window_days, stale_after_days)
 
 
 @router.get("/chat/admin/snapshot-operations-status", response_model=RetentionSnapshotOperationsStatus)

@@ -10,6 +10,7 @@ from app.services.chat_analytics import (
     build_retention_snapshot_summary as _unused,
     build_summary,
     load_user_interaction_window,
+    build_retention_snapshot_operations_report,
 )
 from app.schemas.chat import (
     RetentionDashboard,
@@ -18,6 +19,7 @@ from app.schemas.chat import (
     RetentionSnapshotReport,
     RetentionSnapshotTrendItem,
     RetentionSnapshotTrendReport,
+    RetentionSnapshotOperationsReport,
 )
 
 
@@ -125,6 +127,8 @@ async def build_retention_snapshot_delta(db: AsyncSession, user_id: int, window_
         previous_snapshot_id=previous.id if previous else None,
         current_snapshot_id=current.id,
         loyalty_score_delta=round(current.loyalty_score - (previous.loyalty_score if previous else current.loyalty_score), 2),
+        churn_risk_delta=f"{previous.churn_risk if previous else current.churn_risk}->{current.churn_risk}",
+        lifecycle_stage_delta=f"{previous.lifecycle_stage if previous else current.lifecycle_stage}->{current.lifecycle_stage}",
         churn_risk_changed=bool(previous and previous.churn_risk != current.churn_risk),
         lifecycle_stage_changed=bool(previous and previous.lifecycle_stage != current.lifecycle_stage),
         previous_created_at=previous.created_at if previous else None,
@@ -177,6 +181,9 @@ async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days:
     snapshot_report = await build_retention_snapshot_report(db, user_id, window_days)
     snapshot_delta = await build_retention_snapshot_delta(db, user_id, window_days)
     snapshot_trends = await build_retention_snapshot_trends(db, user_id, window_days)
+    snapshot_operations_report = await build_retention_snapshot_operations_report(db, window_days)
+    trend_coverage = round(len(snapshot_trends.trends) / max(1, len(snapshot_report.snapshots)), 2)
+    delta_coverage = 1.0 if snapshot_delta.current_snapshot_id is not None else 0.0
     return RetentionDashboard(
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
@@ -185,4 +192,7 @@ async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days:
         snapshot_report=snapshot_report,
         snapshot_delta=snapshot_delta,
         snapshot_trends=snapshot_trends,
+        snapshot_operations_report=snapshot_operations_report,
+        trend_coverage=trend_coverage,
+        delta_coverage=delta_coverage,
     )

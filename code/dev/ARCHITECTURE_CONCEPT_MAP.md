@@ -2,7 +2,7 @@
 
 ## Revision Control
 
-- Revision ID: `r1`
+- Revision ID: `r2`
 - Scope: repository-wide conceptual model for the current workspace state
 - Purpose: provide a stable, top-down structure that can be revised repeatedly without changing the document's shape
 - Reading rule: each layer reveals only the next level of detail; missing pieces are listed explicitly as gaps instead of being inferred
@@ -118,15 +118,18 @@ This router is the clearest implementation of a lifecycle model rather than a si
 
 ### 4.5 Chat Analytics and Recovery API
 
-`fastapi/app/routers/chat.py` is the broadest surface. It includes chat history, sentiment analysis, interaction insights, dissatisfaction recovery, loyalty recovery, retention dashboards, maintenance reports, risk profiles, system priorities, monetization cohorts, and operational readiness views. The heavy lifting is concentrated in `fastapi/app/services/chat_analytics.py` and `fastapi/app/services/retention.py`.
+`fastapi/app/routers/chat.py` is the broadest surface. It includes chat history, sentiment analysis, interaction insights, dissatisfaction recovery, loyalty recovery, retention dashboards, maintenance reports, risk profiles, system priorities, monetization cohorts, operational readiness views, and the consolidated retention snapshot operations report. The heavy lifting is concentrated in `fastapi/app/services/chat_analytics.py` and `fastapi/app/services/retention.py`.
 
 Important service behavior:
 
 - Sentiment scoring drives recovery classification
-- Keyword and history analysis produce policy-area insights
+- Keyword, recency, booking state, and history analysis produce policy-area insights
 - Recovery reports turn dissatisfaction signals into explicit action plans and retention recommendations
+- Recovery outputs now carry evidence summaries, source labels, and stronger policy-area recommendations
+- Retention and cohort reports distinguish loyalty, monetization readiness, and signal pressure as separate dimensions
 - Retention snapshots summarize loyalty, churn risk, and lifecycle stage
 - Retention reports can derive deltas and trends from persisted snapshots
+- Retention snapshot operations reports make freshness, cleanup, and readiness explicit
 
 The chat router is therefore both a conversation API and a business-intelligence API.
 
@@ -142,6 +145,7 @@ Key surfaces:
 - `/meta/capabilities` for capability summaries
 - `/meta/ecosystem` for subservice status
 - `/meta/probe/routes` for authenticated route probing
+- `/chat/admin/snapshot-operations-report` for consolidated snapshot operations reporting
 
 ### 4.7 Schema Layer
 
@@ -202,7 +206,7 @@ The requirement files describe a broader product surface than the backend curren
 
 ### 7.2 Chat contract stabilization
 
-The chat API now exposes explicit recovery and retention schema contracts for dissatisfaction, loyalty, and retention dashboard flows. Clients should still validate against the router, but the contract is no longer only implied by downstream service behavior.
+The chat API now exposes explicit recovery and retention schema contracts for dissatisfaction, loyalty, retention dashboard, and retention operations flows. Clients should still validate against the router, but the contract is no longer only implied by downstream service behavior.
 
 ### 7.3 Translation and locale gaps
 
@@ -210,7 +214,7 @@ The requirements imply a stronger localization layer than the backend currently 
 
 ### 7.4 Backend breadth exceeds implemented UI
 
-The backend exposes rich retention and ecosystem endpoints, and the recovery/retention dashboard surface is now explicit in the schema layer. Some deeper operational views are still primarily visible through metadata rather than through dedicated product flows.
+The backend exposes rich retention and ecosystem endpoints, and the recovery/retention dashboard and retention operations surfaces are now explicit in the schema layer. Some deeper operational views are still primarily visible through metadata rather than through dedicated product flows.
 
 ## 8. Evidence Index
 
@@ -250,53 +254,74 @@ The following expansion areas are forward-looking only. Existing implemented beh
 
 ### 11.1 Priority 1: Recovery and Dissatisfaction Loop
 
-To do:
+Implemented:
 
-- Strengthen sentiment scoring so negative, mixed, and repeated-friction messages produce different recovery paths instead of one generic escalation
-- Rank interaction insights with a clearer weighting model that favors recent messages, repeated complaints, booking friction, and support-language signals
-- Add recovery outputs that name the likely policy area, the recommended owner, the next action, and the evidence snippet that triggered the recommendation
-- Store interaction signals with enough context to explain the recovery decision later, including source, area, score, recommendation, and a short evidence summary
-- Measure complaint recurrence, time-to-recovery, unresolved issue rate, recovery acceptance rate, and signal volume by policy area so the loop can be compared across releases
+- Sentiment and policy-area scoring now weight recency, booking state, repeated friction, and support language more explicitly
+- Recovery outputs now include evidence summaries and source labels alongside policy recommendations and next steps
+- Interaction summaries keep loyalty, monetization readiness, and churn risk separate so recovery can be interpreted without collapsing all signals into one score
+- Interaction metadata now carries repeated-message counts, booking-state counts, and aggregate signal strength for later explanation
+- Interaction signals can be stored with source, area, score, and recommendation so recovery decisions remain traceable
+
+Open gaps:
+
+- Add explicit measurement endpoints or persisted aggregates for complaint recurrence, time-to-recovery, unresolved issue rate, and recovery acceptance rate
+- Store richer per-signal evidence summaries in the database instead of only in derived response payloads
 
 ### 11.2 Priority 2: Loyalty Cohorts and Repeat-Use Intelligence
 
-To do:
+Implemented:
 
-- Expand loyalty scoring so cohorts are driven by both interaction history and stored signals, not just message counts or booking totals
-- Split users into named cohorts with a clear rule for each one, such as champions, stable users, at-risk users, and critical users, then explain the rule in the report output
-- Add drilldowns that show why a user landed in a cohort, including loyalty score, signal score, churn prediction, recent booking state, and the strongest friction area
-- Keep monetization readiness separate from loyalty so a user can be valuable but still need recovery, and so the two signals do not get collapsed into one score
+- Cohorts are now driven by both interaction history and stored signals
+- Retention cohort and monetization cohort outputs now include explicit cohort rules
+- Cohort drilldowns can expose loyalty score, signal score, monetization readiness, recent booking state, and strongest risk area
+- Monetization readiness remains separate from loyalty and churn risk in the summary model
+
+Open gaps:
+
 - Measure repeat session rate, cohort migration rate, task re-entry after completion, positive snapshot delta rate, and signal-score trend by cohort
 
 ### 11.3 Priority 3: Booking Lifecycle Safety
 
-To do:
+Implemented:
 
-- Tighten booking CRUD so each create, edit, and delete path validates the same core booking shape before persistence and produces the same history trail
-- Record booking events for the transition points that matter most: create, status change, edit, cancel, and complete
+- Booking updates are normalized before persistence
+- Status transitions are validated before mutation
+- Transition helpers record booking events alongside state changes
+- Ownership checks are centralized in the service layer
+
+Open gaps:
+
+- Tighten create, edit, and delete paths so they all validate the same core booking shape before persistence and produce the same history trail
 - Add audit summaries that can explain who changed what, when the change happened, and which state moved to which state
-- Make admin summaries derive from the same persisted booking and event records so lifecycle totals stay aligned with the actual booking history
 - Track validation failure rate, retry frequency, transition rejection rate, event-count accuracy, and audit completeness
 
 ### 11.4 Priority 4: Monitoring, Capability, and Platform Insight Products
 
-To do:
+Implemented:
 
-- Extend interaction summaries so they can explain the most important issues, the strongest positives, and the recommended focus area in a form that is useful for admins and support
-- Turn system improvement packs into actionable work items with an owner hint, impact level, rationale, and a concrete recommendation instead of a broad summary
-- Keep weighted monitoring reports tied to a small set of high-value dimensions such as reliability, response speed, customer activity, and retention so the weighting remains interpretable
-- Keep capability payloads and AI capability catalogs aligned with actual routes and actual outputs, not aspirational product language
+- Interaction summaries now explain the most important issues, the strongest positives, and the recommended focus area for admins and support
+- System improvement packs now carry owner hints, impact level, rationale, and concrete recommendations
+- Weighted monitoring reports are tied to a small set of high-value dimensions such as reliability, response speed, customer activity, and retention
+- Capability payloads and ecosystem metadata are aligned with the actual routes and outputs currently exposed by the backend
+- The platform surface now advertises the consolidated retention operations report alongside the existing admin retention views
+
+Open gaps:
+
 - Track insight adoption rate, monitoring completeness, recommendation coverage, and trend-report freshness
 
 ### 11.5 Priority 5: Retention Snapshot Operations
 
-To do:
+Implemented:
 
-- Expand retention snapshot reports so they include the latest snapshot, the prior snapshot, and the change in loyalty, churn risk, and lifecycle stage in a single readable flow
-- Build trend and volatility views that group snapshot types consistently, so fresh versus stale patterns can be compared without ambiguity
-- Add operations-oriented variants that translate freshness, staleness, and volatility into clear statuses such as watch, hold, escalate, or go/no-go
-- Make pruning and maintenance outputs explicit so admins can see how many snapshots were kept, removed, or left untouched during the cleanup run
-- Track retention snapshot freshness, delta coverage, trend coverage, stale-snapshot rate, and operations readiness completeness
+- Retention snapshot reports now include the latest snapshot and the prior snapshot with explicit loyalty, churn, and lifecycle deltas
+- Trend views group snapshot types consistently so fresh versus stale patterns can be compared without ambiguity
+- Operations-oriented outputs translate freshness, staleness, and readiness into clear statuses such as watch, hold, escalate, or go/no-go
+- Pruning and maintenance outputs are explicit so admins can see how many snapshots were kept, removed, or left untouched during cleanup
+- The consolidated retention snapshot operations report is available through a dedicated admin route and reflected in platform metadata
+
+Open gaps:
+
+- Persist the measurement inputs that drive operations readiness so the report can be audited from source data instead of only derived status labels
 
 ## 12. Expansion Guardrails
 

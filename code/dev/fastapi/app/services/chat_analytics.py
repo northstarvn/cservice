@@ -27,6 +27,8 @@ from app.schemas.chat import (
     RetentionCohortReport,
     RetentionSnapshotActionPlan,
     RetentionSnapshotRecommendation,
+    RetentionSnapshotOperationItem,
+    RetentionSnapshotOperationsReport,
     Sentiment,
     SystemImprovementItem,
     SystemImprovementPack,
@@ -183,25 +185,26 @@ def normalize_text(text: str) -> str:
 def score_area(messages: list[str], bookings: list[models.Booking], area: str) -> tuple[float, list[str]]:
     evidence: list[str] = []
     score = 0.0
+    recent_messages = messages[:3]
     for message in messages:
         normalized = normalize_text(message)
         if area == "response_speed" and any(word in normalized for word in ["slow", "delay", "wait"]):
-            score += 1.0
+            score += 1.2 if message in recent_messages else 0.9
             evidence.append(message)
         elif area == "clarity" and any(word in normalized for word in ["confusing", "unclear", "hard"]):
-            score += 1.0
+            score += 1.1 if message in recent_messages else 0.8
             evidence.append(message)
         elif area == "reliability" and any(word in normalized for word in ["bug", "error", "issue"]):
-            score += 1.0
+            score += 1.3 if message in recent_messages else 1.0
             evidence.append(message)
         elif area == "booking_flow" and any(word in normalized for word in ["cancel", "book", "schedule"]):
-            score += 0.8
+            score += 1.0 if message in recent_messages else 0.8
             evidence.append(message)
         elif area == "support" and any(word in normalized for word in ["help", "support"]):
-            score += 0.8
+            score += 0.9 if message in recent_messages else 0.7
             evidence.append(message)
         elif area == "pricing" and any(word in normalized for word in ["price", "expensive"]):
-            score += 0.7
+            score += 0.9 if message in recent_messages else 0.7
             evidence.append(message)
 
     if area == "booking_flow":
@@ -253,6 +256,14 @@ def score_area(messages: list[str], bookings: list[models.Booking], area: str) -
     return score, evidence
 
 
+def _evidence_summary(evidence: list[str]) -> str:
+    if not evidence:
+        return "No direct evidence captured"
+    if len(evidence) == 1:
+        return evidence[0]
+    return f"{evidence[0]} (+{len(evidence) - 1} more)"
+
+
 def build_interaction_insights(messages: list[str], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> list[InteractionInsight]:
     areas = PREDEFINED_POLICY_AREAS
     ranking = []
@@ -281,6 +292,8 @@ def build_interaction_insights(messages: list[str], bookings: list[models.Bookin
                 priority=priority,
                 score=round(float(score), 2),
                 evidence=evidence_list,
+                evidence_summary=_evidence_summary(evidence_list),
+                source="chat_history_and_booking_state",
                 recommendation=recommendation,
                 next_step=next_step,
             )
@@ -294,6 +307,8 @@ def build_interaction_insights(messages: list[str], bookings: list[models.Bookin
                 priority="high",
                 score=round(float(sentiment.score), 2),
                 evidence=[f"Negative sentiment detected with confidence {sentiment.score:.2f}"],
+                evidence_summary="Negative sentiment detected in the latest message",
+                source="sentiment_model",
                 recommendation="Prioritize recovery flows and proactive follow-up when sentiment turns negative.",
                 next_step="Surface apology paths, escalation options, and fast human support.",
             ),
@@ -427,6 +442,8 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
             "pricing_signals": pricing_signals,
             "support_signals": support_signals,
             "reliability_signals": reliability_signals,
+            "signal_strength": round(sum(item.score for item in insights), 2),
+            "top_issue_count": len(top_issues),
         },
         generated_at=datetime.now(timezone.utc),
     )
@@ -458,6 +475,7 @@ def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment
                     area="sentiment",
                     intensity=round(min(item.score * 2.5, 5.0), 2),
                     evidence=item.evidence[:3],
+                    evidence_summary=_evidence_summary(item.evidence[:3]),
                     recommended_action="Acknowledge the issue and route to fast follow-up.",
                 )
             )
@@ -474,6 +492,7 @@ def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment
                 area=item.area,
                 intensity=intensity,
                 evidence=item.evidence[:3],
+                evidence_summary=_evidence_summary(item.evidence[:3]),
                 recommended_action=item.next_step,
             )
         )
@@ -705,6 +724,7 @@ async def build_retention_cohorts(db: AsyncSession, window_days: int) -> Retenti
                 "total_signal": 0.0,
                 "primary_risk": primary_risk,
                 "recommended_action": recommended_action,
+                "cohort_rule": "loyalty_score >= 80 and signal_score < 2 => champions; >= 60 => stable; >= 40 => at risk; otherwise critical",
             }
 
         cohorts[cohort_name]["user_count"] += 1
@@ -722,6 +742,7 @@ async def build_retention_cohorts(db: AsyncSession, window_days: int) -> Retenti
                 avg_signal_score=round(float(values["total_signal"]) / max(user_count, 1), 2),
                 primary_risk=str(values["primary_risk"]),
                 recommended_action=str(values["recommended_action"]),
+                cohort_rule=str(values["cohort_rule"]),
             )
         )
 
@@ -757,6 +778,7 @@ async def build_monetization_cohorts(db: AsyncSession, window_days: int) -> Mone
                 "total_signal": 0.0,
                 "primary_risk": primary_risk,
                 "recommended_action": recommended_action,
+                "cohort_rule": "high readiness and low signal pressure => champion premium; readiness >= 70 => growth ready; loyalty >= 60 => stable value; readiness >= 50 => conversion ready; otherwise support first",
             }
 
         cohorts[cohort_name]["user_count"] += 1
@@ -776,6 +798,7 @@ async def build_monetization_cohorts(db: AsyncSession, window_days: int) -> Mone
                 avg_signal_score=round(float(values["total_signal"]) / max(user_count, 1), 2),
                 primary_risk=str(values["primary_risk"]),
                 recommended_action=str(values["recommended_action"]),
+                cohort_rule=str(values["cohort_rule"]),
             )
         )
 
@@ -832,6 +855,67 @@ async def build_system_improvement_pack(user_id: int, chat_rows: list[models.Cha
         focus=focus,
         items=items,
         summary=summary,
+    )
+
+
+async def build_retention_snapshot_operations_report(db: AsyncSession, window_days: int, stale_after_days: int = 30) -> RetentionSnapshotOperationsReport:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(days=stale_after_days)
+    query = (
+        select(models.RetentionSnapshot)
+        .where(models.RetentionSnapshot.created_at >= cutoff)
+        .order_by(desc(models.RetentionSnapshot.created_at))
+    )
+    result = await db.execute(query)
+    snapshots = result.scalars().all()
+
+    total = len(snapshots)
+    stale = sum(1 for snapshot in snapshots if snapshot.created_at < stale_cutoff)
+    recent = total - stale
+    stale_ratio = round(stale / max(total, 1), 2)
+
+    items = [
+        RetentionSnapshotOperationItem(
+            label="freshness",
+            status="watch" if stale else "go",
+            count=recent,
+            details=[
+                f"{recent} recent snapshots within the active window",
+                f"{stale} snapshots are stale relative to the {stale_after_days}-day freshness threshold",
+                f"stale ratio is {stale_ratio:.2f} across {total} tracked snapshots",
+            ],
+            recommended_owner="data operations",
+        ),
+        RetentionSnapshotOperationItem(
+            label="cleanup",
+            status="hold" if stale < total else "escalate",
+            count=stale,
+            details=[
+                f"Prune stale snapshots only after validating {recent} recent snapshots remain covered",
+                f"cleanup scope is {stale} stale snapshots out of {total} total",
+            ],
+            recommended_owner="backend engineering",
+        ),
+        RetentionSnapshotOperationItem(
+            label="readiness",
+            status="go" if total and stale / max(total, 1) < 0.25 else "watch",
+            count=total,
+            details=[
+                f"Snapshot portfolio is ready when fresh coverage dominates stale records",
+                f"readiness uses a {stale_after_days}-day freshness threshold over the {window_days}-day window",
+            ],
+            recommended_owner="product operations",
+        ),
+    ]
+
+    return RetentionSnapshotOperationsReport(
+        generated_at=datetime.now(timezone.utc),
+        window_days=window_days,
+        total_snapshots=total,
+        stale_snapshots=stale,
+        recent_snapshots=recent,
+        stale_ratio=stale_ratio,
+        items=items,
     )
 
 
