@@ -264,6 +264,27 @@ def _evidence_summary(evidence: list[str]) -> str:
     return f"{evidence[0]} (+{len(evidence) - 1} more)"
 
 
+def _signal_payload(item: InteractionInsight, summary: InteractionSummary) -> dict[str, object]:
+    return {
+        "area": item.area,
+        "priority": item.priority,
+        "score": item.score,
+        "source": item.source,
+        "evidence": item.evidence,
+        "evidence_summary": item.evidence_summary,
+        "recommendation": item.recommendation,
+        "next_step": item.next_step,
+        "summary": {
+            "loyalty_score": summary.loyalty_score,
+            "monetization_readiness": summary.monetization_readiness,
+            "churn_risk": summary.churn_risk,
+            "repeat_messages": summary.metadata.get("repeated_messages", 0),
+            "booking_states": dict(summary.metadata.get("booking_states", {})),
+            "signal_strength": summary.metadata.get("signal_strength", 0.0),
+        },
+    }
+
+
 def build_interaction_insights(messages: list[str], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> list[InteractionInsight]:
     areas = PREDEFINED_POLICY_AREAS
     ranking = []
@@ -502,6 +523,11 @@ def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment
         if "negative sentiment" not in primary_risks:
             primary_risks.insert(0, "negative sentiment")
 
+    if summary.metadata.get("repeated_messages", 0):
+        dissatisfaction_score += min(float(summary.metadata.get("repeated_messages", 0)) * 1.2, 6.0)
+    if int(summary.metadata.get("booking_states", {}).get("pending", 0)) or int(summary.metadata.get("booking_states", {}).get("cancelled", 0)):
+        dissatisfaction_score += 2.0
+
     dissatisfaction_score = round(min(dissatisfaction_score, 100.0), 2)
     if dissatisfaction_score >= 18:
         recovery_readiness = "critical"
@@ -560,6 +586,22 @@ def build_loyalty_recovery_report(summary: InteractionSummary, sentiment: Option
     )
 
     return dissatisfaction, recommendation_model, action_plan_model, retention_risk
+
+
+def build_recovery_signal_payloads(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> list[dict[str, object]]:
+    recovery_report = build_dissatisfaction_recovery_report(summary, sentiment)
+    payloads: list[dict[str, object]] = []
+    for signal in recovery_report.recovery_signals:
+        payloads.append(
+            {
+                "area": signal.area,
+                "intensity": signal.intensity,
+                "evidence": signal.evidence,
+                "evidence_summary": signal.evidence_summary,
+                "recommended_action": signal.recommended_action,
+            }
+        )
+    return payloads
 
 
 async def build_churn_prediction(db: AsyncSession, user_id: int, window_days: int) -> ChurnPrediction:

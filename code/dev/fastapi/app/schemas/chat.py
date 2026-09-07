@@ -676,6 +676,42 @@ class LoyaltyRecoveryReport(BaseModel):
     action_plan: RetentionSnapshotActionPlan
 
 
+class RecoveryOutcomeItem(BaseModel):
+    id: int
+    recovery_readiness: str
+    dissatisfaction_score: float
+    acknowledged: bool
+    acknowledged_at: Optional[datetime]
+    source: str
+
+
+class RecoveryOutcomeReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    summary: InteractionSummary
+    dissatisfaction: DissatisfactionRecoveryReport
+    retention_recommendation: RetentionSnapshotRecommendation
+    action_plan: RetentionSnapshotActionPlan
+    recovery_outcome: RecoveryOutcomeItem
+    churn_risk: str
+    recovery_attempts: int
+    recovery_acknowledged: bool
+
+
+class RecoveryOutcomeAggregateItem(BaseModel):
+    recovery_readiness: str
+    attempts: int
+    acknowledged: int
+
+
+class RecoveryOutcomeAggregateReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    total_attempts: int
+    total_acknowledged: int
+    items: list[RecoveryOutcomeAggregateItem]
+
+
 class Section11ExpansionSummary(BaseModel):
     generated_at: datetime
     window_days: int

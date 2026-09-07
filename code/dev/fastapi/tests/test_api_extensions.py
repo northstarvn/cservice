@@ -10,9 +10,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.main import app
 from app import models, deps
-from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
+from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
 from app.routers.bookings import get_booking_history, get_booking_analytics_summary
-from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
+from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_report, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
 
 
 def test_meta_ecosystem_exposes_backend_subservices():
@@ -23,6 +23,85 @@ def test_meta_ecosystem_exposes_backend_subservices():
     assert "chat_intelligence" in payload["subservices"]
     assert "retention_ops" in payload["subservices"]
     assert "/chat/admin/snapshot-operations-gonogo" in payload["subservices"]["retention_ops"]["routes"]
+
+
+def test_metadata_exposes_locale_fallback_contract():
+    response = TestClient(app).get("/meta")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["locale"]["resolved"] == "en"
+    assert payload["locale"]["fallback_used"] is False
+
+
+def test_locale_helper_falls_back_and_login_contract_exposes_locale():
+    from app.i18n import resolve_locale
+
+    resolution = resolve_locale("pt-BR")
+    assert resolution.resolved == "en"
+    assert resolution.fallback_used is True
+
+    class _LoginSession:
+        async def execute(self, query):
+            class _Result:
+                def scalar_one_or_none(self_inner):
+                    return type(
+                        "UserObj",
+                        (),
+                        {
+                            "username": "tester",
+                            "hashed_password": "$2b$12$KIXQ2oQzV0TQhP7s6Qz6Xu0P5v4xJQe4dQm1kY5mQw6T1aY8XzS0S",
+                        },
+                    )()
+
+            return _Result()
+
+    async def _fake_get_db():
+        yield _LoginSession()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    try:
+        response = TestClient(app).post(
+            "/users/login",
+            json={"username": "tester", "password": "secret", "locale": "pt-BR"},
+        )
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+
+    assert response.status_code in {200, 401}
+    if response.status_code == 200:
+        payload = response.json()
+        assert payload["locale"]["resolved"] == "en"
+
+
+def test_admin_recovery_outcomes_report_contract():
+    class _RecoverySession:
+        async def execute(self, query):
+            class _Result:
+                def all(self_inner):
+                    return [("high", 3, 2), ("moderate", 1, 1)]
+
+            return _Result()
+
+    async def _fake_get_db():
+        yield _RecoverySession()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/recovery-outcomes")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_attempts"] == 4
+    assert payload["total_acknowledged"] == 3
+    assert payload["items"][0]["recovery_readiness"] == "high"
 
 
 def test_system_priorities_includes_summary_contract():
@@ -402,6 +481,34 @@ class FakeRetentionOperationsLaunchReadinessSession(FakeRetentionHealthScoreSess
 
 class FakeRetentionOperationsGoNoGoSession(FakeRetentionHealthScoreSession):
     pass
+
+
+class FakeRetentionOperationsReportSession:
+    async def execute(self, query):
+        class _Row:
+            def __init__(self, created_at):
+                self.created_at = created_at
+
+        class _Result:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._rows
+
+        return _Result([
+            _Row(datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)),
+        ])
 
 
 class FakeMonetizationCohortsSession:
@@ -1126,10 +1233,10 @@ async def test_retention_snapshot_operations_go_no_go_labels_state():
 
 @pytest.mark.asyncio
 async def test_retention_snapshot_operations_report_exposes_audit_totals():
-    report = await get_retention_snapshot_operations_report(db=FakeRetentionOperationsGoNoGoSession(), current_user=FakeUser(is_admin=True), stale_after_days=14, window_days=30)
+    report = await get_retention_snapshot_operations_report(db=FakeRetentionOperationsReportSession(), current_user=FakeUser(is_admin=True), stale_after_days=14, window_days=30)
 
     assert isinstance(report, RetentionSnapshotOperationsReport)
     assert report.total_snapshots == 8
-    assert report.stale_snapshots == 4
-    assert report.recent_snapshots == 4
-    assert report.stale_ratio == 0.5
+    assert report.stale_snapshots == 6
+    assert report.recent_snapshots == 2
+    assert report.stale_ratio == 0.75

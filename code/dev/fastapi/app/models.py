@@ -59,6 +59,24 @@ class RetentionSnapshot(Base, TimestampMixin):
     summary_json = Column(Text, nullable=False, default="{}")
 
 
+class RecoveryOutcome(Base, TimestampMixin):
+    __tablename__ = "recovery_outcomes"
+    __table_args__ = (
+        CheckConstraint("dissatisfaction_score >= 0", name="ck_recovery_outcomes_dissatisfaction_score_non_negative"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    recovery_readiness = Column(String(20), nullable=False)
+    dissatisfaction_score = Column(Float, nullable=False, default=0.0)
+    primary_risks_json = Column(Text, nullable=False, default="[]")
+    recovery_signals_json = Column(Text, nullable=False, default="[]")
+    action_plan = Column(Text, nullable=False, default="")
+    acknowledged = Column(Boolean, nullable=False, default=False)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    source = Column(String(50), nullable=False, default="chat")
+
+
 class BookingEvent(Base, TimestampMixin):
     __tablename__ = "booking_events"
 
@@ -104,6 +122,11 @@ class User(Base, TimestampMixin):
     )
     retention_snapshots = relationship(
         "RetentionSnapshot",
+        backref="user",
+        cascade="all, delete-orphan",
+    )
+    recovery_outcomes = relationship(
+        "RecoveryOutcome",
         backref="user",
         cascade="all, delete-orphan",
     )

@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import Base, engine, get_db
+from app.i18n import locale_payload
 from app.routers import bookings, chat, users
 
 # Configure logging
@@ -94,6 +95,7 @@ async def app_metadata():
         "version": APP_VERSION,
         "environment": APP_ENV,
         "cors_origins": APP_CORS_ORIGINS,
+        "locale": locale_payload(),
         "features": [
             "auth",
             "bookings",
@@ -200,6 +202,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             "cors": {
                 "allowed_origins": APP_CORS_ORIGINS,
             },
+            "locale": locale_payload(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
@@ -213,6 +216,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             "database": {
                 "connected": False,
             },
+            "locale": locale_payload(),
             "error": str(e)
         }
 

@@ -192,6 +192,7 @@ class TokenData(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+    locale: Optional[str] = None
 
 
 class PasswordChange(BaseModel):

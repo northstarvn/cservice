@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
 from app import models, security, deps
+from app.i18n import locale_payload
 from app.schemas import schemas
 
 router = APIRouter()
@@ -63,6 +64,7 @@ async def login(user_credentials: schemas.UserLogin, db: AsyncSession = Depends(
         "access_token": access_token,
         "token_type": "bearer",
         "expires_in": security.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "locale": locale_payload(getattr(user_credentials, "locale", None)),
     }
 
 @router.get("/me", response_model=schemas.UserOut)
