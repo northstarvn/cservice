@@ -953,6 +953,7 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
     return RetentionSnapshotOperationsReport(
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
+        stale_after_days=stale_after_days,
         total_snapshots=total,
         stale_snapshots=stale,
         recent_snapshots=recent,

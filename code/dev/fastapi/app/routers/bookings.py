@@ -123,12 +123,24 @@ async def update_booking(
         if not booking:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
 
-        # Get update data using model_dump instead of deprecated dict()
         update_data = booking_update.model_dump(exclude_unset=True, exclude_none=True)
         old_status = booking.status
+        history_fields = {"title", "details", "scheduled_date", "service_type"}
+        history_changed = any(field in update_data and getattr(booking, field) != update_data[field] for field in history_fields)
         
         apply_booking_updates(booking, update_data)
         touch_booking(booking)
+
+        if history_changed:
+            await create_booking_event(
+                db,
+                booking,
+                current_user,
+                event_type="updated",
+                note="Booking details updated",
+                from_status=old_status,
+                to_status=booking.status,
+            )
 
         if "status" in update_data and booking.status != old_status:
             await create_booking_event(
@@ -179,6 +191,15 @@ async def delete_booking(
     if not booking:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
 
+    await create_booking_event(
+        db,
+        booking,
+        current_user,
+        event_type="deleted",
+        note="Booking deleted",
+        from_status=booking.status,
+        to_status=booking.status,
+    )
     await db.delete(booking)
     await db.commit()
     return {"message": "Booking deleted successfully"}

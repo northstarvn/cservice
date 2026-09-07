@@ -214,6 +214,7 @@ class RetentionSnapshotOperationItem(BaseModel):
 class RetentionSnapshotOperationsReport(BaseModel):
     generated_at: datetime
     window_days: int
+    stale_after_days: int
     total_snapshots: int
     stale_snapshots: int
     recent_snapshots: int
@@ -683,6 +684,9 @@ class RecoveryOutcomeItem(BaseModel):
     acknowledged: bool
     acknowledged_at: Optional[datetime]
     source: str
+    follow_up_count: int = 0
+    complaint_recurrence_count: int = 0
+    time_to_acknowledge_minutes: Optional[float] = None
 
 
 class RecoveryOutcomeReport(BaseModel):
@@ -696,6 +700,8 @@ class RecoveryOutcomeReport(BaseModel):
     churn_risk: str
     recovery_attempts: int
     recovery_acknowledged: bool
+    complaint_recurrence_count: int
+    time_to_acknowledge_minutes: Optional[float] = None
 
 
 class RecoveryOutcomeAggregateItem(BaseModel):
@@ -709,6 +715,7 @@ class RecoveryOutcomeAggregateReport(BaseModel):
     window_days: int
     total_attempts: int
     total_acknowledged: int
+    total_complaint_recurrences: int
     items: list[RecoveryOutcomeAggregateItem]
 
 

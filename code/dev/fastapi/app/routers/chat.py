@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, case
 from app import deps, models
 from app.schemas.chat import (
     ChatMessageIn,
@@ -813,6 +813,7 @@ async def _store_interaction_signals(db: AsyncSession, user_id: int, pack: Syste
 
 
 async def _store_recovery_outcome(db: AsyncSession, user_id: int, recovery: DissatisfactionRecoveryReport) -> models.RecoveryOutcome:
+    complaint_recurrence_count = sum(1 for signal in recovery.recovery_signals if signal.area in {"follow_up", "retention", "support", "handoff"})
     outcome = models.RecoveryOutcome(
         user_id=user_id,
         recovery_readiness=recovery.recovery_readiness,
@@ -828,6 +829,11 @@ async def _store_recovery_outcome(db: AsyncSession, user_id: int, recovery: Diss
             }
             for signal in recovery.recovery_signals
         ]),
+        follow_up_json=json.dumps({
+            "complaint_recurrence_count": complaint_recurrence_count,
+            "follow_up_count": len(recovery.recovery_signals),
+            "acknowledged": recovery.recovery_readiness in {"low", "moderate"},
+        }),
         action_plan=recovery.action_plan,
         acknowledged=recovery.recovery_readiness in {"low", "moderate"},
         acknowledged_at=datetime.now(timezone.utc) if recovery.recovery_readiness in {"low", "moderate"} else None,
@@ -2728,6 +2734,10 @@ async def get_chat_recovery(
     )
     recovery_attempts = int(attempts_result.scalar() or 0)
     recovery_acknowledged = int(acknowledged_result.scalar() or 0) > 0
+    complaint_recurrence_count = sum(1 for signal in dissatisfaction.recovery_signals if signal.area in {"follow_up", "retention", "support", "handoff"})
+    time_to_acknowledge_minutes = None
+    if outcome.acknowledged and outcome.acknowledged_at:
+        time_to_acknowledge_minutes = round(max((outcome.acknowledged_at - outcome.created_at).total_seconds() / 60.0, 0.0), 2)
 
     return RecoveryOutcomeReport(
         generated_at=outcome.created_at,
@@ -2747,6 +2757,8 @@ async def get_chat_recovery(
         churn_risk=churn_risk,
         recovery_attempts=recovery_attempts,
         recovery_acknowledged=recovery_acknowledged,
+        complaint_recurrence_count=complaint_recurrence_count,
+        time_to_acknowledge_minutes=time_to_acknowledge_minutes,
     )
 
 
@@ -2761,13 +2773,17 @@ async def get_recovery_outcome_aggregate(
         select(
             models.RecoveryOutcome.recovery_readiness,
             func.count(models.RecoveryOutcome.id),
-            func.sum(func.case((models.RecoveryOutcome.acknowledged.is_(True), 1), else_=0)),
+            func.sum(case((models.RecoveryOutcome.acknowledged.is_(True), 1), else_=0)),
         )
         .where(models.RecoveryOutcome.created_at >= cutoff)
         .group_by(models.RecoveryOutcome.recovery_readiness)
     )
     result = await db.execute(query)
     rows = result.all()
+    total_complaint_recurrences = sum(
+        int(row[0] == "moderate") + int(row[0] == "high")
+        for row in rows
+    )
     items = [
         RecoveryOutcomeAggregateItem(
             recovery_readiness=str(recovery_readiness),
@@ -2783,6 +2799,7 @@ async def get_recovery_outcome_aggregate(
         window_days=window_days,
         total_attempts=total_attempts,
         total_acknowledged=total_acknowledged,
+        total_complaint_recurrences=total_complaint_recurrences,
         items=items,
     )
 

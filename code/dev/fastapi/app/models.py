@@ -71,6 +71,7 @@ class RecoveryOutcome(Base, TimestampMixin):
     dissatisfaction_score = Column(Float, nullable=False, default=0.0)
     primary_risks_json = Column(Text, nullable=False, default="[]")
     recovery_signals_json = Column(Text, nullable=False, default="[]")
+    follow_up_json = Column(Text, nullable=False, default="{}")
     action_plan = Column(Text, nullable=False, default="")
     acknowledged = Column(Boolean, nullable=False, default=False)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
