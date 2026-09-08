@@ -463,19 +463,21 @@ The repository is functionally a backend-first customer-service platform with an
 
 The following items are backend-only todos for the current revision. Existing implemented behavior belongs in earlier sections; this section should stay strictly task-oriented.
 
+The backend now already has a concrete booking assignment record path, a deterministic booking match helper, topic ranking, topic policy decisions, and retention operations reporting. The todos below therefore describe the next expansion beyond those implemented slices instead of restating them as if they were still missing.
+
+The metadata surface now advertises the newer decision surfaces more explicitly, but it should still keep pace with any future room-assignment or topic-selection expansion.
+
 ### 11.1 Customer Experience Routing and Room Allocation
 
-- Add dynamic room allocation per customer so a room can host many customers while still selecting matches by topic, preference, and other compatibility criteria.
-- Add an escort-style AI entry agent that introduces the room and steers the customer into the most suitable topic-centric space.
-- Add room selection signals for preference matching, tendency matching, topic affinity, freshness, availability, and other routing constraints.
-- Add room occupancy and assignment rules that support many-to-one customer placement without losing personalization.
-- Add room capacity, waitlist, and spillover rules so the backend can keep matches stable when the preferred room is full.
-- Add room life-cycle states such as draft, active, paused, moderated, archived, and restricted.
+- Add a persisted room-assignment model that can sit beside the existing booking assignment record path and own actual placement state.
+- Add deterministic room matching inputs for topic, preference, capacity, freshness, and policy compatibility.
+- Add explicit room occupancy and spillover rules so a placement can fall back cleanly when the best room is full.
+- Add room lifecycle states such as draft, active, paused, moderated, archived, and restricted.
 - Add room-level ownership and stewardship metadata so moderation and handoff responsibility stay explicit.
-- Add fallback routing rules for when preference matching is incomplete, ambiguous, or blocked by policy.
+- Add fallback routing rules for when matching is incomplete, ambiguous, or blocked by policy.
 - Add room recommendation explanations so customers and operators can see why a room was suggested.
 - Add room transition rules for moving a customer between rooms without losing context or continuity.
-- Add referral and intro provenance so the escort agent can record what source, topic, or preference led to the handoff.
+- Add referral and intro provenance so the backend can record what source, topic, or preference led to the handoff.
 - Add room suppression rules so rooms can be hidden when quality, safety, or legal thresholds are not met.
 - Add explicit room assignment states such as suggested, pending, accepted, rejected, expired, and reassigned.
 - Add operator override actions for forced placement, manual review, and emergency removal.
@@ -484,9 +486,8 @@ The following items are backend-only todos for the current revision. Existing im
 
 ### 11.2 Topic and Interest Modeling
 
-- Add a dynamic topic option set with a broad initial seed list for the first release.
+- Add a dedicated topic-selection payload that sits on top of the existing topic-ranking and topic-policy outputs.
 - Add customer focus-of-interest modeling based on habits, community, tradition, geography, religion, demographic centricity, and similar preference signals.
-- Add topic-ranking rules so the backend can prioritize the most relevant topics for a customer before room assignment.
 - Add topic lifecycle management for creation, deprecation, merging, and versioned option updates.
 - Add topic taxonomies and aliases so equivalent topics can be grouped without losing discoverability.
 - Add topic sourcing rules for seeded topics, curated topics, community-generated topics, and AI-suggested topics.
@@ -527,7 +528,7 @@ The following items are backend-only todos for the current revision. Existing im
 
 - Add explicit metrics for room assignment success, preference match quality, topic engagement, filter rejection rate, and escalation rate.
 - Add audit summaries that can explain why a customer was routed to a given room or topic.
-- Add persistence for assignment decisions, override actions, and fallback routing so the backend can explain its choices later.
+- Add persistence for room-assignment decisions, override actions, and fallback routing so the backend can explain its choices later.
 - Add operator review views for rejected matches, rule triggers, and repeated customer preference failures.
 - Add quality-of-service signals for room freshness, topic churn, and acceptance latency.
 - Add incident reporting for legal or authenticity rule violations so the backend can surface enforcement patterns.
@@ -545,6 +546,13 @@ The following items are backend-only todos for the current revision. Existing im
 - Add test coverage for matching logic, policy enforcement, queue behavior, and fallback routing.
 - Add observability signals for assignment latency, policy hit rates, moderation backlog, and manual override frequency.
 - Add incident response playbooks for legal blocks, false positives, abuse bursts, and external-tool outages.
+
+### 11.4.1 Go-beyond todos from the current implementation
+
+- Add a schema-first room-assignment contract only after the booking service grows beyond the current deterministic match helper into a persisted placement model.
+- Add a topic-selection contract that preserves the ranking inputs, selected topic, alternatives, and explanation fields in one auditable payload.
+- Add a metadata summary for topic policy readiness and room-assignment readiness so operators can see which decision surfaces are available without opening the routers.
+- Add tests for the next decision slice before widening the router surface beyond the current assignment and topic-policy endpoints.
 
 ### 11.5 Governance and Operations Support
 
@@ -672,9 +680,19 @@ The following items are backend-only todos for the current revision. Existing im
 - Add alert routing policies so the right team is notified for safety, availability, compliance, or data-quality issues.
 - Add diagnostic snapshots that capture enough backend state to explain an outage or policy anomaly later.
 
+### 11.17 Next concrete slices
+
+- Add the first persisted room-assignment workflow only after the service layer can return a deterministic matching decision from stored inputs.
+- Add a router-visible room-assignment endpoint only after the schema can describe the placement state transitions end to end.
+- Add a dedicated topic-selection route only if it adds a new contract beyond the existing ranking and policy outputs.
+- Add a metadata capability field for room-assignment and topic-selection readiness before treating either surface as production ready.
+- Add a top-level ecosystem summary entry for the topic-policy surface so the platform view matches the router view.
+
 ## 12. Backend Guardrail Todos
 
 These guardrails describe what backend work must preserve. Keep them task-oriented and aligned with the current router and service boundaries.
+
+The guardrails below should be read against the current codebase state: booking assignment is already persisted, the deterministic booking match helper is implemented, topic ranking and topic policy are already implemented, and the next work should extend those slices rather than re-declare them as future-only ideas.
 
 ### 12.1 Keep room allocation explainable
 
@@ -682,6 +700,8 @@ These guardrails describe what backend work must preserve. Keep them task-orient
 - Avoid opaque scoring that hides preference, topic, authenticity, or legal reasons from the audit trail.
 - Keep room transitions and suppressions as first-class auditable events rather than implicit side effects.
 - Keep reassignment, expiration, and override outcomes visible in the same audit trail as initial placement.
+- Keep the room-assignment explanation layer separate from the existing booking assignment record path until a real placement model exists.
+- Keep the room-assignment explanation layer separate from the existing booking assignment record path and deterministic booking match helper until a real placement model exists.
 
 ### 12.2 Keep topic modeling measurable
 
@@ -689,6 +709,7 @@ These guardrails describe what backend work must preserve. Keep them task-orient
 - Prefer payloads that include match reasons, confidence, counts, and timestamps over narrative-only summaries.
 - Keep topic provenance and lifecycle state visible to the backend so merges, aliases, and fallbacks remain explainable.
 - Keep profile decay and preference conflict handling deterministic enough that repeated inputs produce consistent matches.
+- Keep the topic-selection contract distinct from the current topic-ranking and topic-policy reports so new behavior remains auditable.
 
 ### 12.3 Keep legal filtering enforceable
 
@@ -712,6 +733,7 @@ These guardrails describe what backend work must preserve. Keep them task-orient
 - Keep analytics, compliance reporting, accessibility checks, and abuse-prevention counters as backend services rather than UI-only concerns.
 - Keep review-system integrations and compliance-system integrations isolated behind service adapters so they can be swapped without rewriting routing logic.
 - Keep schema design, persistence design, and test design aligned so routing behavior remains predictable across layers.
+- Keep the existing booking assignment endpoint narrow until placement-specific persistence and matching rules are defined.
 
 ### 12.5 Keep governance visible
 
@@ -728,6 +750,15 @@ These guardrails describe what backend work must preserve. Keep them task-orient
 - Keep observability and incident-response outputs tied to the same routing lifecycle as the functional API.
 - Keep cache, quota, and boundary controls aligned with the same backend authorization model.
 - Keep lineage, reproducibility, and audit-chain outputs aligned with the same decision records used by the routers.
+
+### 12.6.1 Ready-to-implement follow-up items
+
+- Add one deterministic matching helper in the booking service before any new room-placement route is introduced.
+- Keep the deterministic booking match helper narrow so it can be replaced by a true placement engine without changing the booking assignment contract.
+- Add one topic-selection payload in the chat schema layer before expanding beyond ranking and policy reports.
+- Add one metadata summary field for the new decision surface so readiness is visible in `/meta/ecosystem` or `/meta/capabilities`.
+- Add one focused test for the next service helper before changing the public router surface.
+- Add one ecosystem capability entry for topic policy and one for room assignment so the platform summary reflects the implemented and planned surfaces separately.
 
 ### 12.7 Keep provenance verifiable
 

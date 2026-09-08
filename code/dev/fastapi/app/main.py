@@ -134,11 +134,13 @@ async def app_ecosystem():
                 "routes": [
                     "/chat/history",
                     "/chat/insights",
+                    "/chat/topic-ranking",
+                    "/chat/topic-policy-decisions",
                     "/chat/system-priorities",
                     "/chat/trends",
                     "/chat/retention-dashboard",
                 ],
-                "purpose": "conversation memory, sentiment analysis, and retention scoring",
+                "purpose": "conversation memory, sentiment analysis, topic decisioning, and retention scoring",
                 "status": "ready",
             },
             "retention_ops": {
@@ -156,6 +158,11 @@ async def app_ecosystem():
                     "routes": 7,
                     "freshness_window_days": capabilities["coverage"]["freshness_window_days"],
                 },
+            },
+            "booking_assignment": {
+                "routes": ["/bookings/{booking_id}/assignment"],
+                "purpose": "deterministic booking assignment reporting and persisted assignment history",
+                "status": "ready",
             },
             "portfolio_intelligence": {
                 "routes": ["/chat/admin/monetization-cohorts", "/meta/capabilities"],

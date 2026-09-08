@@ -9,6 +9,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import models
 
 
+def build_deterministic_booking_match(booking: models.Booking, current_user: models.User) -> dict:
+    room_id = booking.id
+    match_reason = f"booking-{status_value(booking.status)}-and-user-{current_user.id}"
+    return {
+        "room_id": room_id,
+        "match_reason": match_reason,
+        "source": "booking-service",
+        "explanation": "Deterministic booking match derived from booking state and user context.",
+        "state": "suggested",
+    }
+
+
 def build_booking_assignment_decisions(
     booking: models.Booking,
     current_user: models.User,
@@ -16,17 +28,12 @@ def build_booking_assignment_decisions(
 ) -> List[dict]:
     created_at = datetime.now(timezone.utc)
     requested_assignment = requested_assignment or {}
-    room_id = requested_assignment.get("room_id", booking.id)
-    match_reason = requested_assignment.get(
-        "match_reason",
-        f"booking-{status_value(booking.status)}-and-user-{current_user.id}",
-    )
-    source = requested_assignment.get("source", "booking-service")
-    explanation = requested_assignment.get(
-        "explanation",
-        "Deterministic booking assignment placeholder based on the current booking and user context.",
-    )
-    state = requested_assignment.get("state", "suggested")
+    fallback_assignment = build_deterministic_booking_match(booking, current_user)
+    room_id = requested_assignment.get("room_id", fallback_assignment["room_id"])
+    match_reason = requested_assignment.get("match_reason", fallback_assignment["match_reason"])
+    source = requested_assignment.get("source", fallback_assignment["source"])
+    explanation = requested_assignment.get("explanation", fallback_assignment["explanation"])
+    state = requested_assignment.get("state", fallback_assignment["state"])
     return [
         {
             "booking_id": booking.id,
