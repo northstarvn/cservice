@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import Base, engine, get_db
 from app.i18n import locale_payload
-from app.routers import bookings, chat, users
+from app.routers import bookings, chat, topics, users
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -85,6 +85,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
+app.include_router(topics.router)
 app.include_router(chat.router, tags=["chat"])
 
 
@@ -100,6 +101,7 @@ async def app_metadata():
             "auth",
             "bookings",
             "booking_events",
+            "topic_selection",
             "chat",
             "chat_history_summary",
             "retention",
@@ -189,6 +191,8 @@ async def app_feature_summary():
             "booking_events": "/bookings/analytics/events",
             "booking_export": "/bookings/analytics/export",
             "chat_history": "/chat/history",
+            "topic_selection": "/topics/current",
+            "topic_selection_history": "/topics/history",
             "retention_dashboard": "/retention/dashboard",
             "retention_maintenance": "/retention/maintenance",
         },

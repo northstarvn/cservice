@@ -5,6 +5,7 @@ from sqlalchemy import and_, desc, func
 from sqlalchemy.exc import IntegrityError
 from typing import Optional
 from datetime import datetime, timezone, timedelta
+from sqlalchemy.inspection import inspect
 from app import models, deps
 from app.schemas import schemas
 from app.services.bookings import (
@@ -15,6 +16,9 @@ from app.services.bookings import (
     create_booking_event,
     ensure_booking_transition_allowed,
     get_owned_booking,
+    can_user_access_booking_functionality,
+    get_latest_booking_assignment,
+    create_booking_assignment,
     touch_booking,
     record_booking_mutation_event,
     transition_booking,
@@ -22,12 +26,28 @@ from app.services.bookings import (
 
 router = APIRouter()
 
+
+def _current_control_posture(current_user: models.User) -> str:
+    policy_score = getattr(current_user, "policy_score", None)
+    return getattr(policy_score, "control_posture", "observed") if policy_score else "observed"
+
+
+def _booking_response_guidance(control_posture: str) -> str:
+    if control_posture in {"high_trust", "customer_trusted"}:
+        return "Booking recorded with expanded control posture."
+    if control_posture in {"constrained", "observed"}:
+        return "Booking recorded with controlled access posture."
+    return "Booking recorded successfully."
+
 @router.post("/", response_model=schemas.BookingOut)
 async def create_booking(
     booking: schemas.BookingCreate,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db)
 ):
+    if not can_user_access_booking_functionality(policy_score, "create"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking creation requires a higher policy tier")
     try:
         db_booking = models.Booking(
             user_id=current_user.id,
@@ -48,6 +68,12 @@ async def create_booking(
         )
         await db.commit()
         await db.refresh(db_booking)
+        control_posture = _current_control_posture(current_user)
+        db_booking.control_posture = control_posture
+        if control_posture in {"constrained", "observed"} and db_booking.details:
+            db_booking.details = f"{db_booking.details}\n\nControlled posture note: booking created under monitored access."
+        if db_booking.details:
+            db_booking.details = f"{db_booking.details}\n\n{_booking_response_guidance(control_posture)}"
         return db_booking
     except IntegrityError as e:
         await db.rollback()
@@ -60,20 +86,28 @@ async def create_booking(
 async def get_bookings(
     page: int = 1,
     per_page: int = 10,
-    status: Optional[schemas.BookingStatus] = None,
+    booking_status: Optional[schemas.BookingStatus] = None,
     service_type: Optional[schemas.ServiceType] = None,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db)
 ):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking history requires a higher policy tier")
+    control_posture = _current_control_posture(current_user)
     query = select(models.Booking).where(models.Booking.user_id == current_user.id)
-    if status:
-        query = query.where(models.Booking.status == status.value)
+    if control_posture in {"constrained", "observed"}:
+        query = query.where(models.Booking.status.in_([models.BookingStatus.pending, models.BookingStatus.confirmed]))
+    if booking_status:
+        query = query.where(models.Booking.status == booking_status.value)
     if service_type:
         query = query.where(models.Booking.service_type == service_type.value)
 
     count_query = select(func.count(models.Booking.id)).where(models.Booking.user_id == current_user.id)
-    if status:
-        count_query = count_query.where(models.Booking.status == status.value)
+    if control_posture in {"constrained", "observed"}:
+        count_query = count_query.where(models.Booking.status.in_([models.BookingStatus.pending, models.BookingStatus.confirmed]))
+    if booking_status:
+        count_query = count_query.where(models.Booking.status == booking_status.value)
     if service_type:
         count_query = count_query.where(models.Booking.service_type == service_type.value)
 
@@ -98,8 +132,11 @@ async def get_bookings(
 async def get_booking(
     booking_id: int,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db)
 ):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking access requires a higher policy tier")
     result = await db.execute(
         select(models.Booking).where(
             and_(models.Booking.id == booking_id, models.Booking.user_id == current_user.id)
@@ -108,6 +145,10 @@ async def get_booking(
     booking = result.scalar_one_or_none()
     if not booking:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+    control_posture = _current_control_posture(current_user)
+    booking.control_posture = control_posture
+    if control_posture in {"constrained", "observed"} and booking.details:
+        booking.details = f"{booking.details}\n\nView limited by control posture."
     return booking
 
 @router.put("/{booking_id}", response_model=schemas.BookingOut)
@@ -115,8 +156,11 @@ async def update_booking(
     booking_id: int,
     booking_update: schemas.BookingUpdate,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db)
 ):
+    if not can_user_access_booking_functionality(policy_score, "update"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking updates require a higher policy tier")
     try:
         result = await db.execute(
             select(models.Booking).where(
@@ -169,6 +213,12 @@ async def update_booking(
         
         await db.commit()
         await db.refresh(booking)
+        control_posture = _current_control_posture(current_user)
+        booking.control_posture = control_posture
+        if control_posture in {"constrained", "observed"} and booking.details:
+            booking.details = f"{booking.details}\n\nControlled posture note: booking updated under monitored access."
+        if booking.details and control_posture in {"constrained", "observed"}:
+            booking.details = f"{booking.details}\n\n{_booking_response_guidance(control_posture)}"
         return booking
         
     except ValueError as e:
@@ -194,8 +244,11 @@ async def update_booking(
 async def delete_booking(
     booking_id: int,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db)
 ):
+    if not can_user_access_booking_functionality(policy_score, "delete"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking deletion requires a higher policy tier")
     result = await db.execute(
         select(models.Booking).where(
             and_(models.Booking.id == booking_id, models.Booking.user_id == current_user.id)
@@ -226,15 +279,25 @@ async def delete_booking(
     )
     await db.delete(booking)
     await db.commit()
-    return {"message": "Booking deleted successfully"}
+    control_posture = _current_control_posture(current_user)
+    if control_posture in {"high_trust", "customer_trusted"}:
+        message = "Booking deleted successfully."
+    elif control_posture in {"constrained", "observed"}:
+        message = "Booking deleted successfully after controlled access verification. Control posture note recorded."
+    else:
+        message = "Booking deleted successfully."
+    return {"message": message, "control_posture": control_posture}
 
 
 @router.get("/{booking_id}/history", response_model=schemas.BookingHistoryReport)
 async def get_booking_history(
     booking_id: int,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db),
 ):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking history requires a higher policy tier")
     booking_result = await db.execute(
         select(models.Booking).where(
             and_(models.Booking.id == booking_id, models.Booking.user_id == current_user.id)
@@ -248,16 +311,138 @@ async def get_booking_history(
         select(models.BookingEvent)
         .where(models.BookingEvent.booking_id == booking_id)
         .where(models.BookingEvent.user_id == current_user.id)
-        .order_by(desc(models.BookingEvent.created_at))
+        .order_by(desc(models.BookingEvent.created_at), desc(models.BookingEvent.id))
     )
     events = event_result.scalars().all()
+    control_posture = _current_control_posture(current_user)
+    visible_events = events if control_posture not in {"constrained", "observed"} else [
+        event for event in events if not event.event_type.startswith("assignment_")
+    ]
 
     return schemas.BookingHistoryReport(
         booking_id=booking.id,
         user_id=current_user.id,
         current_status=booking.status,
-        event_count=len(events),
-        items=events,
+        event_count=len(visible_events),
+        control_posture=control_posture,
+        items=[
+            schemas.BookingEventOut(
+                **inspect(event).dict,
+                is_assignment_event=event.event_type.startswith("assignment_"),
+            )
+            for event in visible_events
+        ],
+    )
+
+
+@router.get("/{booking_id}/audit-summary", response_model=schemas.BookingAuditSummary)
+async def get_booking_audit_summary(
+    booking_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking audit access requires a higher policy tier")
+    booking = await get_owned_booking(db, booking_id, current_user)
+
+    event_result = await db.execute(
+        select(models.BookingEvent)
+        .where(models.BookingEvent.booking_id == booking_id)
+        .where(models.BookingEvent.user_id == current_user.id)
+        .order_by(desc(models.BookingEvent.created_at), desc(models.BookingEvent.id))
+    )
+    events = event_result.scalars().all()
+    assignment_events = [event for event in events if event.event_type.startswith("assignment_")]
+    created_events = [event for event in events if event.event_type == "created"]
+    status_updates = [event for event in events if event.event_type == "status_updated"]
+    latest_event = events[0] if events else None
+    control_posture = _current_control_posture(current_user)
+    recent_mutation_fields = []
+    if control_posture in {"constrained", "observed"}:
+        recent_mutation_fields = ["status", "assignment", "note"]
+
+    return schemas.BookingAuditSummary(
+        booking_id=booking.id,
+        user_id=current_user.id,
+        total_events=len(events),
+        assignment_events=len(assignment_events),
+        created_events=len(created_events),
+        status_updates=len(status_updates),
+        latest_event_at=latest_event.created_at if latest_event else None,
+        latest_event_note=latest_event.note if latest_event else None,
+        recent_mutation_fields=recent_mutation_fields,
+        control_posture=control_posture,
+    )
+
+
+@router.get("/{booking_id}/assignment/history", response_model=schemas.BookingAssignmentHistoryReport)
+async def get_booking_assignment_history(
+    booking_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment history requires a higher policy tier")
+    booking = await get_owned_booking(db, booking_id, current_user)
+
+    event_result = await db.execute(
+        select(models.BookingEvent)
+        .where(models.BookingEvent.booking_id == booking_id)
+        .where(models.BookingEvent.user_id == current_user.id)
+        .where(models.BookingEvent.event_type.like("assignment_%"))
+        .order_by(desc(models.BookingEvent.created_at), desc(models.BookingEvent.id))
+    )
+    events = event_result.scalars().all()
+    control_posture = _current_control_posture(current_user)
+    visible_events = events if control_posture not in {"constrained", "observed"} else []
+
+    return schemas.BookingAssignmentHistoryReport(
+        booking_id=booking.id,
+        user_id=current_user.id,
+        event_count=len(visible_events),
+        control_posture=control_posture,
+        items=[
+            schemas.BookingEventOut(
+                **inspect(event).dict,
+                is_assignment_event=True,
+            )
+            for event in visible_events
+        ],
+    )
+
+
+@router.get("/{booking_id}/assignment/history/summary", response_model=schemas.BookingAssignmentHistorySummary)
+async def get_booking_assignment_history_summary(
+    booking_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment history requires a higher policy tier")
+    booking = await get_owned_booking(db, booking_id, current_user)
+
+    summary_result = await db.execute(
+        select(
+            func.count(models.BookingEvent.id).label("event_count"),
+            func.max(models.BookingEvent.created_at).label("latest_event_at"),
+            func.max(models.BookingEvent.event_type).label("latest_event_type"),
+        )
+        .where(models.BookingEvent.booking_id == booking_id)
+        .where(models.BookingEvent.user_id == current_user.id)
+        .where(models.BookingEvent.event_type.like("assignment_%"))
+    )
+    summary_row = summary_result.one()
+
+    return schemas.BookingAssignmentHistorySummary(
+        booking_id=booking.id,
+        user_id=current_user.id,
+        event_count=summary_row.event_count or 0,
+        latest_event_at=summary_row.latest_event_at,
+        latest_event_type=summary_row.latest_event_type,
+        control_posture=_current_control_posture(current_user),
     )
 
 
@@ -265,27 +450,31 @@ async def get_booking_history(
 async def get_booking_assignment_report(
     booking_id: int,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db),
 ):
+    if not can_user_access_booking_functionality(policy_score, "recommend"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment access requires a higher policy tier")
     booking = await get_owned_booking(db, booking_id, current_user)
-    assignment_result = await db.execute(
-        select(models.BookingAssignment)
-        .where(models.BookingAssignment.booking_id == booking.id)
-        .where(models.BookingAssignment.user_id == current_user.id)
-        .order_by(desc(models.BookingAssignment.created_at))
-    )
-    assignment = assignment_result.scalars().first()
+    assignment = await get_latest_booking_assignment(db, booking.id, current_user.id)
     report = (
         build_booking_assignment_report_from_record(assignment)
         if assignment
         else build_booking_assignment_report(booking, current_user)
     )
+    control_posture = _current_control_posture(current_user)
+    decisions = [schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]]
+    if control_posture in {"constrained", "observed"}:
+        for decision in decisions:
+            decision.explanation = decision.explanation or "Controlled posture note: assignment recommendation is monitored."
     return schemas.BookingAssignmentReport(
         generated_at=report["generated_at"],
         booking_id=report["booking_id"],
         user_id=report["user_id"],
         current_state=report["current_state"],
-        decisions=[schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]],
+        current_assignment_is_current=report["current_assignment_is_current"],
+        decisions=decisions,
+        control_posture=control_posture,
     )
 
 
@@ -294,22 +483,32 @@ async def create_booking_assignment_report(
     booking_id: int,
     assignment_request: schemas.BookingAssignmentRequest,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db),
 ):
+    if not can_user_access_booking_functionality(policy_score, "assign"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment creation requires a higher policy tier")
     booking = await get_owned_booking(db, booking_id, current_user)
-    assignment = await persist_booking_assignment(
+    assignment = await create_booking_assignment(
         db,
         booking,
         current_user,
         requested_assignment=assignment_request.model_dump(exclude_none=True),
     )
     report = build_booking_assignment_report_from_record(assignment)
+    control_posture = _current_control_posture(current_user)
+    decisions = [schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]]
+    if control_posture in {"constrained", "observed"}:
+        for decision in decisions:
+            decision.explanation = decision.explanation or "Controlled posture note: assignment recommendation is monitored."
     return schemas.BookingAssignmentReport(
         generated_at=report["generated_at"],
         booking_id=report["booking_id"],
         user_id=report["user_id"],
         current_state=report["current_state"],
-        decisions=[schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]],
+        current_assignment_is_current=report["current_assignment_is_current"],
+        decisions=decisions,
+        control_posture=control_posture,
     )
 
 
@@ -318,23 +517,25 @@ async def update_booking_assignment_report(
     booking_id: int,
     assignment_update: schemas.BookingAssignmentUpdate,
     current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
     db: AsyncSession = Depends(deps.get_db),
 ):
+    if not can_user_access_booking_functionality(policy_score, "assign"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment updates require a higher policy tier")
     booking = await get_owned_booking(db, booking_id, current_user)
-    assignment_result = await db.execute(
-        select(models.BookingAssignment)
-        .where(models.BookingAssignment.booking_id == booking.id)
-        .where(models.BookingAssignment.user_id == current_user.id)
-        .order_by(desc(models.BookingAssignment.created_at))
-    )
-    assignment = assignment_result.scalars().first()
+    assignment = await get_latest_booking_assignment(db, booking.id, current_user.id)
     requested_assignment = assignment_update.model_dump(exclude_none=True)
 
     if assignment:
-        updated_assignment = await update_booking_assignment(db, assignment, requested_assignment=requested_assignment)
+        updated_assignment = await update_booking_assignment(
+            db,
+            assignment,
+            current_user,
+            requested_assignment=requested_assignment,
+        )
         report = build_booking_assignment_report_from_record(updated_assignment)
     else:
-        created_assignment = await persist_booking_assignment(
+        created_assignment = await create_booking_assignment(
             db,
             booking,
             current_user,
@@ -342,12 +543,20 @@ async def update_booking_assignment_report(
         )
         report = build_booking_assignment_report_from_record(created_assignment)
 
+    control_posture = _current_control_posture(current_user)
+    decisions = [schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]]
+    if control_posture in {"constrained", "observed"}:
+        for decision in decisions:
+            decision.explanation = decision.explanation or "Controlled posture note: assignment recommendation is monitored."
+
     return schemas.BookingAssignmentReport(
         generated_at=report["generated_at"],
         booking_id=report["booking_id"],
         user_id=report["user_id"],
         current_state=report["current_state"],
-        decisions=[schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]],
+        current_assignment_is_current=report["current_assignment_is_current"],
+        decisions=decisions,
+        control_posture=control_posture,
     )
 
 
@@ -373,6 +582,10 @@ async def get_booking_audit_summary(
         .order_by(desc(models.BookingEvent.created_at))
     )
     events = event_result.scalars().all()
+    control_posture = _current_control_posture(current_user)
+    posture_note = None
+    if control_posture in {"constrained", "observed"}:
+        posture_note = "Controlled posture note: audit summary reflects monitored access."
 
     return schemas.BookingAuditSummary(
         booking_id=booking.id,
@@ -391,12 +604,13 @@ async def get_booking_audit_summary(
                 )
             }
         ),
+        control_posture=control_posture,
     )
 
 
 @router.get("/analytics/summary", response_model=schemas.AdminAnalyticsSummary)
 async def get_booking_analytics_summary(
-    current_user: models.User = Depends(deps.get_current_admin_user),
+    current_user: models.User = Depends(deps.get_current_policy_admin_user),
     db: AsyncSession = Depends(deps.get_db),
 ):
     total_users_result = await db.execute(select(func.count(models.User.id)))
@@ -431,6 +645,9 @@ async def get_booking_analytics_summary(
         schemas.AnalyticsEventCount(event_type=str(event_type), count=int(count or 0))
         for event_type, count in event_rows.all()
     ]
+    assignment_events_total = sum(
+        count for event_type, count in event_rows.all() if str(event_type).startswith("assignment_")
+    )
 
     return schemas.AdminAnalyticsSummary(
         generated_at=now,
@@ -438,9 +655,11 @@ async def get_booking_analytics_summary(
         total_bookings=int(total_bookings_result.scalar() or 0),
         bookings_by_status=bookings_by_status,
         booking_events_total=int(total_events_result.scalar() or 0),
+        assignment_events_total=int(assignment_events_total or 0),
         booking_events_by_type=event_counts,
         recent_bookings=int(recent_bookings_result.scalar() or 0),
         recent_events=int(recent_events_result.scalar() or 0),
+        control_posture=_current_control_posture(current_user),
     )
 
 
@@ -453,7 +672,7 @@ async def get_booking_event_summary(
     end_date: Optional[datetime] = None,
     page: int = 1,
     per_page: int = 50,
-    current_user: models.User = Depends(deps.get_current_admin_user),
+    current_user: models.User = Depends(deps.get_current_policy_admin_user),
     db: AsyncSession = Depends(deps.get_db),
 ):
     query = select(models.BookingEvent)
@@ -491,6 +710,8 @@ async def get_booking_event_summary(
         status_key = str(getattr(event.to_status, "value", event.to_status or "unknown"))
         status_counts[status_key] = status_counts.get(status_key, 0) + 1
 
+    assignment_events = sum(1 for event in events if event.event_type.startswith("assignment_"))
+
     return schemas.BookingEventFilterSummary(
         generated_at=datetime.now(timezone.utc),
         total_events=total_events,
@@ -504,6 +725,7 @@ async def get_booking_event_summary(
         end_date=end_date,
         statuses=status_counts,
         events=events,
+        assignment_events=assignment_events,
     )
 
 
@@ -511,7 +733,7 @@ async def get_booking_event_summary(
 async def export_booking_data(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-    current_user: models.User = Depends(deps.get_current_admin_user),
+    current_user: models.User = Depends(deps.get_current_policy_admin_user),
     db: AsyncSession = Depends(deps.get_db),
 ):
     booking_query = select(models.Booking)
@@ -536,13 +758,20 @@ async def export_booking_data(
 
     bookings = (await db.execute(booking_query)).scalars().all()
     events = (await db.execute(event_query)).scalars().all()
+    assignment_events_total = sum(1 for event in events if event.event_type.startswith("assignment_"))
+    control_posture = _current_control_posture(current_user)
+    if control_posture in {"constrained", "observed"}:
+        events = [event for event in events if not event.event_type.startswith("assignment_")]
+        assignment_events_total = 0
 
     return schemas.BookingExportReport(
         generated_at=datetime.now(timezone.utc),
         total_bookings=len(bookings),
         total_events=len(events),
+        assignment_events_total=assignment_events_total,
         bookings=bookings,
         events=events,
+        control_posture=control_posture,
     )
 
 

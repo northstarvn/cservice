@@ -43,6 +43,27 @@ class InteractionSignal(Base, TimestampMixin):
     recommendation = Column(Text, nullable=False)
 
 
+class CustomerPolicyScore(Base, TimestampMixin):
+    __tablename__ = "customer_policy_scores"
+    __table_args__ = (
+        CheckConstraint("system_score >= 0", name="ck_customer_policy_scores_system_score_non_negative"),
+        CheckConstraint("customer_score >= 0", name="ck_customer_policy_scores_customer_score_non_negative"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    system_score = Column(Float, nullable=False, default=0.0)
+    customer_score = Column(Float, nullable=False, default=0.0)
+    access_score = Column(Float, nullable=False, default=0.0)
+    interest_score = Column(Float, nullable=False, default=0.0)
+    closeness_score = Column(Float, nullable=False, default=0.0)
+    community_closeness_score = Column(Float, nullable=False, default=0.0)
+    policy_tier = Column(String(20), nullable=False, default="standard", index=True)
+    control_posture = Column(String(32), nullable=False, default="constrained", index=True)
+    source = Column(String(50), nullable=False, default="system_and_customer_metrics")
+    summary = Column(Text, nullable=False, default="")
+
+
 class RetentionSnapshot(Base, TimestampMixin):
     __tablename__ = "retention_snapshots"
     __table_args__ = (
@@ -82,6 +103,18 @@ class RecoveryOutcome(Base, TimestampMixin):
     source = Column(String(50), nullable=False, default="chat")
 
 
+class TopicSelection(Base, TimestampMixin):
+    __tablename__ = "topic_selections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    topic = Column(String(120), nullable=False, index=True)
+    source = Column(String(50), nullable=False, default="chat")
+    rationale = Column(Text, nullable=False, default="")
+    confidence = Column(Float, nullable=False, default=0.0)
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+
+
 class BookingEvent(Base, TimestampMixin):
     __tablename__ = "booking_events"
 
@@ -105,6 +138,7 @@ class BookingAssignment(Base, TimestampMixin):
     state = Column(String(20), nullable=False, default="suggested")
     source = Column(String(50), nullable=False, default="booking-service")
     explanation = Column(Text, nullable=False, default="")
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
 
     booking = relationship("Booking", backref="assignments")
     assigned_user = relationship("User")
@@ -153,6 +187,12 @@ class User(Base, TimestampMixin):
     )
     booking_events = relationship(
         "BookingEvent",
+        backref="user",
+        cascade="all, delete-orphan",
+    )
+    policy_score = relationship(
+        "CustomerPolicyScore",
+        uselist=False,
         backref="user",
         cascade="all, delete-orphan",
     )

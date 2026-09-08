@@ -26,6 +26,7 @@ def upgrade() -> None:
         sa.Column("state", sa.String(length=20), nullable=False, server_default="suggested"),
         sa.Column("source", sa.String(length=50), nullable=False, server_default="booking-service"),
         sa.Column("explanation", sa.Text(), nullable=False, server_default=""),
+        sa.Column("is_current", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
@@ -33,11 +34,13 @@ def upgrade() -> None:
     op.create_index(op.f("ix_booking_assignments_booking_id"), "booking_assignments", ["booking_id"], unique=False)
     op.create_index(op.f("ix_booking_assignments_user_id"), "booking_assignments", ["user_id"], unique=False)
     op.create_index(op.f("ix_booking_assignments_room_id"), "booking_assignments", ["room_id"], unique=False)
+    op.create_index(op.f("ix_booking_assignments_is_current"), "booking_assignments", ["is_current"], unique=False)
 
 
 def downgrade() -> None:
     op.drop_index(op.f("ix_booking_assignments_room_id"), table_name="booking_assignments")
     op.drop_index(op.f("ix_booking_assignments_user_id"), table_name="booking_assignments")
     op.drop_index(op.f("ix_booking_assignments_booking_id"), table_name="booking_assignments")
+    op.drop_index(op.f("ix_booking_assignments_is_current"), table_name="booking_assignments")
     op.drop_index(op.f("ix_booking_assignments_id"), table_name="booking_assignments")
     op.drop_table("booking_assignments")

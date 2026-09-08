@@ -12,6 +12,7 @@ from app.main import app
 from app import models, deps
 from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionDashboard, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
 from app.routers.bookings import get_booking_history, get_booking_analytics_summary
+from app.routers.bookings import get_booking_assignment_history, get_booking_audit_summary, export_booking_data
 from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_report, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
 from app.routers.chat import get_retention_dashboard
 
@@ -193,6 +194,21 @@ class FakeHistorySession:
                             "created_at": datetime.now(timezone.utc),
                         },
                     )()
+                    ,
+                    type(
+                        "BookingEventObj",
+                        (),
+                        {
+                            "id": 2,
+                            "booking_id": 10,
+                            "user_id": 1,
+                            "event_type": "assignment_created",
+                            "from_status": None,
+                            "to_status": None,
+                            "note": "assignment created",
+                            "created_at": datetime.now(timezone.utc),
+                        },
+                    )()
                 ]
 
             def scalar_one_or_none(self_inner):
@@ -207,6 +223,10 @@ class FakeHistorySession:
                 )()
 
         return _ScalarResult()
+
+
+class FakeAssignmentSummarySession(FakeHistorySession):
+    pass
 
 
 class FakeAnalyticsSession:
@@ -681,8 +701,21 @@ async def test_booking_history_returns_report_shape():
 
     assert report.booking_id == 10
     assert report.user_id == 1
-    assert report.event_count == 1
+    assert report.event_count == 2
     assert report.items[0].event_type == "confirmed"
+    assert report.items[1].is_assignment_event is True
+
+
+@pytest.mark.asyncio
+async def test_booking_assignment_history_returns_assignment_only_events():
+    db = FakeHistorySession()
+    report = await get_booking_assignment_history(booking_id=10, current_user=FakeUser(), db=db)
+
+    assert report.booking_id == 10
+    assert report.user_id == 1
+    assert report.event_count == 1
+    assert report.items[0].event_type == "assignment_created"
+    assert report.items[0].is_assignment_event is True
 
 
 @pytest.mark.asyncio
@@ -693,8 +726,101 @@ async def test_admin_analytics_summary_returns_counts():
     assert summary.total_users == 3
     assert summary.total_bookings == 7
     assert summary.booking_events_total == 5
+    assert summary.assignment_events_total == 0
     assert summary.bookings_by_status["pending"] == 2
     assert summary.booking_events_by_type[0].event_type == "created"
+
+
+@pytest.mark.asyncio
+async def test_booking_audit_summary_counts_assignment_events():
+    class _AuditResult:
+        def scalars(self_inner):
+            return self_inner
+
+        def all(self_inner):
+            return [
+                type(
+                    "BookingEventObj",
+                    (),
+                    {
+                        "id": 1,
+                        "booking_id": 10,
+                        "user_id": 1,
+                        "event_type": "created",
+                        "from_status": None,
+                        "to_status": "pending",
+                        "note": "created",
+                        "created_at": datetime.now(timezone.utc),
+                    },
+                )(),
+                type(
+                    "BookingEventObj",
+                    (),
+                    {
+                        "id": 2,
+                        "booking_id": 10,
+                        "user_id": 1,
+                        "event_type": "assignment_created",
+                        "from_status": None,
+                        "to_status": None,
+                        "note": "assignment",
+                        "created_at": datetime.now(timezone.utc),
+                    },
+                )(),
+            ]
+
+    class _AuditSession:
+        async def execute(self, query):
+            return _AuditResult()
+
+    summary = await get_booking_audit_summary(booking_id=10, current_user=FakeUser(), db=_AuditSession())
+
+    assert summary.total_events == 2
+    assert summary.assignment_events == 1
+
+
+@pytest.mark.asyncio
+async def test_booking_export_includes_assignment_event_total():
+    class _ExportResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _ExportSession:
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, query):
+            self.calls += 1
+            if self.calls == 1:
+                return _ExportResult([type("BookingObj", (), {"id": 1, "user_id": 1, "status": models.BookingStatus.pending, "service_type": models.ServiceType.consultation, "title": "T", "details": "D", "scheduled_date": datetime.now(timezone.utc), "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)})()])
+            return _ExportResult([
+                type(
+                    "BookingEventObj",
+                    (),
+                    {
+                        "id": 1,
+                        "booking_id": 1,
+                        "user_id": 1,
+                        "event_type": "assignment_created",
+                        "from_status": None,
+                        "to_status": None,
+                        "note": "assignment",
+                        "created_at": datetime.now(timezone.utc),
+                    },
+                )()
+            ])
+
+    report = await export_booking_data(current_user=FakeUser(is_admin=True), db=_ExportSession())
+
+    assert report.total_bookings == 1
+    assert report.total_events == 1
+    assert report.assignment_events_total == 1
 
 
 def test_chat_history_out_accepts_missing_user_id():

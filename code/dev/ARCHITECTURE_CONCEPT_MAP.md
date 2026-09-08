@@ -13,6 +13,8 @@
 
 This repository is a backend-centered customer-service platform built around FastAPI, async SQLAlchemy, and a set of domain routers for users, bookings, chat, and system metadata. The backend also exposes deeper analytics, retention, lifecycle, and ecosystem metadata that define the product's operational intelligence layer.
 
+All backend control surfaces should be derived from either system-only metrics, including AI-generated metrics, or customer-centric point-ranking metrics. That includes functionality access, topic interest, user-to-user proximity, and community proximity, with the scoring kept simple enough for improvement and feedback workflows to monitor directly.
+
 The implementation is best understood as three overlapping backend systems:
 
 1. Identity, account, and auth control plane
@@ -107,7 +109,7 @@ Important behaviors:
 
 ### 4.4 Booking Lifecycle API
 
-`fastapi/app/routers/bookings.py` supports booking creation, listing, reading, editing, deleting, audit/history summaries, and an assignment endpoint that can persist caller-provided placement details. The router is backed by `fastapi/app/services/bookings.py`, which contains reusable lifecycle rules plus a deterministic assignment helper.
+`fastapi/app/routers/bookings.py` supports booking creation, listing, reading, editing, deleting, audit/history summaries, and an assignment endpoint that can persist caller-provided placement details, update the latest persisted assignment, and keep a single current assignment authoritative. The router is backed by `fastapi/app/services/bookings.py`, which contains reusable lifecycle rules plus a deterministic assignment helper.
 
 Important service behavior:
 
@@ -115,7 +117,8 @@ Important service behavior:
 - Status transitions are validated before mutation
 - Transition helpers record booking events alongside state changes
 - Ownership checks are centralized in the service layer
-- The booking service now also builds and persists an explainable assignment report from the current booking and user context
+- The booking service now also builds, persists, updates, and current-flags an explainable assignment report from the current booking and user context
+- Assignment changes are emitted as booking events so the assignment slice participates in the same history trail as other booking mutations
 
 This router is still primarily a lifecycle model, but it now carries the first concrete placement-style decision surface.
 
@@ -225,7 +228,7 @@ The backend exposes rich retention and ecosystem endpoints, and the recovery/ret
 ### 7.5 Backlog-to-surface mapping gap
 
 The expanded room allocation, topic modeling, authenticity, legal, observability, privacy, and incident-response backlog still needs a concrete owner map across routers, services, schemas, and metadata endpoints.
-The booking assignment slice is now partially resolved, but the broader room-allocation backlog still needs a real persisted placement model before it can be treated as complete.
+The booking assignment slice is now substantially resolved as a persisted, current-flagged, auditable flow, but the broader room-allocation backlog still needs a real placement model before it can be treated as complete.
 
 ## 8. Backlog-to-Implementation Map
 
@@ -368,8 +371,8 @@ This section turns the broad backend backlog into the smallest set of implementa
 - The chat analytics helper split is complete: `fastapi/app/routers/chat.py` now consumes `fastapi/app/services/chat_analytics.py` for interaction insights instead of maintaining a router-local copy.
 - The first topic-ranking contract is now real: `fastapi/app/schemas/chat.py` defines `TopicRankingItem` and `TopicRankingReport`, `fastapi/app/services/chat_analytics.py` builds the report, and `fastapi/app/routers/chat.py` exposes it through `/chat/topic-ranking`.
 - The topic-policy contract is now also real: `fastapi/app/schemas/chat.py` defines `TopicPolicyDecision` and `TopicPolicyDecisionReport`, `fastapi/app/services/chat_analytics.py` builds the decision set, and `fastapi/app/routers/chat.py` exposes it through `/chat/topic-policy-decisions`.
-- Booking assignment is now a concrete backend slice: the booking service owns a deterministic assignment helper, the schema can accept caller-provided assignment details, and the router persists them through a dedicated endpoint.
-- The booking contract itself still ends at lifecycle, event history, and a narrow assignment path, so real room assignment should still wait for persisted placement fields.
+- Booking assignment is now a concrete backend slice: the booking service owns a deterministic assignment helper, the schema can accept caller-provided assignment details, and the router can persist and update them through dedicated endpoints.
+- The booking contract itself still ends at lifecycle, event history, and assignment lifecycle tracking, with the latest assignment marked explicitly current, so real room assignment should still wait for persisted placement fields.
 - Define the first topic-selection payload and decide whether it belongs in chat analytics or a dedicated booking matcher.
 - Topic selection now has a concrete owner in chat analytics until a room-assignment matcher proves it needs to move.
 - Capture the room-assignment contract in schema form before any new router path is added.
@@ -461,335 +464,22 @@ The repository is functionally a backend-first customer-service platform with an
 
 ## 11. Backend Expansion Todos
 
-The following items are backend-only todos for the current revision. Existing implemented behavior belongs in earlier sections; this section should stay strictly task-oriented.
-
-### 11.1 Customer Experience Routing and Room Allocation
-
-- Add dynamic room allocation per customer so a room can host many customers while still selecting matches by topic, preference, and other compatibility criteria.
-- Add an escort-style AI entry agent that introduces the room and steers the customer into the most suitable topic-centric space.
-- Add room selection signals for preference matching, tendency matching, topic affinity, freshness, availability, and other routing constraints.
-- Add room occupancy and assignment rules that support many-to-one customer placement without losing personalization.
-- Add room capacity, waitlist, and spillover rules so the backend can keep matches stable when the preferred room is full.
-- Add room life-cycle states such as draft, active, paused, moderated, archived, and restricted.
-- Add room-level ownership and stewardship metadata so moderation and handoff responsibility stay explicit.
-- Add fallback routing rules for when preference matching is incomplete, ambiguous, or blocked by policy.
-- Add room recommendation explanations so customers and operators can see why a room was suggested.
-- Add room transition rules for moving a customer between rooms without losing context or continuity.
-- Add referral and intro provenance so the escort agent can record what source, topic, or preference led to the handoff.
-- Add room suppression rules so rooms can be hidden when quality, safety, or legal thresholds are not met.
-- Add explicit room assignment states such as suggested, pending, accepted, rejected, expired, and reassigned.
-- Add operator override actions for forced placement, manual review, and emergency removal.
-- Add customer preference update hooks so new interests can re-score room matches without requiring a full restart.
-- Add room rotation and rebalancing rules so active rooms can stay healthy when demand shifts suddenly.
-
-### 11.2 Topic and Interest Modeling
-
-- Add a dynamic topic option set with a broad initial seed list for the first release.
-- Add customer focus-of-interest modeling based on habits, community, tradition, geography, religion, demographic centricity, and similar preference signals.
-- Add topic-ranking rules so the backend can prioritize the most relevant topics for a customer before room assignment.
-- Add topic lifecycle management for creation, deprecation, merging, and versioned option updates.
-- Add topic taxonomies and aliases so equivalent topics can be grouped without losing discoverability.
-- Add topic sourcing rules for seeded topics, curated topics, community-generated topics, and AI-suggested topics.
-- Add topic confidence scoring so uncertain matches can be separated from strongly grounded matches.
-- Add topic diversity controls so the backend can avoid showing only one repeated interest path to every customer.
-- Add topic provenance tracking so each topic can show whether it came from the operator, the community, a rule, or an AI suggestion.
-- Add topic synonym, fallback, and merge rules so customer intent can survive vocabulary changes.
-- Add time-sensitive topic weighting so seasonal, civic, religious, and community cycles can change ordering when appropriate.
-- Add customer interest profiles that can retain both stable long-term preferences and short-lived situational interests.
-- Add profile decay rules so outdated interests can lose priority over time without being deleted immediately.
-- Add preference conflict handling so incompatible interest signals can be resolved by precedence rules instead of arbitrary choice.
-
-### 11.3 Authenticity and Legal Controls
-
-- Add filtering based on authenticity so content, room introductions, and topic matches can be constrained by trust signals.
-- Add legal-constraint filtering so room allocation and topic suggestions respect applicable compliance and safety rules.
-- Add common management controls for sensitive contexts such as age gating, consent checks, disclosure requirements, moderation review, jurisdiction awareness, record retention, escalation handling, and abuse prevention.
-- Add policy flags for prohibited, restricted, review-required, and allowed states so downstream routing can enforce the right constraints.
-- Add authenticity inputs such as verified identity hints, conversation consistency, repeated-pattern detection, and anomaly checks.
-- Add jurisdiction-aware legal routing so state, country, and platform policy can be checked before room introduction or topic exposure.
-- Add moderation queues for content that needs human review before it can be surfaced.
-- Add sensitive-category handling for health, finance, religion, politics, minors, intimacy, and other high-risk topic classes.
-- Add policy override handling so legal or moderation decisions can supersede topic personalization when needed.
-- Add rule-version tracking so authenticity and legal decisions can be reproduced later.
-- Add appeal, escalation, and review workflows for matches or topics that were blocked, restricted, or incorrectly flagged.
-- Add provenance checks for AI-generated room introductions so synthetic content can be labeled and constrained appropriately.
-- Add separate states for pending-review, approved, rejected, and superseded policy actions.
-- Add retention rules for legal evidence, review logs, and moderation records so compliance records remain auditable.
-- Add policy decision outputs that state why something was allowed, restricted, blocked, or escalated in plain backend terms.
-- Add exception routing for emergency review, legal hold, and temporary suspension cases.
-- Add audit-only modes so sensitive policy decisions can be logged without immediately surfacing them to the customer.
-- Add policy hierarchy rules so platform, jurisdiction, room, and topic policies resolve in a predictable order.
-- Add queue prioritization rules so higher-risk or time-sensitive cases can move ahead of routine matches.
-- Add multilingual policy routing so legal, authenticity, and moderation decisions can be understood across supported languages.
-- Add integration hooks for human review tools, moderation platforms, and compliance systems.
-
-### 11.4 Backend Measurement and Safety
-
-- Add explicit metrics for room assignment success, preference match quality, topic engagement, filter rejection rate, and escalation rate.
-- Add audit summaries that can explain why a customer was routed to a given room or topic.
-- Add persistence for assignment decisions, override actions, and fallback routing so the backend can explain its choices later.
-- Add operator review views for rejected matches, rule triggers, and repeated customer preference failures.
-- Add quality-of-service signals for room freshness, topic churn, and acceptance latency.
-- Add incident reporting for legal or authenticity rule violations so the backend can surface enforcement patterns.
-- Add route decision timelines so operators can see the sequence of matching, filtering, override, and final assignment.
-- Add policy-hit counters for the most common room, topic, authenticity, and legal blockers.
-- Add customer-visible and operator-visible explanations with different detail levels so transparency can be scoped safely.
-- Add failure classification for no-match, low-confidence, policy-blocked, capacity-blocked, and review-needed outcomes.
-- Add fallback destination rules such as safe room, general room, hold queue, or manual triage when no direct match exists.
-- Add compliance reporting views for blocked content, restricted routing, escalations, and policy overrides.
-- Add accessibility-aware routing checks so room and topic recommendations can account for language simplicity, readability, and assistive needs.
-- Add abuse-prevention counters for spam, harassment, repeated exploitation, and suspicious routing loops.
-- Add audit exports for internal review so the backend can hand off routing, moderation, and compliance evidence cleanly.
-- Add schema contracts for room matches, topic profiles, policy outcomes, escalation states, and review decisions.
-- Add persistence models for room assignment history, topic provenance, policy versions, and moderation evidence.
-- Add test coverage for matching logic, policy enforcement, queue behavior, and fallback routing.
-- Add observability signals for assignment latency, policy hit rates, moderation backlog, and manual override frequency.
-- Add incident response playbooks for legal blocks, false positives, abuse bursts, and external-tool outages.
-
-### 11.5 Governance and Operations Support
-
-- Add operator dashboards for room health, topic health, policy health, and moderation queue pressure.
-- Add escalation workflows for cases that need human review after repeated automated failures.
-- Add exception handling for false positives, policy disputes, and customer clarification requests.
-- Add lifecycle rules for room and topic retirement so deprecated items are removed in a controlled way.
-- Add reporting summaries that separate customer preference issues from policy enforcement issues.
-- Add operational tags for experimental, limited rollout, high-risk, and stable features so the backend can manage rollout safely.
-- Add queue aging rules so unresolved items can trigger alerts before they stagnate.
-- Add integration summaries for external systems so the backend can track which moderation or compliance tools were consulted.
-- Add policy exception summaries so repeated overrides or temporary allowances can be reviewed in aggregate.
-- Add service-dependency flags so downstream consumers know when a room, topic, or policy flow depends on an external tool.
-- Add rollout checklists for new room types, new topic families, and new policy rules.
-- Add maintenance windows and freeze states so high-risk changes can be paused safely.
-- Add data-retention schedules for routing logs, review logs, and policy evidence.
-- Add post-incident review outputs that capture what failed, what was mitigated, and what should change next.
-- Add caching rules for repeated topic lookups, room eligibility checks, and policy resolution results.
-- Add rate-limit and quota controls for room joins, topic refreshes, review requests, and repeated retries.
-- Add tenant or environment boundary rules if the backend ever needs to separate customer groups, test spaces, or partner spaces.
-- Add auth-policy tiers for public, authenticated, moderator, and admin operations so access boundaries are explicit.
-- Add consistency-recovery workflows for partial writes, failed assignments, and stale policy snapshots.
-
-### 11.6 Platform Hardening
-
-- Add cache invalidation rules so room, topic, and policy changes cannot serve stale decisions too long.
-- Add backpressure handling for bursts in room creation, topic refresh, and moderation requests.
-- Add graceful-degradation paths so the backend can fall back to safe defaults when policy or matching services are unavailable.
-- Add replay-safe mutation handling so retries do not duplicate assignments or overrides.
-- Add state-reconciliation jobs for mismatched room, policy, and review records after outages or partial failures.
-- Add lineage tracking for room matches, topic matches, and policy outcomes so every decision can be traced to its source inputs.
-- Add reproducibility snapshots for the matching and policy engines so past results can be reconstructed later.
-- Add tamper-evident audit chains for moderation, overrides, and retention evidence.
-- Add data-quality checks for missing, stale, duplicate, or contradictory routing inputs.
-- Add source-of-truth rules so the backend knows which record wins when room, topic, and policy data disagree.
-
-### 11.7 Collaboration and Human-in-the-Loop Support
-
-- Add shared review queues for moderators, support agents, and compliance staff.
-- Add assignment handoff rules so a case can move cleanly between automated handling and human review.
-- Add operator notes and annotations so reviewers can attach context to difficult room, topic, or policy decisions.
-- Add collaborative resolution states for cases that need multiple approvers or cross-functional signoff.
-- Add support-assist summaries that condense the customer history, current policy state, and recommended next action.
-- Add reminder and follow-up workflows so unresolved moderation or policy cases can be reopened later.
-- Add escalation ownership rules so every blocked or disputed case has a clear human owner.
-
-### 11.8 Supportability and Operator Assist
-
-- Add operator search and filtering over room decisions, topic history, policy outcomes, and review logs.
-- Add explanation prompts that help operators understand why the backend chose a given route.
-- Add canned response support for common policy, moderation, and routing questions.
-- Add bulk review tools for repeated matches, repeated failures, and repeated policy hits.
-- Add assisted-triage workflows for high-volume or ambiguous cases.
-- Add operator training signals that highlight new policy patterns, new topic patterns, and new failure modes.
-
-### 11.9 Release Safety and Developer Ergonomics
-
-- Add feature flags for room allocation, topic curation, policy enforcement, and operator-assist capabilities.
-- Add configuration presets for development, staging, and production behavior differences.
-- Add tuning knobs for confidence thresholds, queue limits, retry budgets, and fallback selection.
-- Add developer-facing docs for matching rules, policy rules, and review workflows.
-- Add local-debug pathways so engineers can reproduce room, topic, and policy decisions safely.
-- Add pre-release validation checklists for schema changes, data migrations, and policy rule updates.
-
-### 11.10 Interoperability and Ecosystem Coordination
-
-- Add integration contracts for analytics, moderation, notification, and compliance subsystems.
-- Add cross-service event shapes for assignment changes, policy changes, review outcomes, and incident triggers.
-- Add system-to-system handoff rules so external services can safely consume room, topic, and policy outputs.
-- Add connector health summaries so the backend can report when an external dependency is stale or unavailable.
-- Add ecosystem coordination rules for synchronized rule updates across linked services.
-- Add cross-system fallback policies so missing integrations do not block safe routing.
-- Add outbound webhook or event publishing policies for important room, topic, and policy transitions.
-
-### 11.11 Analytics Operations and Experimentation
-
-- Add experiment tracking for room allocation rules, topic ranking rules, and policy thresholds.
-- Add A/B or staged rollout support for matching and moderation changes.
-- Add analytics job scheduling for retention, routing quality, and policy effectiveness reports.
-- Add long-window trend summaries so short-term spikes can be separated from durable shifts.
-- Add cohort comparison tools for customers, rooms, topics, and policy outcomes.
-- Add experiment guardrails so unsafe or low-confidence variants can be rolled back quickly.
-
-### 11.12 Long-Horizon Governance
-
-- Add archive rules for old rooms, topics, policies, and review records that are no longer active but still need retention.
-- Add historical comparison views so operators can compare current behavior against prior periods.
-- Add governance checkpoints for periodic policy review, threshold review, and routing-rule review.
-- Add lifecycle summaries that show which capabilities are experimental, stable, deprecated, or retired.
-- Add stewardship assignments for ownership of long-lived room families, topic families, and policy families.
-
-### 11.13 Onboarding, Deprecation, and Continuity
-
-- Add onboarding flows for new rooms, new topics, and new policy families so they enter the backend with the right defaults.
-- Add deprecation paths that warn operators before rooms, topics, or policies are removed.
-- Add continuity rules so active customer journeys are preserved when a room or topic is retired.
-- Add migration guidance for replacing old topic families or policy families with newer ones.
-- Add continuity summaries that show where a customer came from and where they are likely to go next.
-- Add operator handoff notes for planned retirement, migration, or restructuring events.
-
-### 11.14 Privacy, Consent, and User Control
-
-- Add consent capture and revocation flows for room participation, topic personalization, and policy-sensitive processing.
-- Add privacy preferences that let customers limit how habits, demographic centricity, or sensitive categories are used.
-- Add data-access and data-export workflows for customer-visible records where required.
-- Add data-deletion or retention-limitation handling for records that are no longer allowed to persist.
-- Add notification preferences so customers can control review, escalation, or follow-up messages.
-- Add explainable privacy notices for room matching, topic suggestions, and moderation decisions.
-
-### 11.15 Incident Response and Support Contracts
-
-- Add incident classification for safety, privacy, policy, availability, and data-quality events.
-- Add support contracts that define response targets for moderation, escalation, and recovery work.
-- Add operator safety-net workflows for emergency shutdown, temporary freeze, and rollback assistance.
-- Add customer contact pathways for urgent policy disputes or privacy requests.
-- Add post-incident remediation tracking so each resolved incident can produce follow-up tasks.
-- Add shared severity labels so support, engineering, and compliance teams interpret incidents consistently.
-
-### 11.16 Observability and Support Instrumentation
-
-- Add dashboard-ready metrics for room health, topic health, policy health, privacy health, and incident health.
-- Add trace identifiers that connect customer-facing actions to backend decisions and operator interventions.
-- Add log redaction and privacy-preserving telemetry for sensitive routing and review events.
-- Add support instrumentation for common failure modes so operators can see patterns without deep manual digging.
-- Add alert routing policies so the right team is notified for safety, availability, compliance, or data-quality issues.
-- Add diagnostic snapshots that capture enough backend state to explain an outage or policy anomaly later.
+- Add system-only and customer-point ranking metrics as the basis for all backend control surfaces.
+- Add customer access controls that depend on system metrics or customer-point rankings instead of ad hoc rules.
+- Add customer interest scoring for topics, rooms, and communities using a simple monitored score space.
+- Add proximity scoring between users and between communities so routing can stay explainable.
+- Add AI-generated system metrics where agents need to contribute their own observable signals.
+- Add ranking-based controls for functionality access, topic selection, and routing decisions.
+- Add monitoring-friendly improvement and feedback workflow hooks for every new scoring surface.
+- Add room allocation, topic ranking, authenticity filtering, legal filtering, governance, observability, privacy, and incident-response todos only as they depend on the score-based control model.
 
 ## 12. Backend Guardrail Todos
 
-These guardrails describe what backend work must preserve. Keep them task-oriented and aligned with the current router and service boundaries.
-
-### 12.1 Keep room allocation explainable
-
-- Preserve evidence for each room assignment so the backend can show why a customer was matched to that room.
-- Avoid opaque scoring that hides preference, topic, authenticity, or legal reasons from the audit trail.
-- Keep room transitions and suppressions as first-class auditable events rather than implicit side effects.
-- Keep reassignment, expiration, and override outcomes visible in the same audit trail as initial placement.
-
-### 12.2 Keep topic modeling measurable
-
-- Make every topic suggestion traceable to concrete inputs such as habits, interest signals, geography, tradition, religion, demographic centricity, or prior interactions.
-- Prefer payloads that include match reasons, confidence, counts, and timestamps over narrative-only summaries.
-- Keep topic provenance and lifecycle state visible to the backend so merges, aliases, and fallbacks remain explainable.
-- Keep profile decay and preference conflict handling deterministic enough that repeated inputs produce consistent matches.
-
-### 12.3 Keep legal filtering enforceable
-
-- Preserve separate routing states for allowed, restricted, review-required, and blocked content so legal controls can be enforced consistently.
-- Keep compliance, safety, and moderation logic visible to the backend rather than burying it in presentation-only code.
-- Keep jurisdiction, age, consent, and sensitive-category checks explicit in backend services instead of inferring them from UI state.
-- Prefer deny-by-default behavior when legal or authenticity inputs are incomplete.
-- Keep policy changes versioned so a past decision can be reconstructed under the rules that were active at the time.
-- Keep appeals, reviews, and overrides linked to the original policy outcome.
-- Keep emergency review, legal hold, and temporary suspension paths distinct from routine moderation states.
-- Keep policy hierarchy deterministic when multiple scopes disagree.
-- Keep multilingual policy outputs normalized so translations do not change enforcement meaning.
-
-### 12.4 Keep service boundaries stable
-
-- Add room allocation, topic selection, authenticity filtering, and legal filtering in backend service helpers before exposing them through routers and schemas.
-- Keep state-changing paths auditable so assignments, overrides, and fallbacks remain reviewable.
-- Keep room matching, topic curation, and compliance enforcement separate enough that each can be tested in isolation.
-- Keep AI introduction, user preference modeling, and moderation workflow as separate service responsibilities even when they are chained in the user flow.
-- Keep policy outputs structured so other services can consume them without parsing narrative text.
-- Keep analytics, compliance reporting, accessibility checks, and abuse-prevention counters as backend services rather than UI-only concerns.
-- Keep review-system integrations and compliance-system integrations isolated behind service adapters so they can be swapped without rewriting routing logic.
-- Keep schema design, persistence design, and test design aligned so routing behavior remains predictable across layers.
-
-### 12.5 Keep governance visible
-
-- Keep operator dashboards, escalation workflows, and exception handling explicit in the backend rather than implied by logs alone.
-- Keep retirement, rollback, and rollout-state controls visible so feature changes can be managed safely.
-- Keep reporting outputs split between customer-experience signals and policy-enforcement signals so they do not get conflated.
-- Keep queue aging, external-tool dependency, and policy-exception summaries visible to operators.
-- Keep incident response, rollback, and maintenance-state outputs visible to operators and auditors.
-
-### 12.6 Keep implementation surface stable
-
-- Keep room, topic, policy, and review schemas versioned so older clients can continue to parse them.
-- Keep persistence migrations and test fixtures synchronized with any new matching or compliance rule.
-- Keep observability and incident-response outputs tied to the same routing lifecycle as the functional API.
-- Keep cache, quota, and boundary controls aligned with the same backend authorization model.
-- Keep lineage, reproducibility, and audit-chain outputs aligned with the same decision records used by the routers.
-
-### 12.7 Keep provenance verifiable
-
-- Keep every room, topic, and policy decision reproducible from stored inputs, configuration, and rule versions where possible.
-- Keep contradictory or incomplete source data visible instead of silently normalizing it away.
-- Keep audit evidence and lineage metadata exportable for internal review and external compliance requests.
-
-### 12.8 Keep human review coherent
-
-- Keep automated and human review decisions linked so neither side loses context.
-- Keep operator notes, signoffs, and follow-ups attached to the original case record.
-- Keep collaborative case resolution auditable and replayable for later review.
-
-### 12.9 Keep release safety predictable
-
-- Keep feature flags and configuration presets consistent with the same authorization and policy model used in production.
-- Keep debug and local-reproduction tools from bypassing audit logging or policy enforcement.
-- Keep tuning knobs bounded so operators cannot accidentally create unsafe or unstable matching behavior.
-
-### 12.10 Keep interoperability safe
-
-- Keep integration contracts versioned so downstream services can evolve without breaking old payloads.
-- Keep external event publishing idempotent and auditable.
-- Keep connector failures from suppressing the backend's own safety and moderation decisions.
-- Keep cross-service rule synchronization explicit so linked systems cannot drift silently.
-
-### 12.11 Keep analytics experimentation safe
-
-- Keep experiment variants bounded by safety, compliance, and rollback requirements.
-- Keep analytics windows, cohort comparisons, and trend reports reproducible from stored inputs.
-- Keep staged rollouts observable so changes in routing quality or policy impact are easy to detect.
-
-### 12.12 Keep continuity safe
-
-- Keep retirement and migration workflows from breaking in-flight customer journeys.
-- Keep deprecation warnings visible early enough for operators to react before disruption.
-- Keep continuity summaries aligned with the same room, topic, and policy lineage used elsewhere in the backend.
-
-### 12.13 Keep privacy and consent safe
-
-- Keep consent state explicit and reversible rather than inferred from engagement alone.
-- Keep privacy preferences and retention limits honored across room, topic, and moderation workflows.
-- Keep data-access, export, and deletion requests auditable and reproducible.
-
-### 12.14 Keep incident response coherent
-
-- Keep incident severity, ownership, and remediation visible across support, engineering, and compliance workflows.
-- Keep emergency freezes, shutdowns, and rollbacks available as auditable safety-net actions.
-- Keep post-incident follow-ups linked to the original event and its root cause.
-
-### 12.15 Keep observability trustworthy
-
-- Keep metrics, traces, and logs aligned so the same backend event can be verified across multiple views.
-- Keep redaction and privacy rules applied consistently to telemetry, exports, and support tooling.
-- Keep diagnostics useful without exposing unnecessary sensitive content.
-
-### 12.16 Keep failure recovery safe
-
-- Keep retries, reconciliation jobs, and fallback defaults idempotent where possible.
-- Keep partial-write recovery and stale-state cleanup visible to operators and auditors.
-- Keep degraded-mode behavior conservative so unsafe matches are not surfaced during outages.
-
-### 12.17 Keep revision structure stable
-
-- Extend these backend todo sections with new items rather than rewriting the document shape.
+- Keep every control decision grounded in either system-only metrics or customer-centric point rankings.
+- Keep AI-generated metrics visible as system metrics rather than hidden control inputs.
+- Keep functionality access, topic interest, user proximity, and community proximity explainable through the same simple score model.
+- Keep the score model simple enough for improvement and feedback workflows to inspect directly.
+- Keep backend decisions reproducible from stored metrics, ranking inputs, and rule versions.
+- Keep routing, moderation, and policy behavior auditable when metric sources disagree.
+- Keep access, placement, and prioritization logic separate from presentation logic.
+- Keep future room, topic, policy, privacy, and incident features aligned with the same score-based control boundary.

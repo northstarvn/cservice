@@ -5,8 +5,14 @@ from sqlalchemy.exc import IntegrityError
 from app import models, security, deps
 from app.i18n import locale_payload
 from app.schemas import schemas
+from app.services.policy_scoring import can_access_functionality
 
 router = APIRouter()
+
+
+def _current_control_posture(current_user: models.User) -> str:
+    policy_score = getattr(current_user, "policy_score", None)
+    return getattr(policy_score, "control_posture", "observed") if policy_score else "observed"
 
 @router.post("/register", response_model=schemas.UserOut)
 async def register(user_in: schemas.UserCreate, db: AsyncSession = Depends(deps.get_db)):
@@ -69,7 +75,44 @@ async def login(user_credentials: schemas.UserLogin, db: AsyncSession = Depends(
 
 @router.get("/me", response_model=schemas.UserOut)
 async def read_users_me(current_user: models.User = Depends(deps.get_current_user)):
+    control_posture = _current_control_posture(current_user)
+    if control_posture in {"high_trust", "customer_trusted"}:
+        current_user.full_name = current_user.full_name or current_user.username
     return current_user
+
+
+@router.get("/me/policy-score", response_model=schemas.CustomerPolicyScoreOut)
+async def read_users_policy_score(
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+):
+    return policy_score
+
+
+@router.get("/me/can-access", response_model=schemas.CustomerPolicyAccessOut)
+async def read_users_access_decision(
+    functionality: str,
+    required_tier: str = "standard",
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+):
+    control_posture = getattr(policy_score, "control_posture", "observed")
+    effective_required_tier = required_tier
+    if control_posture in {"constrained", "observed"} and required_tier == "standard":
+        effective_required_tier = "customer-premium"
+
+    allowed = can_access_functionality(policy_score, required_tier=effective_required_tier)
+    return {
+        "user_id": current_user.id,
+        "functionality": functionality,
+        "required_tier": required_tier,
+        "effective_required_tier": effective_required_tier,
+        "allowed": allowed,
+        "policy_tier": policy_score.policy_tier,
+        "control_posture": control_posture,
+        "access_score": policy_score.access_score,
+        "customer_score": policy_score.customer_score,
+        "system_score": policy_score.system_score,
+    }
 
 
 @router.post("/me/password", response_model=schemas.PasswordChangeResult)
@@ -93,4 +136,12 @@ async def change_password(
     current_user.hashed_password = security.get_password_hash(payload.new_password)
     await db.commit()
 
-    return {"message": "Password updated successfully"}
+    control_posture = _current_control_posture(current_user)
+    if control_posture in {"high_trust", "customer_trusted"}:
+        message = "Password updated successfully."
+    elif control_posture in {"constrained", "observed"}:
+        message = "Password updated successfully under controlled access posture."
+    else:
+        message = "Password updated successfully."
+
+    return {"message": message}

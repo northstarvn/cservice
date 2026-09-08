@@ -76,6 +76,7 @@ class BookingOut(BaseModel):
     status: BookingStatus
     created_at: datetime
     updated_at: datetime
+    control_posture: str = "observed"
 
 
 class BookingAssignmentState(str, Enum):
@@ -96,6 +97,7 @@ class BookingAssignmentDecision(BaseModel):
     source: str
     explanation: Optional[str] = None
     created_at: datetime
+    is_current: bool = True
 
 
 class BookingAssignmentReport(BaseModel):
@@ -103,7 +105,9 @@ class BookingAssignmentReport(BaseModel):
     booking_id: int
     user_id: int
     current_state: BookingAssignmentState
+    current_assignment_is_current: bool = True
     decisions: List[BookingAssignmentDecision]
+    control_posture: str = "observed"
 
 
 class BookingAssignmentCreate(BaseModel):
@@ -142,17 +146,20 @@ class BookingEventOut(BaseModel):
     to_status: Optional[str] = None
     note: str
     created_at: datetime
+    is_assignment_event: bool = False
 
 
 class BookingAuditSummary(BaseModel):
     booking_id: int
     user_id: int
     total_events: int
+    assignment_events: int = 0
     created_events: int
     status_updates: int
     latest_event_at: Optional[datetime] = None
     latest_event_note: Optional[str] = None
     recent_mutation_fields: List[str] = Field(default_factory=list)
+    control_posture: str = "observed"
 
 
 class BookingTransitionResult(BaseModel):
@@ -171,6 +178,24 @@ class BookingHistoryReport(BaseModel):
     current_status: BookingStatus
     event_count: int
     items: List[BookingEventOut]
+    control_posture: str = "observed"
+
+
+class BookingAssignmentHistoryReport(BaseModel):
+    booking_id: int
+    user_id: int
+    event_count: int
+    items: List[BookingEventOut]
+    control_posture: str = "observed"
+
+
+class BookingAssignmentHistorySummary(BaseModel):
+    booking_id: int
+    user_id: int
+    event_count: int
+    latest_event_at: Optional[datetime] = None
+    latest_event_type: Optional[str] = None
+    control_posture: str = "observed"
 
 
 class AnalyticsEventCount(BaseModel):
@@ -184,9 +209,11 @@ class AdminAnalyticsSummary(BaseModel):
     total_bookings: int
     bookings_by_status: dict[str, int]
     booking_events_total: int
+    assignment_events_total: int = 0
     booking_events_by_type: List[AnalyticsEventCount]
     recent_bookings: int
     recent_events: int
+    control_posture: str = "observed"
 
 
 class BookingEventFilterSummary(BaseModel):
@@ -202,14 +229,17 @@ class BookingEventFilterSummary(BaseModel):
     end_date: Optional[datetime] = None
     statuses: dict[str, int]
     events: List[BookingEventOut]
+    assignment_events: int = 0
 
 
 class BookingExportReport(BaseModel):
     generated_at: datetime
     total_bookings: int
     total_events: int
+    assignment_events_total: int = 0
     bookings: List[BookingOut]
     events: List[BookingEventOut]
+    control_posture: str = "observed"
 
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -220,6 +250,74 @@ class UserOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_admin: bool = False
+
+
+class CustomerPolicyScoreOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    system_score: float
+    customer_score: float
+    access_score: float
+    interest_score: float
+    closeness_score: float
+    community_closeness_score: float
+    policy_tier: str
+    control_posture: str
+    source: str
+    summary: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CustomerPolicyAccessOut(BaseModel):
+    user_id: int
+    functionality: str
+    required_tier: str
+    allowed: bool
+    policy_tier: str
+    control_posture: str
+    access_score: float
+    customer_score: float
+    system_score: float
+
+
+class TopicSelectionCreate(BaseModel):
+    topic: str
+    source: str = "chat"
+    rationale: str = ""
+    confidence: float = 0.0
+
+
+class TopicSelectionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    topic: str
+    source: str
+    rationale: str
+    confidence: float
+    is_current: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+
+class TopicSelectionReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    topic: str
+    source: str
+    rationale: str
+    confidence: float
+    is_current: bool = True
+
+
+class TopicSelectionHistoryReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    items: List[TopicSelectionOut]
 
 class PaginatedBookings(BaseModel):
     items: List[BookingOut]

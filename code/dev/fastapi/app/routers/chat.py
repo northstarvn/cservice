@@ -94,6 +94,11 @@ load_dotenv()
 
 router = APIRouter()
 
+
+def _current_control_posture(current_user: models.User) -> str:
+    policy_score = getattr(current_user, "policy_score", None)
+    return getattr(policy_score, "control_posture", "observed") if policy_score else "observed"
+
 HF_SENTIMENT_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
@@ -2589,6 +2594,12 @@ async def chat_message(
         lifecycle_stage = "engaged"
     await _save_retention_snapshot(db, current_user.id, 30, "chat_response", summary, lifecycle_stage)
     await _prune_retention_snapshots(db, current_user.id, 30, keep=20)
+
+    control_posture = _current_control_posture(current_user)
+    if control_posture in {"constrained", "observed"}:
+        metadata = dict(getattr(summary, "metadata", {}))
+        metadata["control_posture_note"] = "Controlled posture applied."
+        summary.metadata = metadata
 
     return ChatMessageOut(
         text=ai_response,

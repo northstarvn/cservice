@@ -7,6 +7,13 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
+from app.services.policy_scoring import can_access_functionality
+
+
+def normalize_assignment_state(value: Optional[object]) -> str:
+    if value is None:
+        return "suggested"
+    return getattr(value, "value", value)
 
 
 def build_booking_assignment_decisions(
@@ -26,7 +33,7 @@ def build_booking_assignment_decisions(
         "explanation",
         "Deterministic booking assignment placeholder based on the current booking and user context.",
     )
-    state = requested_assignment.get("state", "suggested")
+    state = normalize_assignment_state(requested_assignment.get("state"))
     return [
         {
             "booking_id": booking.id,
@@ -57,56 +64,124 @@ def build_booking_assignment_report(
     }
 
 
-def build_booking_assignment_report_from_record(assignment: models.BookingAssignment) -> dict:
-    created_at = assignment.created_at or datetime.now(timezone.utc)
-    decision = {
+def build_booking_assignment_report_from_record(
+    assignment: models.BookingAssignment,
+) -> dict:
+    return {
+        "generated_at": assignment.created_at,
         "booking_id": assignment.booking_id,
         "user_id": assignment.user_id,
+        "current_state": normalize_assignment_state(assignment.state),
+        "current_assignment_is_current": bool(getattr(assignment, "is_current", True)),
+        "decisions": [
+            {
+                "booking_id": assignment.booking_id,
+                "user_id": assignment.user_id,
+                "room_id": assignment.room_id,
+                "match_reason": assignment.match_reason,
+                "state": normalize_assignment_state(assignment.state),
+                "source": assignment.source,
+                "explanation": assignment.explanation,
+                "created_at": assignment.created_at,
+                "is_current": bool(getattr(assignment, "is_current", True)),
+            }
+        ],
+    }
+
+
+def can_user_access_booking_functionality(policy_score: models.CustomerPolicyScore, functionality: str) -> bool:
+    if functionality in {"create", "update", "delete", "history"}:
+        return can_access_functionality(policy_score, required_tier="standard")
+    if functionality in {"assign", "recommend", "match"}:
+        return can_access_functionality(policy_score, required_tier="customer-premium")
+    return can_access_functionality(policy_score, required_tier="restricted")
+
+
+async def create_booking_event(
+    db: AsyncSession,
+    booking: models.Booking,
+    current_user: models.User,
+    event_type: str,
+    note: str = "",
+    from_status=None,
+    to_status=None,
+):
+    note_value = note
+    if isinstance(note, dict):
+        note_value = json.dumps(note, default=str)
+    event = models.BookingEvent(
+        booking_id=booking.id,
+        user_id=current_user.id,
+        event_type=event_type,
+        from_status=status_value(from_status),
+        to_status=status_value(to_status),
+        note=note_value,
+    )
+    db.add(event)
+    return event
+
+
+async def create_booking_assignment_event(
+    db: AsyncSession,
+    booking: models.Booking,
+    current_user: models.User,
+    assignment: models.BookingAssignment,
+    event_type: str,
+):
+    note = {
+        "assignment_id": assignment.id,
         "room_id": assignment.room_id,
-        "match_reason": assignment.match_reason,
-        "state": assignment.state,
+        "state": normalize_assignment_state(assignment.state),
         "source": assignment.source,
         "explanation": assignment.explanation,
-        "created_at": created_at,
+        "is_current": assignment.is_current,
     }
-    return {
-        "generated_at": created_at,
-        "booking_id": assignment.booking_id,
-        "user_id": assignment.user_id,
-        "current_state": assignment.state,
-        "decisions": [decision],
-    }
+    return await create_booking_event(
+        db,
+        booking,
+        current_user,
+        event_type=event_type,
+        note=note,
+        from_status=booking.status,
+        to_status=booking.status,
+    )
 
 
-async def persist_booking_assignment(
+async def create_booking_assignment(
     db: AsyncSession,
     booking: models.Booking,
     current_user: models.User,
     requested_assignment: Optional[dict] = None,
 ) -> models.BookingAssignment:
-    decision = build_booking_assignment_decisions(
-        booking,
-        current_user,
-        requested_assignment=requested_assignment,
-    )[0]
+    requested_assignment = requested_assignment or {}
     assignment = models.BookingAssignment(
-        booking_id=decision["booking_id"],
-        user_id=decision["user_id"],
-        room_id=decision["room_id"],
-        match_reason=decision["match_reason"],
-        state=decision["state"],
-        source=decision["source"],
-        explanation=decision["explanation"],
+        booking_id=booking.id,
+        user_id=current_user.id,
+        room_id=requested_assignment.get("room_id", booking.id),
+        match_reason=requested_assignment.get("match_reason", f"booking-{booking.id}-assignment"),
+        state=normalize_assignment_state(requested_assignment.get("state")),
+        source=requested_assignment.get("source", "booking-service"),
+        explanation=requested_assignment.get("explanation", "Generated booking assignment."),
+        is_current=True,
     )
     db.add(assignment)
     await db.commit()
     await db.refresh(assignment)
+    await create_booking_assignment_event(
+        db,
+        booking,
+        current_user,
+        assignment,
+        event_type="assignment_created",
+    )
+    await db.commit()
     return assignment
 
 
 async def update_booking_assignment(
     db: AsyncSession,
     assignment: models.BookingAssignment,
+    current_user: models.User,
     requested_assignment: Optional[dict] = None,
 ) -> models.BookingAssignment:
     requested_assignment = requested_assignment or {}
@@ -115,16 +190,50 @@ async def update_booking_assignment(
     if "match_reason" in requested_assignment and requested_assignment["match_reason"] is not None:
         assignment.match_reason = requested_assignment["match_reason"]
     if "state" in requested_assignment and requested_assignment["state"] is not None:
-        assignment.state = requested_assignment["state"]
+        assignment.state = normalize_assignment_state(requested_assignment["state"])
     if "source" in requested_assignment and requested_assignment["source"] is not None:
         assignment.source = requested_assignment["source"]
     if "explanation" in requested_assignment and requested_assignment["explanation"] is not None:
         assignment.explanation = requested_assignment["explanation"]
+    assignment.is_current = True
     assignment.updated_at = datetime.now(timezone.utc)
     db.add(assignment)
     await db.commit()
     await db.refresh(assignment)
+    await create_booking_assignment_event(
+        db,
+        assignment.booking,
+        current_user,
+        assignment,
+        event_type="assignment_updated",
+    )
+    await db.commit()
     return assignment
+
+
+async def get_latest_booking_assignment(
+    db: AsyncSession,
+    booking_id: int,
+    user_id: int,
+) -> Optional[models.BookingAssignment]:
+    result = await db.execute(
+        select(models.BookingAssignment)
+        .where(models.BookingAssignment.booking_id == booking_id)
+        .where(models.BookingAssignment.user_id == user_id)
+        .where(models.BookingAssignment.is_current.is_(True))
+        .order_by(models.BookingAssignment.created_at.desc(), models.BookingAssignment.id.desc())
+    )
+    assignment = result.scalars().first()
+    if assignment:
+        return assignment
+
+    fallback_result = await db.execute(
+        select(models.BookingAssignment)
+        .where(models.BookingAssignment.booking_id == booking_id)
+        .where(models.BookingAssignment.user_id == user_id)
+        .order_by(models.BookingAssignment.created_at.desc(), models.BookingAssignment.id.desc())
+    )
+    return fallback_result.scalars().first()
 
 
 def status_value(value):
@@ -179,66 +288,29 @@ async def get_owned_booking(
     return booking
 
 
-def ensure_booking_transition_allowed(booking: models.Booking, target_status: models.BookingStatus) -> None:
-    current_status = status_value(booking.status)
-    target_value = status_value(target_status)
-
-    if current_status == target_value:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Booking is already {target_value}",
-        )
-
-    if current_status == models.BookingStatus.cancelled.value and target_value == models.BookingStatus.confirmed.value:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cancelled bookings cannot be confirmed",
-        )
-
-    if current_status == models.BookingStatus.completed.value and target_value in {
-        models.BookingStatus.pending.value,
-        models.BookingStatus.cancelled.value,
-    }:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Completed bookings cannot be moved back to an earlier state",
-        )
-
-
-async def create_booking_event(
-    db: AsyncSession,
-    booking: models.Booking,
-    current_user: models.User,
-    event_type: str,
-    note: str = "",
-    from_status=None,
-    to_status=None,
-):
-    note_value = note
-    if isinstance(note, dict):
-        note_value = json.dumps(note, default=str)
-    event = models.BookingEvent(
-        booking_id=booking.id,
-        user_id=current_user.id,
-        event_type=event_type,
-        from_status=status_value(from_status),
-        to_status=status_value(to_status),
-        note=note_value,
-    )
-    db.add(event)
-    return event
+async def ensure_booking_transition_allowed(booking: models.Booking, target_status) -> None:
+    if status_value(booking.status) == status_value(target_status):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Booking already in target status")
+    if status_value(booking.status) == "cancelled" and status_value(target_status) == "confirmed":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cancelled bookings cannot be confirmed")
 
 
 async def transition_booking(
     db: AsyncSession,
     booking: models.Booking,
     current_user: models.User,
-    target_status: models.BookingStatus,
+    target_status,
     event_type: str,
-    note: str,
-):
-    ensure_booking_transition_allowed(booking, target_status)
-    previous_status = booking.status
+    note: str = "",
+) -> dict:
+    await ensure_booking_transition_allowed(booking, target_status)
+    control_posture = getattr(getattr(current_user, "policy_score", None), "control_posture", "observed")
+    if control_posture in {"high_trust", "customer_trusted"}:
+        note = note or "Booking transition completed under elevated posture"
+    elif control_posture in {"constrained", "observed"}:
+        note = note or "Booking transition completed under controlled posture"
+    elif not note:
+        note = "Booking transition completed"
     booking.status = target_status
     touch_booking(booking)
     event = await create_booking_event(
@@ -247,9 +319,10 @@ async def transition_booking(
         current_user,
         event_type=event_type,
         note=note,
-        from_status=previous_status,
-        to_status=booking.status,
+        from_status=target_status,
+        to_status=target_status,
     )
+    db.add(booking)
     await db.commit()
     await db.refresh(booking)
     await db.refresh(event)
@@ -261,23 +334,25 @@ async def record_booking_mutation_event(
     booking: models.Booking,
     current_user: models.User,
     event_type: str,
-    previous_booking: models.Booking,
-    update_data: dict,
-    note: str,
+    previous_booking: Optional[models.Booking] = None,
+    update_data: Optional[dict] = None,
+    note: str = "",
 ) -> models.BookingEvent:
-    diff = build_booking_diff(previous_booking, update_data)
+    note_payload = {
+        "message": note,
+        "booking_id": booking.id,
+        "user_id": current_user.id,
+        "update_fields": sorted((update_data or {}).keys()),
+    }
+    if previous_booking is not None:
+        note_payload["previous_booking_id"] = previous_booking.id
+        note_payload["previous_status"] = status_value(previous_booking.status)
     return await create_booking_event(
         db,
         booking,
         current_user,
         event_type=event_type,
-        note={
-            "message": note,
-            "diff": diff,
-            "actor_id": current_user.id,
-            "booking_id": booking.id,
-            "mutated_fields": sorted(diff.keys()),
-        },
-        from_status=previous_booking.status,
+        note=note_payload,
+        from_status=booking.status,
         to_status=booking.status,
     )
