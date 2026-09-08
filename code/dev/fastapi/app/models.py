@@ -72,9 +72,13 @@ class RecoveryOutcome(Base, TimestampMixin):
     primary_risks_json = Column(Text, nullable=False, default="[]")
     recovery_signals_json = Column(Text, nullable=False, default="[]")
     follow_up_json = Column(Text, nullable=False, default="{}")
+    escalation_path_json = Column(Text, nullable=False, default="[]")
+    handoff_outcome_json = Column(Text, nullable=False, default="{}")
     action_plan = Column(Text, nullable=False, default="")
     acknowledged = Column(Boolean, nullable=False, default=False)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    follow_up_completed = Column(Boolean, nullable=False, default=False)
+    follow_up_completed_at = Column(DateTime(timezone=True), nullable=True)
     source = Column(String(50), nullable=False, default="chat")
 
 
@@ -88,6 +92,22 @@ class BookingEvent(Base, TimestampMixin):
     from_status = Column(String(20), nullable=True)
     to_status = Column(String(20), nullable=True)
     note = Column(Text, nullable=False, default="")
+
+
+class BookingAssignment(Base, TimestampMixin):
+    __tablename__ = "booking_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    room_id = Column(Integer, nullable=False, index=True)
+    match_reason = Column(Text, nullable=False)
+    state = Column(String(20), nullable=False, default="suggested")
+    source = Column(String(50), nullable=False, default="booking-service")
+    explanation = Column(Text, nullable=False, default="")
+
+    booking = relationship("Booking", backref="assignments")
+    assigned_user = relationship("User")
 
 class BookingStatus(enum.Enum):
     pending = "pending"

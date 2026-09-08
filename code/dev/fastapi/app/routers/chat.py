@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func, desc, case
+from sqlalchemy import func, desc
 from app import deps, models
 from app.schemas.chat import (
     ChatMessageIn,
@@ -74,10 +74,6 @@ from app.schemas.chat import (
     RetentionSnapshotOperationsGoNoGo,
     RetentionSnapshotOperationsReport,
     LoyaltyRecoveryReport,
-    DissatisfactionRecoveryReport,
-    RecoveryOutcomeReport,
-    RecoveryOutcomeAggregateItem,
-    RecoveryOutcomeAggregateReport,
     MonetizationCohortReport,
     WeightedSystemMonitoringReport,
     WeightedFocusItem,
@@ -782,67 +778,17 @@ async def _load_signal_trends(db: AsyncSession, user_id: int, window_days: int) 
 
 async def _store_interaction_signals(db: AsyncSession, user_id: int, pack: SystemImprovementPack) -> None:
     for item in pack.items:
-        summary = pack.summary
-        signal_payload = {
-            "area": item.area,
-            "priority": item.priority,
-            "impact": item.impact,
-            "rationale": item.rationale,
-            "recommendation": item.recommendation,
-            "owner_hint": item.owner_hint,
-            "summary": {
-                "loyalty_score": summary.loyalty_score,
-                "monetization_readiness": summary.monetization_readiness,
-                "churn_risk": summary.churn_risk,
-                "repeated_messages": summary.metadata.get("repeated_messages", 0),
-                "booking_states": dict(summary.metadata.get("booking_states", {})),
-                "signal_strength": summary.metadata.get("signal_strength", 0.0),
-            },
-        }
         signal = models.InteractionSignal(
             user_id=user_id,
             source="chat",
             area=item.area,
             priority=item.priority,
             score=float(next((ins.score for ins in pack.summary.insights if ins.area == item.area), 0.0)),
-            evidence=json.dumps(signal_payload),
+            evidence=json.dumps(item.rationale),
             recommendation=item.recommendation,
         )
         db.add(signal)
     await db.commit()
-
-
-async def _store_recovery_outcome(db: AsyncSession, user_id: int, recovery: DissatisfactionRecoveryReport) -> models.RecoveryOutcome:
-    complaint_recurrence_count = sum(1 for signal in recovery.recovery_signals if signal.area in {"follow_up", "retention", "support", "handoff"})
-    outcome = models.RecoveryOutcome(
-        user_id=user_id,
-        recovery_readiness=recovery.recovery_readiness,
-        dissatisfaction_score=recovery.dissatisfaction_score,
-        primary_risks_json=json.dumps(recovery.primary_risks),
-        recovery_signals_json=json.dumps([
-            {
-                "area": signal.area,
-                "intensity": signal.intensity,
-                "evidence": signal.evidence,
-                "evidence_summary": signal.evidence_summary,
-                "recommended_action": signal.recommended_action,
-            }
-            for signal in recovery.recovery_signals
-        ]),
-        follow_up_json=json.dumps({
-            "complaint_recurrence_count": complaint_recurrence_count,
-            "follow_up_count": len(recovery.recovery_signals),
-            "acknowledged": recovery.recovery_readiness in {"low", "moderate"},
-        }),
-        action_plan=recovery.action_plan,
-        acknowledged=recovery.recovery_readiness in {"low", "moderate"},
-        acknowledged_at=datetime.now(timezone.utc) if recovery.recovery_readiness in {"low", "moderate"} else None,
-        source="chat_recovery",
-    )
-    db.add(outcome)
-    await db.commit()
-    await db.refresh(outcome)
-    return outcome
 
 
 def _classify_loyalty_cohort(loyalty_score: float, signal_score: float) -> tuple[str, str, str]:
@@ -2691,117 +2637,6 @@ async def get_chat_insights(
 
     latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
     return _build_summary(current_user.id, chat_rows, bookings, latest_sentiment)
-
-
-@router.get("/chat/recovery", response_model=RecoveryOutcomeReport)
-async def get_chat_recovery(
-    window_days: int = Query(default=30, ge=1, le=365),
-    db: AsyncSession = Depends(deps.get_db),
-    current_user: models.User = Depends(deps.get_current_user),
-):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    chat_query = (
-        select(models.ChatHistory)
-        .where(models.ChatHistory.user_id == current_user.id)
-        .where(models.ChatHistory.timestamp >= cutoff)
-        .order_by(desc(models.ChatHistory.timestamp))
-    )
-    booking_query = (
-        select(models.Booking)
-        .where(models.Booking.user_id == current_user.id)
-        .where(models.Booking.created_at >= cutoff)
-        .order_by(desc(models.Booking.created_at))
-    )
-
-    chat_result = await db.execute(chat_query)
-    booking_result = await db.execute(booking_query)
-    chat_rows = chat_result.scalars().all()
-    bookings = booking_result.scalars().all()
-
-    latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
-    summary = _build_summary(current_user.id, chat_rows, bookings, latest_sentiment)
-    dissatisfaction, retention_recommendation, action_plan, churn_risk = build_loyalty_recovery_report(summary, latest_sentiment)
-    outcome = await _store_recovery_outcome(db, current_user.id, dissatisfaction)
-
-    attempts_result = await db.execute(
-        select(func.count(models.RecoveryOutcome.id)).where(models.RecoveryOutcome.user_id == current_user.id)
-    )
-    acknowledged_result = await db.execute(
-        select(func.count(models.RecoveryOutcome.id)).where(
-            models.RecoveryOutcome.user_id == current_user.id,
-            models.RecoveryOutcome.acknowledged.is_(True),
-        )
-    )
-    recovery_attempts = int(attempts_result.scalar() or 0)
-    recovery_acknowledged = int(acknowledged_result.scalar() or 0) > 0
-    complaint_recurrence_count = sum(1 for signal in dissatisfaction.recovery_signals if signal.area in {"follow_up", "retention", "support", "handoff"})
-    time_to_acknowledge_minutes = None
-    if outcome.acknowledged and outcome.acknowledged_at:
-        time_to_acknowledge_minutes = round(max((outcome.acknowledged_at - outcome.created_at).total_seconds() / 60.0, 0.0), 2)
-
-    return RecoveryOutcomeReport(
-        generated_at=outcome.created_at,
-        window_days=window_days,
-        summary=summary,
-        dissatisfaction=dissatisfaction,
-        retention_recommendation=retention_recommendation,
-        action_plan=action_plan,
-        recovery_outcome={
-            "id": outcome.id,
-            "recovery_readiness": outcome.recovery_readiness,
-            "dissatisfaction_score": outcome.dissatisfaction_score,
-            "acknowledged": outcome.acknowledged,
-            "acknowledged_at": outcome.acknowledged_at,
-            "source": outcome.source,
-        },
-        churn_risk=churn_risk,
-        recovery_attempts=recovery_attempts,
-        recovery_acknowledged=recovery_acknowledged,
-        complaint_recurrence_count=complaint_recurrence_count,
-        time_to_acknowledge_minutes=time_to_acknowledge_minutes,
-    )
-
-
-@router.get("/chat/admin/recovery-outcomes", response_model=RecoveryOutcomeAggregateReport)
-async def get_recovery_outcome_aggregate(
-    window_days: int = Query(default=30, ge=1, le=365),
-    db: AsyncSession = Depends(deps.get_db),
-    current_user: models.User = Depends(deps.get_current_admin_user),
-):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    query = (
-        select(
-            models.RecoveryOutcome.recovery_readiness,
-            func.count(models.RecoveryOutcome.id),
-            func.sum(case((models.RecoveryOutcome.acknowledged.is_(True), 1), else_=0)),
-        )
-        .where(models.RecoveryOutcome.created_at >= cutoff)
-        .group_by(models.RecoveryOutcome.recovery_readiness)
-    )
-    result = await db.execute(query)
-    rows = result.all()
-    total_complaint_recurrences = sum(
-        int(row[0] == "moderate") + int(row[0] == "high")
-        for row in rows
-    )
-    items = [
-        RecoveryOutcomeAggregateItem(
-            recovery_readiness=str(recovery_readiness),
-            attempts=int(attempts or 0),
-            acknowledged=int(acknowledged or 0),
-        )
-        for recovery_readiness, attempts, acknowledged in rows
-    ]
-    total_attempts = sum(item.attempts for item in items)
-    total_acknowledged = sum(item.acknowledged for item in items)
-    return RecoveryOutcomeAggregateReport(
-        generated_at=datetime.now(timezone.utc),
-        window_days=window_days,
-        total_attempts=total_attempts,
-        total_acknowledged=total_acknowledged,
-        total_complaint_recurrences=total_complaint_recurrences,
-        items=items,
-    )
 
 
 @router.get("/chat/signals")

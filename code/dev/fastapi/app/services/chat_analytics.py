@@ -264,27 +264,6 @@ def _evidence_summary(evidence: list[str]) -> str:
     return f"{evidence[0]} (+{len(evidence) - 1} more)"
 
 
-def _signal_payload(item: InteractionInsight, summary: InteractionSummary) -> dict[str, object]:
-    return {
-        "area": item.area,
-        "priority": item.priority,
-        "score": item.score,
-        "source": item.source,
-        "evidence": item.evidence,
-        "evidence_summary": item.evidence_summary,
-        "recommendation": item.recommendation,
-        "next_step": item.next_step,
-        "summary": {
-            "loyalty_score": summary.loyalty_score,
-            "monetization_readiness": summary.monetization_readiness,
-            "churn_risk": summary.churn_risk,
-            "repeat_messages": summary.metadata.get("repeated_messages", 0),
-            "booking_states": dict(summary.metadata.get("booking_states", {})),
-            "signal_strength": summary.metadata.get("signal_strength", 0.0),
-        },
-    }
-
-
 def build_interaction_insights(messages: list[str], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> list[InteractionInsight]:
     areas = PREDEFINED_POLICY_AREAS
     ranking = []
@@ -496,7 +475,6 @@ def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment
                     area="sentiment",
                     intensity=round(min(item.score * 2.5, 5.0), 2),
                     evidence=item.evidence[:3],
-                    evidence_summary=_evidence_summary(item.evidence[:3]),
                     recommended_action="Acknowledge the issue and route to fast follow-up.",
                 )
             )
@@ -513,7 +491,6 @@ def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment
                 area=item.area,
                 intensity=intensity,
                 evidence=item.evidence[:3],
-                evidence_summary=_evidence_summary(item.evidence[:3]),
                 recommended_action=item.next_step,
             )
         )
@@ -522,11 +499,6 @@ def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment
         dissatisfaction_score += 4.0
         if "negative sentiment" not in primary_risks:
             primary_risks.insert(0, "negative sentiment")
-
-    if summary.metadata.get("repeated_messages", 0):
-        dissatisfaction_score += min(float(summary.metadata.get("repeated_messages", 0)) * 1.2, 6.0)
-    if int(summary.metadata.get("booking_states", {}).get("pending", 0)) or int(summary.metadata.get("booking_states", {}).get("cancelled", 0)):
-        dissatisfaction_score += 2.0
 
     dissatisfaction_score = round(min(dissatisfaction_score, 100.0), 2)
     if dissatisfaction_score >= 18:
@@ -586,22 +558,6 @@ def build_loyalty_recovery_report(summary: InteractionSummary, sentiment: Option
     )
 
     return dissatisfaction, recommendation_model, action_plan_model, retention_risk
-
-
-def build_recovery_signal_payloads(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> list[dict[str, object]]:
-    recovery_report = build_dissatisfaction_recovery_report(summary, sentiment)
-    payloads: list[dict[str, object]] = []
-    for signal in recovery_report.recovery_signals:
-        payloads.append(
-            {
-                "area": signal.area,
-                "intensity": signal.intensity,
-                "evidence": signal.evidence,
-                "evidence_summary": signal.evidence_summary,
-                "recommended_action": signal.recommended_action,
-            }
-        )
-    return payloads
 
 
 async def build_churn_prediction(db: AsyncSession, user_id: int, window_days: int) -> ChurnPrediction:
@@ -914,38 +870,27 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
     total = len(snapshots)
     stale = sum(1 for snapshot in snapshots if snapshot.created_at < stale_cutoff)
     recent = total - stale
-    stale_ratio = round(stale / max(total, 1), 2)
 
     items = [
         RetentionSnapshotOperationItem(
             label="freshness",
             status="watch" if stale else "go",
             count=recent,
-            details=[
-                f"{recent} recent snapshots within the active window",
-                f"{stale} snapshots are stale relative to the {stale_after_days}-day freshness threshold",
-                f"stale ratio is {stale_ratio:.2f} across {total} tracked snapshots",
-            ],
+            details=[f"{recent} recent snapshots within the active window", f"{stale} snapshots are stale relative to the freshness threshold"],
             recommended_owner="data operations",
         ),
         RetentionSnapshotOperationItem(
             label="cleanup",
             status="hold" if stale < total else "escalate",
             count=stale,
-            details=[
-                f"Prune stale snapshots only after validating {recent} recent snapshots remain covered",
-                f"cleanup scope is {stale} stale snapshots out of {total} total",
-            ],
+            details=["Prune stale snapshots only after validating recent retention coverage"],
             recommended_owner="backend engineering",
         ),
         RetentionSnapshotOperationItem(
             label="readiness",
             status="go" if total and stale / max(total, 1) < 0.25 else "watch",
             count=total,
-            details=[
-                f"Snapshot portfolio is ready when fresh coverage dominates stale records",
-                f"readiness uses a {stale_after_days}-day freshness threshold over the {window_days}-day window",
-            ],
+            details=["Snapshot portfolio is ready when fresh coverage dominates stale records"],
             recommended_owner="product operations",
         ),
     ]
@@ -953,11 +898,6 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
     return RetentionSnapshotOperationsReport(
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
-        stale_after_days=stale_after_days,
-        total_snapshots=total,
-        stale_snapshots=stale,
-        recent_snapshots=recent,
-        stale_ratio=stale_ratio,
         items=items,
     )
 

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator, ConfigDict, EmailStr
+from pydantic import BaseModel, field_validator, ConfigDict, EmailStr, Field
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -78,6 +78,59 @@ class BookingOut(BaseModel):
     updated_at: datetime
 
 
+class BookingAssignmentState(str, Enum):
+    suggested = "suggested"
+    pending = "pending"
+    accepted = "accepted"
+    rejected = "rejected"
+    expired = "expired"
+    reassigned = "reassigned"
+
+
+class BookingAssignmentDecision(BaseModel):
+    booking_id: int
+    user_id: int
+    room_id: int
+    match_reason: str
+    state: BookingAssignmentState
+    source: str
+    explanation: Optional[str] = None
+    created_at: datetime
+
+
+class BookingAssignmentReport(BaseModel):
+    generated_at: datetime
+    booking_id: int
+    user_id: int
+    current_state: BookingAssignmentState
+    decisions: List[BookingAssignmentDecision]
+
+
+class BookingAssignmentCreate(BaseModel):
+    booking_id: int
+    room_id: int
+    match_reason: str
+    state: BookingAssignmentState = BookingAssignmentState.suggested
+    source: str = "booking-service"
+    explanation: Optional[str] = None
+
+
+class BookingAssignmentRequest(BaseModel):
+    room_id: Optional[int] = None
+    match_reason: Optional[str] = None
+    state: BookingAssignmentState = BookingAssignmentState.suggested
+    source: str = "booking-service"
+    explanation: Optional[str] = None
+
+
+class BookingAssignmentUpdate(BaseModel):
+    room_id: Optional[int] = None
+    match_reason: Optional[str] = None
+    state: Optional[BookingAssignmentState] = None
+    source: Optional[str] = None
+    explanation: Optional[str] = None
+
+
 class BookingEventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -98,6 +151,8 @@ class BookingAuditSummary(BaseModel):
     created_events: int
     status_updates: int
     latest_event_at: Optional[datetime] = None
+    latest_event_note: Optional[str] = None
+    recent_mutation_fields: List[str] = Field(default_factory=list)
 
 
 class BookingTransitionResult(BaseModel):

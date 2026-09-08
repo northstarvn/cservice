@@ -9,10 +9,14 @@ from app import models, deps
 from app.schemas import schemas
 from app.services.bookings import (
     apply_booking_updates,
+    build_booking_diff,
+    build_booking_assignment_report,
+    build_booking_assignment_report_from_record,
     create_booking_event,
     ensure_booking_transition_allowed,
     get_owned_booking,
     touch_booking,
+    record_booking_mutation_event,
     transition_booking,
 )
 
@@ -124,22 +128,32 @@ async def update_booking(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
 
         update_data = booking_update.model_dump(exclude_unset=True, exclude_none=True)
+        previous_booking = models.Booking(
+            id=booking.id,
+            user_id=booking.user_id,
+            service_type=booking.service_type,
+            title=booking.title,
+            details=booking.details,
+            scheduled_date=booking.scheduled_date,
+            status=booking.status,
+        )
         old_status = booking.status
         history_fields = {"title", "details", "scheduled_date", "service_type"}
         history_changed = any(field in update_data and getattr(booking, field) != update_data[field] for field in history_fields)
+        booking_diff = build_booking_diff(previous_booking, update_data)
         
         apply_booking_updates(booking, update_data)
         touch_booking(booking)
 
         if history_changed:
-            await create_booking_event(
+            await record_booking_mutation_event(
                 db,
                 booking,
                 current_user,
                 event_type="updated",
+                previous_booking=previous_booking,
+                update_data=update_data,
                 note="Booking details updated",
-                from_status=old_status,
-                to_status=booking.status,
             )
 
         if "status" in update_data and booking.status != old_status:
@@ -196,7 +210,17 @@ async def delete_booking(
         booking,
         current_user,
         event_type="deleted",
-        note="Booking deleted",
+        note={
+            "message": "Booking deleted",
+            "diff": {
+                "status": {
+                    "from": booking.status,
+                    "to": booking.status,
+                }
+            },
+            "actor_id": current_user.id,
+            "booking_id": booking.id,
+        },
         from_status=booking.status,
         to_status=booking.status,
     )
@@ -237,6 +261,96 @@ async def get_booking_history(
     )
 
 
+@router.get("/{booking_id}/assignment", response_model=schemas.BookingAssignmentReport)
+async def get_booking_assignment_report(
+    booking_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignment_result = await db.execute(
+        select(models.BookingAssignment)
+        .where(models.BookingAssignment.booking_id == booking.id)
+        .where(models.BookingAssignment.user_id == current_user.id)
+        .order_by(desc(models.BookingAssignment.created_at))
+    )
+    assignment = assignment_result.scalars().first()
+    report = (
+        build_booking_assignment_report_from_record(assignment)
+        if assignment
+        else build_booking_assignment_report(booking, current_user)
+    )
+    return schemas.BookingAssignmentReport(
+        generated_at=report["generated_at"],
+        booking_id=report["booking_id"],
+        user_id=report["user_id"],
+        current_state=report["current_state"],
+        decisions=[schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]],
+    )
+
+
+@router.post("/{booking_id}/assignment", response_model=schemas.BookingAssignmentReport)
+async def create_booking_assignment_report(
+    booking_id: int,
+    assignment_request: schemas.BookingAssignmentRequest,
+    current_user: models.User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignment = await persist_booking_assignment(
+        db,
+        booking,
+        current_user,
+        requested_assignment=assignment_request.model_dump(exclude_none=True),
+    )
+    report = build_booking_assignment_report_from_record(assignment)
+    return schemas.BookingAssignmentReport(
+        generated_at=report["generated_at"],
+        booking_id=report["booking_id"],
+        user_id=report["user_id"],
+        current_state=report["current_state"],
+        decisions=[schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]],
+    )
+
+
+@router.patch("/{booking_id}/assignment", response_model=schemas.BookingAssignmentReport)
+async def update_booking_assignment_report(
+    booking_id: int,
+    assignment_update: schemas.BookingAssignmentUpdate,
+    current_user: models.User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignment_result = await db.execute(
+        select(models.BookingAssignment)
+        .where(models.BookingAssignment.booking_id == booking.id)
+        .where(models.BookingAssignment.user_id == current_user.id)
+        .order_by(desc(models.BookingAssignment.created_at))
+    )
+    assignment = assignment_result.scalars().first()
+    requested_assignment = assignment_update.model_dump(exclude_none=True)
+
+    if assignment:
+        updated_assignment = await update_booking_assignment(db, assignment, requested_assignment=requested_assignment)
+        report = build_booking_assignment_report_from_record(updated_assignment)
+    else:
+        created_assignment = await persist_booking_assignment(
+            db,
+            booking,
+            current_user,
+            requested_assignment=requested_assignment,
+        )
+        report = build_booking_assignment_report_from_record(created_assignment)
+
+    return schemas.BookingAssignmentReport(
+        generated_at=report["generated_at"],
+        booking_id=report["booking_id"],
+        user_id=report["user_id"],
+        current_state=report["current_state"],
+        decisions=[schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]],
+    )
+
+
 @router.get("/{booking_id}/audit", response_model=schemas.BookingAuditSummary)
 async def get_booking_audit_summary(
     booking_id: int,
@@ -267,6 +381,16 @@ async def get_booking_audit_summary(
         created_events=sum(1 for event in events if event.event_type == "created"),
         status_updates=sum(1 for event in events if event.event_type == "status_updated"),
         latest_event_at=events[0].created_at if events else None,
+        latest_event_note=events[0].note if events else None,
+        recent_mutation_fields=sorted(
+            {
+                field
+                for event in events[:5]
+                for field in (
+                    [] if not event.note else [field for field in ("title", "details", "scheduled_date", "service_type", "status") if field in event.note]
+                )
+            }
+        ),
     )
 
 

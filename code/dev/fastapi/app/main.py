@@ -114,6 +114,7 @@ async def app_capabilities():
 
 @app.get("/meta/ecosystem")
 async def app_ecosystem():
+    capabilities = chat._build_capabilities_payload()
     return {
         "name": APP_NAME,
         "version": APP_VERSION,
@@ -122,10 +123,12 @@ async def app_ecosystem():
             "identity": {
                 "routes": ["/users/me", "/users/password"],
                 "purpose": "authentication and account management",
+                "status": "ready",
             },
             "booking_core": {
                 "routes": ["/bookings", "/bookings/analytics/summary", "/bookings/analytics/events"],
                 "purpose": "booking lifecycle, change tracking, and analytics",
+                "status": "ready",
             },
             "chat_intelligence": {
                 "routes": [
@@ -136,6 +139,7 @@ async def app_ecosystem():
                     "/chat/retention-dashboard",
                 ],
                 "purpose": "conversation memory, sentiment analysis, and retention scoring",
+                "status": "ready",
             },
             "retention_ops": {
                 "routes": [
@@ -147,10 +151,16 @@ async def app_ecosystem():
                     "/chat/admin/snapshot-operations-gonogo",
                 ],
                 "purpose": "snapshot health, compliance, launch readiness, and go/no-go checks",
+                "status": "ready" if capabilities["coverage"]["status"] == "ready" else "partial",
+                "coverage": {
+                    "routes": 7,
+                    "freshness_window_days": capabilities["coverage"]["freshness_window_days"],
+                },
             },
             "portfolio_intelligence": {
                 "routes": ["/chat/admin/monetization-cohorts", "/meta/capabilities"],
                 "purpose": "cross-segment monetization, capability discovery, and study-driven role coverage",
+                "status": "ready" if capabilities["coverage"]["status"] == "ready" else "partial",
                 "roles": [
                     "youth_conversion_intelligence",
                     "market_penetration_adoption",
@@ -161,6 +171,7 @@ async def app_ecosystem():
                 ],
             },
         },
+        "capabilities": capabilities,
     }
 
 

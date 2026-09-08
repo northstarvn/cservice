@@ -181,7 +181,7 @@ async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days:
     snapshot_report = await build_retention_snapshot_report(db, user_id, window_days)
     snapshot_delta = await build_retention_snapshot_delta(db, user_id, window_days)
     snapshot_trends = await build_retention_snapshot_trends(db, user_id, window_days)
-    snapshot_operations_report = await build_retention_snapshot_operations_report(db, window_days)
+    snapshot_operations_report = await build_retention_snapshot_operations_report(db, window_days, stale_after_days=window_days)
     trend_coverage = round(len(snapshot_trends.trends) / max(1, len(snapshot_report.snapshots)), 2)
     delta_coverage = 1.0 if snapshot_delta.current_snapshot_id is not None else 0.0
     return RetentionDashboard(

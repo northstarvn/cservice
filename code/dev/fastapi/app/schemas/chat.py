@@ -214,11 +214,6 @@ class RetentionSnapshotOperationItem(BaseModel):
 class RetentionSnapshotOperationsReport(BaseModel):
     generated_at: datetime
     window_days: int
-    stale_after_days: int
-    total_snapshots: int
-    stale_snapshots: int
-    recent_snapshots: int
-    stale_ratio: float
     items: List[RetentionSnapshotOperationItem]
 
 
@@ -466,7 +461,6 @@ class RecoverySignal(BaseModel):
     area: str
     intensity: float
     evidence: List[str]
-    evidence_summary: str
     recommended_action: str
 
 
@@ -675,48 +669,6 @@ class LoyaltyRecoveryReport(BaseModel):
     dissatisfaction: DissatisfactionRecoveryReport
     retention_recommendation: RetentionSnapshotRecommendation
     action_plan: RetentionSnapshotActionPlan
-
-
-class RecoveryOutcomeItem(BaseModel):
-    id: int
-    recovery_readiness: str
-    dissatisfaction_score: float
-    acknowledged: bool
-    acknowledged_at: Optional[datetime]
-    source: str
-    follow_up_count: int = 0
-    complaint_recurrence_count: int = 0
-    time_to_acknowledge_minutes: Optional[float] = None
-
-
-class RecoveryOutcomeReport(BaseModel):
-    generated_at: datetime
-    window_days: int
-    summary: InteractionSummary
-    dissatisfaction: DissatisfactionRecoveryReport
-    retention_recommendation: RetentionSnapshotRecommendation
-    action_plan: RetentionSnapshotActionPlan
-    recovery_outcome: RecoveryOutcomeItem
-    churn_risk: str
-    recovery_attempts: int
-    recovery_acknowledged: bool
-    complaint_recurrence_count: int
-    time_to_acknowledge_minutes: Optional[float] = None
-
-
-class RecoveryOutcomeAggregateItem(BaseModel):
-    recovery_readiness: str
-    attempts: int
-    acknowledged: int
-
-
-class RecoveryOutcomeAggregateReport(BaseModel):
-    generated_at: datetime
-    window_days: int
-    total_attempts: int
-    total_acknowledged: int
-    total_complaint_recurrences: int
-    items: list[RecoveryOutcomeAggregateItem]
 
 
 class Section11ExpansionSummary(BaseModel):

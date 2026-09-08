@@ -10,9 +10,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.main import app
 from app import models, deps
-from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
+from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionDashboard, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
 from app.routers.bookings import get_booking_history, get_booking_analytics_summary
 from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_report, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
+from app.routers.chat import get_retention_dashboard
 
 
 def test_meta_ecosystem_exposes_backend_subservices():
@@ -23,6 +24,15 @@ def test_meta_ecosystem_exposes_backend_subservices():
     assert "chat_intelligence" in payload["subservices"]
     assert "retention_ops" in payload["subservices"]
     assert "/chat/admin/snapshot-operations-gonogo" in payload["subservices"]["retention_ops"]["routes"]
+
+
+def test_app_metadata_exposes_retention_dashboard_and_operations_routes():
+    meta_payload = TestClient(app).get("/meta").json()
+    ecosystem_payload = TestClient(app).get("/meta/ecosystem").json()
+
+    assert "retention" in meta_payload["features"]
+    assert "/chat/retention-dashboard" in ecosystem_payload["subservices"]["chat_intelligence"]["routes"]
+    assert "/chat/admin/snapshot-operations-report" in ecosystem_payload["subservices"]["retention_ops"]["routes"]
 
 
 def test_metadata_exposes_locale_fallback_contract():
@@ -509,6 +519,72 @@ class FakeRetentionOperationsReportSession:
             _Row(datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)),
             _Row(datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)),
         ])
+
+
+class FakeRetentionMaintenanceSession:
+    def __init__(self):
+        self.deleted = []
+
+    async def execute(self, query):
+        class _Result:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def all(self):
+                return self._rows
+
+            def scalars(self):
+                return self
+
+        query_text = str(query)
+        if "SELECT users.id" in query_text or "users.id" in query_text:
+            return _Result([(1,), (2,)])
+        return _Result([type("SnapshotRow", (), {"id": 1})(), type("SnapshotRow", (), {"id": 2})(), type("SnapshotRow", (), {"id": 3})()])
+
+    async def delete(self, snapshot):
+        self.deleted.append(snapshot)
+
+    async def commit(self):
+        return None
+
+
+class FakeRetentionDashboardSession:
+    async def execute(self, query):
+        class _Result:
+            def __init__(self, rows=None, value=None):
+                self._rows = rows or []
+                self._value = value
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._rows
+
+            def scalar(self):
+                return self._value
+
+            def scalar_one_or_none(self):
+                return self._value
+
+        query_text = str(query)
+        if "interaction_signal" in query_text:
+            return _Result(rows=[("support", 0.7), ("clarity", 0.4)])
+        if "retention_snapshot" in query_text and "snapshot_type" in query_text:
+            return _Result(rows=[
+                type("SnapshotRow", (), {"id": 1, "user_id": 1, "snapshot_type": "chat_response", "window_days": 30, "lifecycle_stage": "engaged", "loyalty_score": 80.0, "churn_risk": "low", "summary_json": "{}", "created_at": datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)})(),
+                type("SnapshotRow", (), {"id": 2, "user_id": 1, "snapshot_type": "chat_response", "window_days": 30, "lifecycle_stage": "engaged", "loyalty_score": 78.0, "churn_risk": "low", "summary_json": "{}", "created_at": datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)})(),
+            ])
+        if "retention_snapshot" in query_text:
+            return _Result(rows=[
+                type("SnapshotRow", (), {"id": 1, "user_id": 1, "snapshot_type": "chat_response", "window_days": 30, "lifecycle_stage": "engaged", "loyalty_score": 80.0, "churn_risk": "low", "summary_json": "{}", "created_at": datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)})(),
+                type("SnapshotRow", (), {"id": 2, "user_id": 1, "snapshot_type": "chat_response", "window_days": 30, "lifecycle_stage": "engaged", "loyalty_score": 70.0, "churn_risk": "medium", "summary_json": "{}", "created_at": datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)})(),
+            ])
+        if "booking" in query_text:
+            return _Result(rows=[type("BookingRow", (), {"created_at": datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc), "status": "completed"})()])
+        if "chat" in query_text:
+            return _Result(rows=[type("ChatRow", (), {"message": "general feedback", "timestamp": datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)})()])
+        return _Result(rows=[])
 
 
 class FakeMonetizationCohortsSession:
@@ -1236,7 +1312,132 @@ async def test_retention_snapshot_operations_report_exposes_audit_totals():
     report = await get_retention_snapshot_operations_report(db=FakeRetentionOperationsReportSession(), current_user=FakeUser(is_admin=True), stale_after_days=14, window_days=30)
 
     assert isinstance(report, RetentionSnapshotOperationsReport)
+    assert report.measurement_window_days == 30
+    assert report.measurement_stale_after_days == 14
     assert report.total_snapshots == 8
     assert report.stale_snapshots == 6
     assert report.recent_snapshots == 2
     assert report.stale_ratio == 0.75
+    assert report.stale_data_flag is True
+    assert report.insufficient_history_flag is False
+    assert report.readiness_threshold == 0.25
+
+
+@pytest.mark.asyncio
+async def test_retention_dashboard_embeds_snapshot_operations_report_with_measurements():
+    dashboard = await get_retention_dashboard(db=FakeRetentionDashboardSession(), current_user=FakeUser(is_admin=True), window_days=30)
+
+    assert isinstance(dashboard, RetentionDashboard)
+    assert dashboard.snapshot_operations_report is not None
+    assert dashboard.snapshot_operations_report.measurement_window_days == 30
+    assert dashboard.snapshot_operations_report.measurement_stale_after_days == 30
+    assert dashboard.snapshot_operations_report.readiness_threshold == 0.25
+
+
+def test_retention_maintenance_report_endpoint_exposes_summary_contract():
+    class _AdminUser:
+        id = 1
+        is_admin = True
+
+    async def _fake_get_admin_user():
+        return _AdminUser()
+
+    async def _fake_get_db():
+        yield FakeRetentionMaintenanceSession()
+
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_admin_user
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    client = TestClient(app)
+
+    try:
+        response = client.post("/retention/maintenance/report", params={"window_days": 30, "keep": 20})
+    finally:
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+        app.dependency_overrides.pop(deps.get_db, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["keep"] == 20
+    assert payload["total_users"] >= 0
+    assert isinstance(payload["results"], list)
+
+
+def test_retention_maintenance_endpoint_exposes_pruning_contract():
+    class _AdminUser:
+        id = 1
+        is_admin = True
+
+    class _PruneSession:
+        def __init__(self):
+            self.deleted = []
+            self.committed = False
+
+        async def execute(self, query):
+            class _Result:
+                def __init__(self_inner, rows):
+                    self_inner._rows = rows
+
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return self_inner._rows
+
+            return _Result([type("Snapshot", (), {"id": 1})(), type("Snapshot", (), {"id": 2})(), type("Snapshot", (), {"id": 3})()])
+
+        async def delete(self, snapshot):
+            self.deleted.append(snapshot)
+
+        async def commit(self):
+            self.committed = True
+
+    async def _fake_get_admin_user():
+        return _AdminUser()
+
+    async def _fake_get_db():
+        yield _PruneSession()
+
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_admin_user
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    client = TestClient(app)
+
+    try:
+        response = client.post("/retention/maintenance", params={"window_days": 30, "keep": 1})
+    finally:
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+        app.dependency_overrides.pop(deps.get_db, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["removed_snapshots"] >= 0
+    assert payload["kept_snapshots"] >= 0
+
+
+def test_retention_maintenance_endpoint_propagates_database_errors():
+    class _AdminUser:
+        id = 1
+        is_admin = True
+
+    class _BrokenSession:
+        async def execute(self, query):
+            raise RuntimeError("maintenance query failed")
+
+    async def _fake_get_admin_user():
+        return _AdminUser()
+
+    async def _fake_get_db():
+        yield _BrokenSession()
+
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_admin_user
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    client = TestClient(app)
+
+    try:
+        with pytest.raises(RuntimeError, match="maintenance query failed"):
+            client.post("/retention/maintenance", params={"window_days": 30, "keep": 1})
+    finally:
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+        app.dependency_overrides.pop(deps.get_db, None)
+
