@@ -4,15 +4,19 @@ import os
 import sys
 
 import pytest
+from fastapi.testclient import TestClient
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app import models, security
+from app import deps, models, security
+from app.main import app
 from app.deps import get_current_admin_user, get_current_policy_or_admin_user
 from app.services.bookings import apply_booking_updates, transition_booking
 from app.services.bookings import create_booking_event, ensure_booking_transition_allowed
+from app.services.bookings import build_booking_service_summary
 from app.routers.users import change_password
 from app.routers.users import read_users_access_decision
+from app.routers.users import read_users_policy_decision_report
 from app.routers.bookings import get_booking_analytics_summary
 from app.routers.bookings import create_booking
 from app.routers.bookings import get_bookings
@@ -32,13 +36,26 @@ from app.routers.chat import get_admin_retention_trend_report
 from app.routers.chat import get_ranked_users_report
 from app.routers.chat import retention_maintenance_report
 from app.routers.chat import get_retention_snapshot_admin_report
+from app.routers.chat import get_retention_coverage_report
+from app.routers.chat import get_retention_operational_report
+from app.routers.chat import get_retention_snapshot_operations_status
+from app.routers.chat import get_retention_snapshot_operations_automation
+from app.routers.chat import get_retention_snapshot_operations_launch_readiness
 from app.routers.topics import create_current_topic_selection
 from app.routers.topics import archive_current_topic_selection
 from app.routers.topics import read_current_topic_selection
 from app.routers.topics import replace_current_topic_selection
+from app.routers.topics import read_topic_workspace
 from app.schemas import schemas
+from app.services.retention import build_retention_coverage_report
 from app.services.policy_scoring import PolicyScoreSnapshot, can_access_functionality, summarize_policy_score
+from app.services.policy_scoring import build_policy_topic_analysis_report
 from app.services.policy_scoring import _posture_adjusted_access_score
+from app.services.topics import build_topic_coverage_report, build_topic_portfolio_report, build_topic_taxonomy_report
+from app.services.retention import build_retention_topic_signal_report
+from app.services.topics import build_topic_theme_coverage
+from app.services.chat_analytics import build_retention_topic_signal_detail
+from app.services.chat_analytics import build_retention_dashboard_topic_signal_detail
 from app.schemas.chat import ChatMessageIn
 from app.schemas.chat import SystemImprovementPack
 
@@ -193,6 +210,11 @@ class FakeTopicSelection:
         self.updated_at = datetime.now(timezone.utc)
 
 
+class FakeCurrentTopicSelection(FakeTopicSelection):
+    def __init__(self, topic: str = "booking status and confirmations"):
+        super().__init__(topic=topic)
+
+
 class TopicDb:
     def __init__(self, selection=None):
         self.selection = selection
@@ -226,6 +248,1015 @@ class TopicDb:
 
     async def refresh(self, item):
         return None
+
+
+def test_topic_workspace_route_exposes_composite_topic_contract():
+    class _TopicSelectionSession(TopicDb):
+        async def execute(self, *_args, **_kwargs):
+            selection = FakeTopicSelection(topic="booking status and confirmations")
+
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def first(self_inner):
+                    return selection
+
+                def all(self_inner):
+                    return [selection, FakeTopicSelection(topic="service quality and follow-up")]
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _TopicSelectionSession()
+
+    async def _fake_get_current_user():
+        return FakeUser()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_user] = _fake_get_current_user
+    try:
+        response = TestClient(app).get("/topics/workspace")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_id"] == 1
+    assert payload["topic"] == "booking status and confirmations"
+    assert payload["richness_score"] >= 0
+    assert payload["catalog"]["total_topics"] >= 1
+    assert payload["taxonomy"]["total_topics"] >= 1
+    assert payload["taxonomy"]["topic_map"]
+    assert payload["themes"]["total_themes"] >= 1
+    assert payload["intelligence"]["coverage_ratio"] >= 0
+    assert payload["portfolio"]["catalog_total"] >= 1
+    assert payload["portfolio"]["taxonomy_total"] >= 1
+    assert payload["selection_history"]["user_id"] == 1
+
+
+def test_booking_operation_report_exposes_topic_enrichment():
+    class _BookingOperationDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return FakeBooking()
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _BookingOperationDb()
+
+    async def _fake_get_current_user():
+        return FakeUser()
+
+    async def _fake_get_policy_score():
+        return FakePolicyScore()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_user] = _fake_get_current_user
+    app.dependency_overrides[deps.get_current_customer_policy_score] = _fake_get_policy_score
+    try:
+        response = TestClient(app).get("/bookings/10/operation-report")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_user, None)
+        app.dependency_overrides.pop(deps.get_current_customer_policy_score, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["booking_id"] == 10
+    assert payload["topic_context"]
+    assert payload["topic_coverage_ratio"] >= 0
+    assert payload["topic_portfolio_coverage"] >= 0
+    assert payload["recommendations"]
+
+
+def test_retention_coverage_report_exposes_topic_summary():
+    class _RetentionCoverageDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionCoverageDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/retention-coverage")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_id"] == 1
+    assert payload["total_snapshots"] == 0
+    assert "Topic coverage:" in payload["summary"]
+    assert payload["items"] == []
+
+
+def test_retention_operational_report_includes_topic_coverage_item():
+    class _RetentionOperationalDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionOperationalDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/retention-operations")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_id"] == 1
+    assert payload["window_days"] == 30
+    assert any(item["name"] == "topic_coverage" for item in payload["items"])
+    assert "Topic portfolio coverage" in payload["summary"]
+
+
+def test_retention_snapshot_operations_status_includes_risk_level():
+    class _RetentionStatusDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionStatusDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-status")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["status"] in {"operational", "watch", "needs_attention"}
+    assert payload["risk_level"] in {"low", "medium", "high"}
+    assert payload["overview"]
+
+
+def test_retention_snapshot_operations_overview_includes_recommendation():
+    class _RetentionOverviewDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionOverviewDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-overview")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["score"] >= 0
+    assert payload["status"] in {"healthy", "degraded", "critical"}
+    assert payload["risk_level"] in {"low", "medium", "high"}
+    assert payload["recommendation"]
+    assert payload["overview"]
+
+
+def test_retention_snapshot_operations_report_includes_items():
+    class _RetentionOperationsReportDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionOperationsReportDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-report")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert isinstance(payload["items"], list)
+    assert payload["items"]
+    assert payload["items"][0]["label"]
+    assert payload["items"][0]["status"]
+    assert payload["items"][0]["details"]
+
+
+def test_retention_snapshot_health_summary_and_recommendation():
+    class _RetentionSnapshotHealthDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionSnapshotHealthDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        summary_response = TestClient(app).get("/chat/admin/snapshot-health-summary")
+        recommendation_response = TestClient(app).get("/chat/admin/snapshot-health-recommendation")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert summary_response.status_code == 200
+    summary_payload = summary_response.json()
+    assert summary_payload["window_days"] == 30
+    assert summary_payload["stale_after_days"] == 14
+    assert summary_payload["score"] >= 0
+    assert summary_payload["status"] in {"healthy", "degraded", "critical"}
+    assert summary_payload["summary"]
+
+    assert recommendation_response.status_code == 200
+    recommendation_payload = recommendation_response.json()
+    assert recommendation_payload["window_days"] == 30
+    assert recommendation_payload["stale_after_days"] == 14
+    assert recommendation_payload["score"] >= 0
+    assert recommendation_payload["status"] in {"healthy", "degraded", "critical"}
+    assert recommendation_payload["risk_level"] in {"low", "medium", "high"}
+    assert recommendation_payload["recommendation"]
+
+
+def test_retention_snapshot_health_risk_includes_risk_level():
+    class _RetentionSnapshotHealthRiskDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionSnapshotHealthRiskDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-health-risk")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["score"] >= 0
+    assert payload["status"] in {"healthy", "degraded", "critical"}
+    assert payload["risk_level"] in {"low", "medium", "high"}
+
+
+def test_retention_snapshot_volatility_summary_includes_counts():
+    class _RetentionVolatilityDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionVolatilityDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-volatility/summary")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stable"] >= 0
+    assert payload["moderate"] >= 0
+    assert payload["high"] >= 0
+
+
+def test_retention_snapshot_volatility_report_includes_items():
+    class _RetentionVolatilityReportDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionVolatilityReportDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-volatility")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert isinstance(payload["items"], list)
+    if payload["items"]:
+        assert payload["items"][0]["snapshot_type"]
+        assert payload["items"][0]["volatility"] >= 0
+        assert payload["items"][0]["classification"]
+
+
+def test_retention_snapshot_staleness_trend_includes_items():
+    class _RetentionStalenessTrendDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionStalenessTrendDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-staleness/trend")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert isinstance(payload["items"], list)
+    if payload["items"]:
+        assert payload["items"][0]["bucket"]
+        assert payload["items"][0]["stale_snapshots"] >= 0
+        assert payload["items"][0]["fresh_snapshots"] >= 0
+        assert payload["items"][0]["staleness_rate"] >= 0
+
+
+def test_retention_snapshot_audit_and_type_breakdown():
+    class _RetentionAuditDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionAuditDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        audit_response = TestClient(app).get("/chat/admin/snapshot-audit")
+        breakdown_response = TestClient(app).get("/chat/admin/snapshot-type-breakdown?snapshot_type=booking")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert audit_response.status_code == 200
+    audit_payload = audit_response.json()
+    assert audit_payload["window_days"] == 30
+    assert audit_payload["total_snapshots"] >= 0
+    assert isinstance(audit_payload["items"], list)
+    if audit_payload["items"]:
+        assert audit_payload["items"][0]["snapshot_type"]
+        assert audit_payload["items"][0]["total_snapshots"] >= 0
+        assert audit_payload["items"][0]["unique_users"] >= 0
+
+    assert breakdown_response.status_code == 200
+    breakdown_payload = breakdown_response.json()
+    assert breakdown_payload["window_days"] == 30
+    assert breakdown_payload["snapshot_type"] == "booking"
+    assert breakdown_payload["total_snapshots"] >= 0
+    assert breakdown_payload["unique_users"] >= 0
+    assert isinstance(breakdown_payload["items"], list)
+    if breakdown_payload["items"]:
+        assert breakdown_payload["items"][0]["snapshot_type"]
+        assert breakdown_payload["items"][0]["total_snapshots"] >= 0
+        assert breakdown_payload["items"][0]["unique_users"] >= 0
+
+
+def test_retention_snapshot_audit_export_includes_summary():
+    class _RetentionAuditExportDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionAuditExportDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-audit/export")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["summary"]
+    assert isinstance(payload["snapshot_types"], list)
+    assert payload["total_snapshots"] >= 0
+
+
+def test_retention_snapshot_action_plan_includes_action():
+    class _RetentionActionPlanDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionActionPlanDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-action-plan")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["risk_level"] in {"low", "medium", "high"}
+    assert payload["action"]
+
+
+def test_retention_snapshot_health_score_includes_status():
+    class _RetentionHealthScoreDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionHealthScoreDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-health-score")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["score"] >= 0
+    assert payload["status"] in {"healthy", "degraded", "critical"}
+
+
+def test_retention_snapshot_risk_profile_and_recommendation():
+    class _RetentionRiskDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionRiskDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        risk_response = TestClient(app).get("/chat/admin/snapshot-risk-profile")
+        recommendation_response = TestClient(app).get("/chat/admin/snapshot-recommendation")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert risk_response.status_code == 200
+    risk_payload = risk_response.json()
+    assert risk_payload["window_days"] == 30
+    assert risk_payload["score"] >= 0
+    assert risk_payload["risk_level"] in {"low", "medium", "high"}
+
+    assert recommendation_response.status_code == 200
+    recommendation_payload = recommendation_response.json()
+    assert recommendation_payload["window_days"] == 30
+    assert recommendation_payload["risk_level"] in {"low", "medium", "high"}
+    assert recommendation_payload["recommendation"]
+
+
+def test_retention_topic_signal_report_exposes_richer_topic_context():
+    report = build_retention_topic_signal_report(
+        "Booking confirmation is delayed and the customer wants a refund after reschedule support.",
+        user_id=1,
+        window_days=30,
+    )
+
+    assert report["user_id"] == 1
+    assert report["window_days"] == 30
+    assert report["topic_context"]
+    assert report["dominant_topic"]
+    assert report["items"]
+    assert report["items"][0]["topic"]
+    assert report["items"][0]["coverage_score"] >= 0
+
+
+def test_retention_topic_signal_detail_exposes_structured_items():
+    summary = FakeChatMessageSummary()
+    summary.top_issues = ["refund timing", "booking delay"]
+    summary.insights = []
+    detail = build_retention_topic_signal_detail(summary, None)
+
+    assert detail.topic_context
+    assert detail.summary
+    assert detail.items
+    assert detail.items[0].topic
+    assert detail.items[0].coverage_score >= 0
+    assert detail.topic_theme_coverage
+
+
+def test_retention_dashboard_topic_signal_detail_tracks_item_count():
+    summary = FakeChatMessageSummary()
+    summary.top_issues = ["refund timing", "booking delay"]
+    summary.insights = []
+    detail = build_retention_dashboard_topic_signal_detail(summary, None)
+
+    assert detail.topic_context
+    assert detail.topic == detail.topic_context
+    assert detail.dominant_topic
+    assert detail.summary.endswith(f"items={len(detail.items)}")
+    assert detail.items
+
+
+def test_retention_dashboard_exposes_topic_theme_coverage():
+    summary = FakeChatMessageSummary()
+    summary.top_issues = ["refund timing", "booking delay"]
+    summary.insights = []
+
+    detail = build_retention_dashboard_topic_signal_detail(summary, None)
+
+    assert detail.topic_theme_coverage
+    assert detail.topic_theme_coverage[0]["theme"]
+    assert detail.topic_theme_coverage[0]["coverage"] >= 0
+
+
+def test_retention_snapshot_operations_automation_includes_risk_level():
+    class _RetentionAutomationDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionAutomationDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-automation")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["automation"] in {"ready", "conditional", "not_ready"}
+    assert payload["risk_level"] in {"low", "medium", "high"}
+    assert payload["overview"]
+
+
+def test_topic_taxonomy_report_exposes_sector_and_related_topics():
+    report = build_topic_taxonomy_report()
+
+    assert report.total_topics >= 1
+    assert report.total_themes >= 1
+    assert report.sectors
+    assert report.topic_map
+    first_topic = report.topic_map[0]
+    assert first_topic.topic
+    assert first_topic.related_topics is not None
+    assert report.theme_map
+
+
+def test_retention_snapshot_operations_automation_route_uses_typed_field():
+    class _RetentionAutomationRouteDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionAutomationRouteDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-automation")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["automation"] in {"ready", "conditional", "not_ready"}
+    assert payload["risk_level"] in {"low", "medium", "high"}
+    assert payload["overview"]
+
+
+def test_retention_snapshot_operations_execution_state_includes_risk_level():
+    class _RetentionExecutionStateDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionExecutionStateDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-execution-state")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["execution_state"] in {"go", "hold", "block"}
+    assert payload["risk_level"] in {"low", "medium", "high"}
+    assert payload["overview"]
+
+
+def test_retention_snapshot_operations_launch_readiness_includes_risk_level():
+    class _RetentionLaunchDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionLaunchDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-launch-readiness")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["readiness"] in {"launch_ready", "launch_pending", "launch_blocked"}
+    assert payload["risk_level"] in {"low", "medium", "high"}
+    assert payload["overview"]
+
+
+def test_retention_snapshot_operations_go_no_go_includes_decision():
+    class _RetentionGoNoGoDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _RetentionGoNoGoDb()
+
+    async def _fake_get_current_admin_user():
+        return FakeUser(is_admin=True)
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_admin_user] = _fake_get_current_admin_user
+    try:
+        response = TestClient(app).get("/chat/admin/snapshot-operations-gonogo")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_days"] == 30
+    assert payload["stale_after_days"] == 14
+    assert payload["decision"] in {"go", "hold", "block"}
+    assert payload["overview"]
 
 
 @pytest.mark.asyncio
@@ -332,6 +1363,66 @@ async def test_archive_current_topic_selection_returns_inactive_selection():
     assert report.is_current is False
 
 
+def test_topic_coverage_report_includes_portfolio_signals():
+    report = build_topic_coverage_report(FakeCurrentTopicSelection(topic="service appointment preparation and vip routing"))
+
+    assert report["topic"] == "service appointment preparation and vip routing"
+    assert report["coverage_ratio"] >= 0.0
+    assert report["top_recommendations"]
+    assert report["matched_topics"]
+    assert report["theme_coverage"]
+
+
+def test_topic_portfolio_report_combines_catalog_and_coverage():
+    report = build_topic_portfolio_report(FakeCurrentTopicSelection(topic="refund timing and payout tracking"))
+
+    assert report["catalog_total"] >= len(report["top_recommendations"])
+    assert report["theme_total"] >= 1
+    assert report["coverage_ratio"] >= 0.0
+    assert report["matched_topics"]
+
+
+def test_topic_portfolio_report_reflects_richer_topic_coverage():
+    report = build_topic_portfolio_report(FakeCurrentTopicSelection(topic="refund timing, payout tracking, and escalation routing"))
+
+    assert report["coverage_ratio"] >= 0.05
+    assert report["matched_topics"]
+    assert report["theme_coverage"]
+
+
+def test_booking_service_summary_exposes_topic_theme_coverage():
+    booking = type("Booking", (), {"id": 1, "user_id": 7, "status": "confirmed"})()
+
+    report = build_booking_service_summary(booking, [], [])
+
+    assert report["topic_context"]
+    assert report["topic_portfolio_coverage"] >= 0.0
+    assert report["topic_theme_coverage"]
+
+
+@pytest.mark.asyncio
+async def test_retention_coverage_report_exposes_topic_coverage_ratio():
+    class _RetentionCoverageDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    class Scalars:
+                        def all(self_inner_inner):
+                            return []
+
+                    return Scalars()
+
+                def scalar(self_inner):
+                    return None
+
+            return Result()
+
+    report = await build_retention_coverage_report(_RetentionCoverageDb(), user_id=1, window_days=30)
+
+    assert report.topic_coverage_ratio >= 0.0
+    assert report.summary
+
+
 @pytest.mark.asyncio
 async def test_read_users_access_decision_includes_control_posture():
     policy_score = type(
@@ -359,6 +1450,87 @@ async def test_read_users_access_decision_includes_control_posture():
         read_users_access_decision.__globals__["can_access_functionality"] = original_dependency
     assert result["control_posture"] == "customer_trusted"
     assert result["policy_tier"] == "customer-premium"
+
+
+def test_summarize_policy_score_mentions_topic_richness():
+    snapshot = PolicyScoreSnapshot(
+        system_score=80.0,
+        customer_score=70.0,
+        access_score=72.0,
+        interest_score=68.0,
+        closeness_score=69.0,
+        community_closeness_score=74.0,
+        policy_tier="customer-premium",
+        control_posture="customer_trusted",
+        summary="system=80.00, customer=70.00, access=72.00, interest=68.00, closeness=69.00, community=74.00, posture=customer_trusted, topic_breadth=24.00, topic_complexity=18.00, topic_confidence=0.72, topic=refund timing and payout tracking, richness=rich [balance=69.00]",
+        topic_context="refund timing and payout tracking [breadth=24.00, complexity=18.00]",
+        topic_richness="rich [balance=69.00]",
+    )
+
+    summary = summarize_policy_score(snapshot)
+
+    assert "topic_breadth" not in summary
+    assert "posture=customer_trusted" in summary
+    assert "topic_context=refund timing and payout tracking [breadth=24.00, complexity=18.00]" in summary
+    assert "topic_richness=rich [balance=69.00]" in summary
+
+
+@pytest.mark.asyncio
+async def test_policy_decision_report_includes_topic_context_and_richness():
+    user = FakeUser(id=9)
+    snapshot = PolicyScoreSnapshot(
+        system_score=82.0,
+        customer_score=74.0,
+        access_score=76.0,
+        interest_score=71.0,
+        closeness_score=73.0,
+        community_closeness_score=75.0,
+        policy_tier="customer-premium",
+        control_posture="customer_trusted",
+        summary="system=82.00, customer=74.00, access=76.00, interest=71.00, closeness=73.00, community=75.00, posture=customer_trusted, topic_context=refund timing and payout tracking [breadth=24.00, complexity=18.00], topic_richness=rich [balance=69.00]",
+        topic_context="refund timing and payout tracking [breadth=24.00, complexity=18.00]",
+        topic_richness="rich [balance=69.00]",
+    )
+
+    report = __import__("app.services.policy_scoring", fromlist=["build_policy_decision_report"]).build_policy_decision_report(
+        snapshot=snapshot,
+        user=user,
+        functionality="support",
+        required_tier="standard",
+    )
+
+    assert report.topic_context == "refund timing and payout tracking [breadth=24.00, complexity=18.00]; signal=rich [balance=69.00]"
+    assert "topic_richness=rich [balance=69.00]" in report.summary
+    assert "topic_context=refund timing and payout tracking [breadth=24.00, complexity=18.00]" in report.summary
+    assert "topic_signal=rich [balance=69.00]" in report.summary
+    assert report.decision.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_policy_topic_analysis_report_exposes_structured_depth():
+    user = FakeUser(id=10)
+    snapshot = PolicyScoreSnapshot(
+        system_score=64.0,
+        customer_score=78.0,
+        access_score=72.0,
+        interest_score=70.0,
+        closeness_score=71.0,
+        community_closeness_score=74.0,
+        policy_tier="customer-premium",
+        control_posture="customer_trusted",
+        summary="system=64.00, customer=78.00, access=72.00, interest=70.00, closeness=71.00, community=74.00, posture=customer_trusted, topic_context=refund timing and payout tracking [breadth=24.00, complexity=18.00], topic_richness=balanced [balance=48.00]",
+        topic_context="refund timing and payout tracking [breadth=24.00, complexity=18.00]",
+        topic_richness="balanced [balance=48.00]",
+    )
+
+    report = build_policy_topic_analysis_report(snapshot, user)
+
+    assert report.user_id == 10
+    assert report.current_topic == "refund timing and payout tracking [breadth=24.00, complexity=18.00]"
+    assert report.topic_context.startswith("refund timing and payout tracking")
+    assert report.topic_depth.startswith("depth=")
+    assert report.items
+    assert report.items[0].fallback == "refund timing and payout tracking [breadth=24.00, complexity=18.00]"
 
 
 @pytest.mark.asyncio
@@ -1197,3 +2369,139 @@ def test_policy_score_summary_and_access_thresholds():
     assert can_access_functionality(policy, required_tier="standard") is True
     assert can_access_functionality(policy, required_tier="system-premium") is False
     assert _posture_adjusted_access_score(70.0, "observed") == 66.0
+
+
+def test_policy_topic_analysis_report_exposes_rich_topic_breakdown():
+    snapshot = PolicyScoreSnapshot(
+        system_score=81.0,
+        customer_score=77.0,
+        access_score=79.0,
+        interest_score=73.0,
+        closeness_score=75.0,
+        community_closeness_score=80.0,
+        policy_tier="customer-premium",
+        control_posture="customer_trusted",
+        summary="policy topic summary",
+        topic_context="booking policy and escalation routing",
+        topic_richness="balanced [balance=62.00]",
+    )
+
+    report = build_policy_topic_analysis_report(snapshot, FakeUser())
+
+    assert report.user_id == 1
+    assert report.current_topic == "booking policy and escalation routing"
+    assert report.topic_context
+    assert report.topic_richness.startswith("balanced")
+    assert report.topic_depth.startswith("depth=")
+    assert report.items
+    assert report.items[0].topic == report.current_topic
+    assert report.items[0].breadth >= 0
+    assert "topic_depth" in report.summary
+
+
+def test_read_users_policy_decision_report_includes_topic_analysis():
+    class _PolicyDecisionDb(FakeChatDb):
+        async def execute(self, *_args, **_kwargs):
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return []
+
+                def first(self_inner):
+                    return None
+
+                def scalar_one_or_none(self_inner):
+                    return None
+
+                def scalar(self_inner):
+                    return 0
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _PolicyDecisionDb()
+
+    async def _fake_get_current_user():
+        return FakeUser()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_user] = _fake_get_current_user
+    try:
+        response = TestClient(app).get("/users/me/policy-decision/report?functionality=booking", headers={"accept": "application/json"})
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["policy_decision"]["topic_context"]
+
+
+def test_policy_score_summary_uses_no_topic_fallback_when_topic_is_missing():
+    snapshot = PolicyScoreSnapshot(
+        system_score=64.0,
+        customer_score=61.0,
+        access_score=63.0,
+        interest_score=60.0,
+        closeness_score=62.0,
+        community_closeness_score=63.0,
+        policy_tier="standard",
+        control_posture="observed",
+        summary="system=64.00, customer=61.00, access=63.00, interest=60.00, closeness=62.00, community=63.00, posture=observed, topic_richness=no_topic_richness",
+        topic_context="",
+        topic_richness="",
+    )
+
+    summary = summarize_policy_score(snapshot)
+
+    assert "topic_context=" not in summary
+    assert "topic_richness=" not in summary
+
+
+def test_policy_score_summary_mentions_no_topic_signal_when_bare():
+    snapshot = PolicyScoreSnapshot(
+        system_score=64.0,
+        customer_score=61.0,
+        access_score=63.0,
+        interest_score=60.0,
+        closeness_score=62.0,
+        community_closeness_score=63.0,
+        policy_tier="standard",
+        control_posture="observed",
+        summary="system=64.00, customer=61.00, access=63.00, interest=60.00, closeness=62.00, community=63.00, posture=observed",
+    )
+
+    summary = summarize_policy_score(snapshot)
+
+    assert "topic_context=" not in summary
+    assert "topic_richness=" not in summary
+
+
+def test_policy_decision_report_uses_no_topic_signal_when_topic_is_missing():
+    user = FakeUser(id=10)
+    snapshot = PolicyScoreSnapshot(
+        system_score=64.0,
+        customer_score=61.0,
+        access_score=63.0,
+        interest_score=60.0,
+        closeness_score=62.0,
+        community_closeness_score=63.0,
+        policy_tier="standard",
+        control_posture="observed",
+        summary="system=64.00, customer=61.00, access=63.00, interest=60.00, closeness=62.00, community=63.00, posture=observed",
+        topic_context="",
+        topic_richness="",
+    )
+
+    report = __import__("app.services.policy_scoring", fromlist=["build_policy_decision_report"]).build_policy_decision_report(
+        snapshot=snapshot,
+        user=user,
+        functionality="support",
+        required_tier="standard",
+    )
+
+    assert "no_topic_signal" in report.topic_context
+    assert "topic_signal=no_topic_signal" in report.summary
+

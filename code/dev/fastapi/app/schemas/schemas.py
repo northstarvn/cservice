@@ -110,6 +110,33 @@ class BookingAssignmentReport(BaseModel):
     control_posture: str = "observed"
 
 
+class BookingAssignmentSummary(BaseModel):
+    booking_id: int
+    user_id: int
+    total_assignments: int
+    current_assignments: int
+    historical_assignments: int
+    state_counts: dict[str, int]
+    control_posture: str = "observed"
+
+
+class BookingAssignmentReportPage(BaseModel):
+    booking_id: int
+    user_id: int
+    total_assignments: int
+    current_assignments: int = 0
+    historical_assignments: int = 0
+    state_counts: dict[str, int]
+    source_counts: dict[str, int]
+    created_after: Optional[datetime] = None
+    created_before: Optional[datetime] = None
+    page: int
+    per_page: int
+    pages: int
+    items: List[BookingAssignmentReport]
+    control_posture: str = "observed"
+
+
 class BookingAssignmentCreate(BaseModel):
     booking_id: int
     room_id: int
@@ -156,9 +183,44 @@ class BookingAuditSummary(BaseModel):
     assignment_events: int = 0
     created_events: int
     status_updates: int
+    event_type_counts: dict[str, int] = Field(default_factory=dict)
     latest_event_at: Optional[datetime] = None
     latest_event_note: Optional[str] = None
     recent_mutation_fields: List[str] = Field(default_factory=list)
+    control_posture: str = "observed"
+
+
+class BookingOperationReport(BaseModel):
+    generated_at: datetime
+    booking_id: int
+    user_id: Optional[int] = None
+    control_posture: str = "observed"
+    summary: dict[str, object] = Field(default_factory=dict)
+    timeline: dict[str, object] = Field(default_factory=dict)
+    typed_summary: dict[str, object] = Field(default_factory=dict)
+    typed_assignment_summary: dict[str, object] = Field(default_factory=dict)
+    topic_context: str = ""
+    topic_coverage_ratio: float = 0.0
+    topic_portfolio_coverage: float = 0.0
+    recommendations: List[str] = Field(default_factory=list)
+
+
+class BookingSummary(BaseModel):
+    booking_id: int
+    user_id: int
+    current_status: BookingStatus
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    assignment_count: int = 0
+    control_posture: str = "observed"
+
+
+class BookingSummaryReport(BaseModel):
+    generated_at: datetime
+    booking_id: int
+    user_id: int
+    current_status: BookingStatus
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    assignment_count: int = 0
     control_posture: str = "observed"
 
 
@@ -177,6 +239,8 @@ class BookingHistoryReport(BaseModel):
     user_id: int
     current_status: BookingStatus
     event_count: int
+    assignment_events: int = 0
+    event_type_counts: dict[str, int] = Field(default_factory=dict)
     items: List[BookingEventOut]
     control_posture: str = "observed"
 
@@ -185,6 +249,8 @@ class BookingAssignmentHistoryReport(BaseModel):
     booking_id: int
     user_id: int
     event_count: int
+    assignment_events: int = 0
+    event_type_counts: dict[str, int] = Field(default_factory=dict)
     items: List[BookingEventOut]
     control_posture: str = "observed"
 
@@ -193,8 +259,10 @@ class BookingAssignmentHistorySummary(BaseModel):
     booking_id: int
     user_id: int
     event_count: int
+    assignment_events: int = 0
     latest_event_at: Optional[datetime] = None
     latest_event_type: Optional[str] = None
+    event_type_counts: dict[str, int] = Field(default_factory=dict)
     control_posture: str = "observed"
 
 
@@ -210,6 +278,7 @@ class AdminAnalyticsSummary(BaseModel):
     bookings_by_status: dict[str, int]
     booking_events_total: int
     assignment_events_total: int = 0
+    assignment_event_ratio: float = 0.0
     booking_events_by_type: List[AnalyticsEventCount]
     recent_bookings: int
     recent_events: int
@@ -230,6 +299,7 @@ class BookingEventFilterSummary(BaseModel):
     statuses: dict[str, int]
     events: List[BookingEventOut]
     assignment_events: int = 0
+    assignment_event_ratio: float = 0.0
 
 
 class BookingExportReport(BaseModel):
@@ -237,6 +307,7 @@ class BookingExportReport(BaseModel):
     total_bookings: int
     total_events: int
     assignment_events_total: int = 0
+    assignment_event_ratio: float = 0.0
     bookings: List[BookingOut]
     events: List[BookingEventOut]
     control_posture: str = "observed"
@@ -275,12 +346,51 @@ class CustomerPolicyAccessOut(BaseModel):
     user_id: int
     functionality: str
     required_tier: str
+    effective_required_tier: str
     allowed: bool
     policy_tier: str
     control_posture: str
     access_score: float
     customer_score: float
     system_score: float
+
+
+class CustomerPolicyDecisionReportOut(BaseModel):
+    policy_decision: "CustomerPolicyDecisionSummaryOut"
+    policy_score: CustomerPolicyScoreOut
+    control_posture: str
+    policy_tier: str
+    topic_context: str = ""
+    topic_analysis: Optional[dict[str, object]] = None
+
+
+class CustomerPolicyHealthSummaryOut(BaseModel):
+    generated_at: datetime
+    policy_tier: str
+    control_posture: str
+    dominant_signal: str
+    weak_points: List[dict[str, int | float | str]]
+    strong_points: List[dict[str, int | float | str]]
+    balance_index: float
+
+
+class CustomerPolicyRecommendationOut(BaseModel):
+    priority: str
+    area: str
+    recommendation: str
+    evidence: str
+
+
+class CustomerPolicyDecisionSummaryOut(BaseModel):
+    generated_at: datetime
+    user_id: int
+    functionality: str
+    required_tier: str
+    decision: CustomerPolicyAccessOut
+    health: CustomerPolicyHealthSummaryOut
+    recommendations: List[CustomerPolicyRecommendationOut]
+    summary: str
+    topic_context: str = ""
 
 
 class TopicSelectionCreate(BaseModel):
@@ -318,6 +428,95 @@ class TopicSelectionHistoryReport(BaseModel):
     generated_at: datetime
     user_id: int
     items: List[TopicSelectionOut]
+
+
+class TopicCatalogItem(BaseModel):
+    topic: str
+    source: str
+    rationale: str
+    confidence: float
+    keywords: List[str]
+
+
+class TopicTopicMapItem(BaseModel):
+    topic: str
+    keywords: List[str]
+    related_topics: List[str]
+    theme: Optional[str] = None
+    sector: Optional[str] = None
+
+
+class TopicTaxonomyReport(BaseModel):
+    generated_at: datetime
+    total_topics: int
+    total_themes: int
+    sectors: List[str]
+    topic_map: List[TopicTopicMapItem]
+    theme_map: List[dict[str, object]]
+    summary: str
+    topic_focus: List[str] = Field(default_factory=list)
+
+
+class TopicCatalogReport(BaseModel):
+    generated_at: datetime
+    total_topics: int
+    items: List[TopicCatalogItem]
+    top_prefixes: List[dict[str, int | str]] = []
+
+
+class TopicThemeItem(BaseModel):
+    theme: str
+    topic_count: int
+    topics: List[str]
+
+
+class TopicThemeReport(BaseModel):
+    generated_at: datetime
+    total_themes: int
+    themes: List[TopicThemeItem]
+
+
+class TopicRecommendationItem(BaseModel):
+    topic: str
+    source: str
+    confidence: float
+    rationale: str
+
+
+class TopicRecommendationReport(BaseModel):
+    generated_at: datetime
+    topic: Optional[str]
+    primary_topic: Optional[str]
+    coverage_ratio: float = 0.0
+    match_count: int = 0
+    recommendations: List[TopicRecommendationItem]
+    summary: str
+
+
+class TopicIntelligenceReport(BaseModel):
+    generated_at: datetime
+    topic: Optional[str]
+    matched_keywords: List[str]
+    suggested_topics: List[TopicCatalogItem]
+    coverage_ratio: float = 0.0
+    match_count: int = 0
+    summary: str
+
+
+class TopicWorkspaceReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    topic: Optional[str]
+    catalog: TopicCatalogReport
+    taxonomy: TopicTaxonomyReport
+    themes: TopicThemeReport
+    intelligence: TopicIntelligenceReport
+    coverage: dict[str, object]
+    portfolio: dict[str, object]
+    recommendations: TopicRecommendationReport
+    selection_history: TopicSelectionHistoryReport
+    richness_score: float = 0.0
+    topic_focus: List[str] = Field(default_factory=list)
 
 class PaginatedBookings(BaseModel):
     items: List[BookingOut]

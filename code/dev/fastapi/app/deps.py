@@ -23,14 +23,15 @@ async def get_current_user(
     
     try:
         payload = jwt.decode(
-            credentials.credentials, 
-            security.SECRET_KEY, 
+            credentials.credentials,
+            security.SECRET_KEY,
             algorithms=[security.ALGORITHM]
         )
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
     except Exception:
+        raise credentials_exception
+
+    username = payload.get("sub")
+    if not username:
         raise credentials_exception
     
     # Get user from database

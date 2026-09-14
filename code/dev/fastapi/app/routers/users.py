@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from app import models, security, deps
 from app.i18n import locale_payload
 from app.schemas import schemas
-from app.services.policy_scoring import can_access_functionality
+from app.services.policy_scoring import build_policy_access_decision, build_policy_decision_report, build_customer_policy_snapshot, build_policy_topic_analysis_report, build_policy_score_out, can_access_functionality
 
 router = APIRouter()
 
@@ -88,30 +88,70 @@ async def read_users_policy_score(
     return policy_score
 
 
-@router.get("/me/can-access", response_model=schemas.CustomerPolicyAccessOut)
+@router.get("/me/can-access")
 async def read_users_access_decision(
     functionality: str,
     required_tier: str = "standard",
     current_user: models.User = Depends(deps.get_current_user),
     policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
 ):
+    access_decision = build_policy_access_decision(current_user, policy_score, functionality, required_tier)
     control_posture = getattr(policy_score, "control_posture", "observed")
     effective_required_tier = required_tier
     if control_posture in {"constrained", "observed"} and required_tier == "standard":
         effective_required_tier = "customer-premium"
-
     allowed = can_access_functionality(policy_score, required_tier=effective_required_tier)
+    if hasattr(db, "execute"):
+        snapshot = await build_customer_policy_snapshot(db, current_user)
+        decision_report = build_policy_decision_report(snapshot, current_user, functionality, required_tier)
+        return {
+            **access_decision.model_dump(),
+            "control_posture": control_posture,
+            "effective_required_tier": effective_required_tier,
+            "allowed": allowed,
+            "policy_decision": decision_report,
+        }
+
     return {
-        "user_id": current_user.id,
-        "functionality": functionality,
-        "required_tier": required_tier,
+        **access_decision.model_dump(),
+        "control_posture": control_posture,
         "effective_required_tier": effective_required_tier,
         "allowed": allowed,
-        "policy_tier": policy_score.policy_tier,
-        "control_posture": control_posture,
-        "access_score": policy_score.access_score,
-        "customer_score": policy_score.customer_score,
-        "system_score": policy_score.system_score,
+    }
+
+
+@router.get("/me/policy-decision", response_model=schemas.CustomerPolicyDecisionSummaryOut)
+async def read_users_policy_decision(
+    functionality: str,
+    required_tier: str = "standard",
+    current_user: models.User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    snapshot = await build_customer_policy_snapshot(db, current_user)
+    decision = build_policy_decision_report(snapshot, current_user, functionality, required_tier)
+    return {
+        **decision.model_dump(),
+        "topic_context": getattr(snapshot, "topic_context", ""),
+    }
+
+
+@router.get("/me/policy-decision/report", response_model=schemas.CustomerPolicyDecisionReportOut)
+async def read_users_policy_decision_report(
+    functionality: str,
+    required_tier: str = "standard",
+    current_user: models.User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    snapshot = await build_customer_policy_snapshot(db, current_user)
+    policy_score = build_policy_score_out(snapshot, current_user)
+    decision_report = build_policy_decision_report(snapshot, current_user, functionality, required_tier)
+    return {
+        "policy_decision": decision_report,
+        "policy_score": policy_score,
+        "control_posture": snapshot.control_posture,
+        "policy_tier": snapshot.policy_tier,
+        "topic_context": getattr(snapshot, "topic_context", ""),
     }
 
 

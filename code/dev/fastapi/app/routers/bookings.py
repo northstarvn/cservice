@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import and_, desc, func
@@ -10,17 +10,32 @@ from app import models, deps
 from app.schemas import schemas
 from app.services.bookings import (
     apply_booking_updates,
-    build_booking_diff,
     build_booking_assignment_report,
-    build_booking_assignment_report_from_record,
-    create_booking_event,
-    ensure_booking_transition_allowed,
-    get_owned_booking,
-    can_user_access_booking_functionality,
-    get_latest_booking_assignment,
+    build_booking_assignment_history_summary,
+    build_booking_assignment_report_payload,
+    build_booking_assignment_report_from_record_compat,
+    build_booking_assignment_summary,
+    build_booking_operation_report,
+    build_typed_booking_assignment_report,
+    build_typed_booking_assignment_report_from_existing_report,
+    build_typed_booking_assignment_report_from_record,
+    build_typed_booking_assignment_report_from_payload,
+    build_typed_booking_assignment_reports_from_records,
+    build_typed_booking_assignment_summary,
+    build_typed_booking_operation_report,
+    count_booking_statuses,
+    count_status_values,
     create_booking_assignment,
-    touch_booking,
+    create_booking_event,
+    can_user_access_booking_functionality,
+    get_booking_assignment_by_id,
+    get_latest_booking_assignment,
+    get_owned_booking,
+    list_booking_assignments,
     record_booking_mutation_event,
+    booking_to_event_out,
+    normalize_status_value,
+    touch_booking,
     transition_booking,
 )
 
@@ -38,6 +53,35 @@ def _booking_response_guidance(control_posture: str) -> str:
     if control_posture in {"constrained", "observed"}:
         return "Booking recorded with controlled access posture."
     return "Booking recorded successfully."
+
+
+def _controlled_booking_details(details: str, control_posture: str, action: str) -> str:
+    note = "Controlled posture note: booking {action} under monitored access.".format(action=action)
+    guidance = _booking_response_guidance(control_posture)
+    parts = [details] if details else []
+    if control_posture in {"constrained", "observed"}:
+        parts.append(note)
+    parts.append(guidance)
+    return "\n\n".join(parts)
+
+
+def _event_contains_any_field(note: str, fields: list[str]) -> bool:
+    normalized_note = (note or "").lower()
+    return any(field in normalized_note for field in fields)
+
+
+def _build_booking_assignment_report(
+    booking: models.Booking,
+    current_user: models.User,
+    report: dict,
+) -> schemas.BookingAssignmentReport:
+    return build_typed_booking_assignment_report(
+        booking,
+        current_user,
+        report,
+        _current_control_posture(current_user),
+    )
+
 
 @router.post("/", response_model=schemas.BookingOut)
 async def create_booking(
@@ -70,10 +114,7 @@ async def create_booking(
         await db.refresh(db_booking)
         control_posture = _current_control_posture(current_user)
         db_booking.control_posture = control_posture
-        if control_posture in {"constrained", "observed"} and db_booking.details:
-            db_booking.details = f"{db_booking.details}\n\nControlled posture note: booking created under monitored access."
-        if db_booking.details:
-            db_booking.details = f"{db_booking.details}\n\n{_booking_response_guidance(control_posture)}"
+        db_booking.details = _controlled_booking_details(db_booking.details, control_posture, "created")
         return db_booking
     except IntegrityError as e:
         await db.rollback()
@@ -184,8 +225,6 @@ async def update_booking(
         old_status = booking.status
         history_fields = {"title", "details", "scheduled_date", "service_type"}
         history_changed = any(field in update_data and getattr(booking, field) != update_data[field] for field in history_fields)
-        booking_diff = build_booking_diff(previous_booking, update_data)
-        
         apply_booking_updates(booking, update_data)
         touch_booking(booking)
 
@@ -218,7 +257,7 @@ async def update_booking(
         if control_posture in {"constrained", "observed"} and booking.details:
             booking.details = f"{booking.details}\n\nControlled posture note: booking updated under monitored access."
         if booking.details and control_posture in {"constrained", "observed"}:
-            booking.details = f"{booking.details}\n\n{_booking_response_guidance(control_posture)}"
+            booking.details = _controlled_booking_details(booking.details, control_posture, "updated")
         return booking
         
     except ValueError as e:
@@ -318,18 +357,20 @@ async def get_booking_history(
     visible_events = events if control_posture not in {"constrained", "observed"} else [
         event for event in events if not event.event_type.startswith("assignment_")
     ]
+    history_summary = build_booking_assignment_history_summary(
+        [event for event in events if event.event_type.startswith("assignment_")]
+    )
 
     return schemas.BookingHistoryReport(
         booking_id=booking.id,
         user_id=current_user.id,
         current_status=booking.status,
         event_count=len(visible_events),
+        assignment_events=history_summary["assignment_events"],
+        event_type_counts=history_summary["event_type_counts"],
         control_posture=control_posture,
         items=[
-            schemas.BookingEventOut(
-                **inspect(event).dict,
-                is_assignment_event=event.event_type.startswith("assignment_"),
-            )
+            booking_to_event_out(event)
             for event in visible_events
         ],
     )
@@ -356,6 +397,10 @@ async def get_booking_audit_summary(
     assignment_events = [event for event in events if event.event_type.startswith("assignment_")]
     created_events = [event for event in events if event.event_type == "created"]
     status_updates = [event for event in events if event.event_type == "status_updated"]
+    event_type_counts: dict[str, int] = {}
+    for event in events:
+        event_type = str(getattr(event, "event_type", "") or "unknown").lower()
+        event_type_counts[event_type] = event_type_counts.get(event_type, 0) + 1
     latest_event = events[0] if events else None
     control_posture = _current_control_posture(current_user)
     recent_mutation_fields = []
@@ -369,11 +414,34 @@ async def get_booking_audit_summary(
         assignment_events=len(assignment_events),
         created_events=len(created_events),
         status_updates=len(status_updates),
+        event_type_counts=event_type_counts,
         latest_event_at=latest_event.created_at if latest_event else None,
         latest_event_note=latest_event.note if latest_event else None,
         recent_mutation_fields=recent_mutation_fields,
         control_posture=control_posture,
     )
+
+
+@router.get("/{booking_id}/operation-report", response_model=schemas.BookingOperationReport)
+async def get_booking_operation_report(
+    booking_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking reporting requires a higher policy tier")
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignments = await list_booking_assignments(db, booking_id, current_user.id)
+    event_result = await db.execute(
+        select(models.BookingEvent)
+        .where(models.BookingEvent.booking_id == booking_id)
+        .where(models.BookingEvent.user_id == current_user.id)
+        .order_by(desc(models.BookingEvent.created_at), desc(models.BookingEvent.id))
+    )
+    events = event_result.scalars().all()
+    control_posture = _current_control_posture(current_user)
+    return build_typed_booking_operation_report(booking, assignments, events, control_posture)
 
 
 @router.get("/{booking_id}/assignment/history", response_model=schemas.BookingAssignmentHistoryReport)
@@ -397,17 +465,17 @@ async def get_booking_assignment_history(
     events = event_result.scalars().all()
     control_posture = _current_control_posture(current_user)
     visible_events = events if control_posture not in {"constrained", "observed"} else []
+    history_summary = build_booking_assignment_history_summary(events)
 
     return schemas.BookingAssignmentHistoryReport(
         booking_id=booking.id,
         user_id=current_user.id,
         event_count=len(visible_events),
+        assignment_events=history_summary["assignment_events"],
+        event_type_counts=history_summary["event_type_counts"],
         control_posture=control_posture,
         items=[
-            schemas.BookingEventOut(
-                **inspect(event).dict,
-                is_assignment_event=True,
-            )
+            booking_to_event_out(event, is_assignment_event=True)
             for event in visible_events
         ],
     )
@@ -423,26 +491,20 @@ async def get_booking_assignment_history_summary(
     if not can_user_access_booking_functionality(policy_score, "history"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment history requires a higher policy tier")
     booking = await get_owned_booking(db, booking_id, current_user)
-
-    summary_result = await db.execute(
-        select(
-            func.count(models.BookingEvent.id).label("event_count"),
-            func.max(models.BookingEvent.created_at).label("latest_event_at"),
-            func.max(models.BookingEvent.event_type).label("latest_event_type"),
-        )
+    event_result = await db.execute(
+        select(models.BookingEvent)
         .where(models.BookingEvent.booking_id == booking_id)
         .where(models.BookingEvent.user_id == current_user.id)
         .where(models.BookingEvent.event_type.like("assignment_%"))
+        .order_by(models.BookingEvent.created_at.desc())
     )
-    summary_row = summary_result.one()
+    events = event_result.scalars().all()
 
-    return schemas.BookingAssignmentHistorySummary(
-        booking_id=booking.id,
-        user_id=current_user.id,
-        event_count=summary_row.event_count or 0,
-        latest_event_at=summary_row.latest_event_at,
-        latest_event_type=summary_row.latest_event_type,
-        control_posture=_current_control_posture(current_user),
+    return build_typed_booking_assignment_history_summary(
+        booking,
+        current_user,
+        events,
+        _current_control_posture(current_user),
     )
 
 
@@ -457,24 +519,19 @@ async def get_booking_assignment_report(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment access requires a higher policy tier")
     booking = await get_owned_booking(db, booking_id, current_user)
     assignment = await get_latest_booking_assignment(db, booking.id, current_user.id)
-    report = (
-        build_booking_assignment_report_from_record(assignment)
-        if assignment
-        else build_booking_assignment_report(booking, current_user)
-    )
     control_posture = _current_control_posture(current_user)
-    decisions = [schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]]
-    if control_posture in {"constrained", "observed"}:
-        for decision in decisions:
-            decision.explanation = decision.explanation or "Controlled posture note: assignment recommendation is monitored."
-    return schemas.BookingAssignmentReport(
-        generated_at=report["generated_at"],
-        booking_id=report["booking_id"],
-        user_id=report["user_id"],
-        current_state=report["current_state"],
-        current_assignment_is_current=report["current_assignment_is_current"],
-        decisions=decisions,
-        control_posture=control_posture,
+    if assignment:
+        return build_typed_booking_assignment_report_from_record(
+            assignment,
+            current_user,
+            control_posture,
+        )
+
+    return build_typed_booking_assignment_report_from_payload(
+        booking,
+        current_user,
+        build_booking_assignment_report_payload(booking, current_user),
+        control_posture,
     )
 
 
@@ -495,21 +552,13 @@ async def create_booking_assignment_report(
         current_user,
         requested_assignment=assignment_request.model_dump(exclude_none=True),
     )
-    report = build_booking_assignment_report_from_record(assignment)
-    control_posture = _current_control_posture(current_user)
-    decisions = [schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]]
-    if control_posture in {"constrained", "observed"}:
-        for decision in decisions:
-            decision.explanation = decision.explanation or "Controlled posture note: assignment recommendation is monitored."
-    return schemas.BookingAssignmentReport(
-        generated_at=report["generated_at"],
-        booking_id=report["booking_id"],
-        user_id=report["user_id"],
-        current_state=report["current_state"],
-        current_assignment_is_current=report["current_assignment_is_current"],
-        decisions=decisions,
-        control_posture=control_posture,
+    report = build_typed_booking_assignment_report_from_record(
+        assignment,
+        current_user,
+        _current_control_posture(current_user),
     )
+    control_posture = _current_control_posture(current_user)
+    return report
 
 
 @router.patch("/{booking_id}/assignment", response_model=schemas.BookingAssignmentReport)
@@ -533,7 +582,11 @@ async def update_booking_assignment_report(
             current_user,
             requested_assignment=requested_assignment,
         )
-        report = build_booking_assignment_report_from_record(updated_assignment)
+        return _build_booking_assignment_report(
+            booking,
+            current_user,
+            build_booking_assignment_report_from_record(updated_assignment),
+        )
     else:
         created_assignment = await create_booking_assignment(
             db,
@@ -541,22 +594,159 @@ async def update_booking_assignment_report(
             current_user,
             requested_assignment=requested_assignment,
         )
-        report = build_booking_assignment_report_from_record(created_assignment)
+        return _build_booking_assignment_report(
+            booking,
+            current_user,
+                build_booking_assignment_report_from_record_compat(created_assignment),
+        )
 
+
+@router.get("/{booking_id}/assignment/{assignment_id}", response_model=schemas.BookingAssignmentReport)
+async def get_booking_assignment_by_id_report(
+    booking_id: int,
+    assignment_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "recommend"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment access requires a higher policy tier")
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignment = await get_booking_assignment_by_id(db, booking.id, assignment_id, current_user.id)
+    if not assignment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking assignment not found")
+
+    return _build_booking_assignment_report(
+        booking,
+        current_user,
+        build_booking_assignment_report_from_record(assignment),
+    )
+
+
+@router.get("/{booking_id}/assignment/current", response_model=schemas.BookingAssignmentReport)
+async def get_current_booking_assignment_report(
+    booking_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "recommend"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment access requires a higher policy tier")
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignment = await get_latest_booking_assignment(db, booking.id, current_user.id)
+    if not assignment:
+        report = build_booking_assignment_report(booking, current_user)
+    else:
+        return _build_booking_assignment_report(
+            booking,
+            current_user,
+            build_booking_assignment_report_from_record(assignment),
+        )
+
+    return build_typed_booking_assignment_report(
+        booking,
+        current_user,
+        report,
+        _current_control_posture(current_user),
+    )
+
+
+@router.get("/{booking_id}/assignment/reports", response_model=schemas.BookingAssignmentReportPage)
+async def get_booking_assignment_reports(
+    booking_id: int,
+    page: int = 1,
+    per_page: int = 50,
+    sort_order: str = "desc",
+    state: Optional[str] = None,
+    source: Optional[str] = None,
+    room_id: Optional[int] = None,
+    created_after: Optional[datetime] = None,
+    created_before: Optional[datetime] = None,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment history requires a higher policy tier")
+    if page < 1:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="page must be at least 1")
+    if per_page < 1:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="per_page must be at least 1")
+    if sort_order not in {"asc", "desc"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="sort_order must be 'asc' or 'desc'")
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignments = await list_booking_assignments(db, booking.id, current_user.id)
+    if sort_order == "asc":
+        assignments = list(reversed(assignments))
+    if state is not None:
+        normalized_state = state.lower()
+        if normalized_state not in {"suggested", "active", "confirmed", "declined", "cancelled"}:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="state must be one of suggested, active, confirmed, declined, or cancelled")
+        assignments = [assignment for assignment in assignments if str(assignment.state).lower() == normalized_state]
+    if source is not None:
+        normalized_source = source.strip().lower()
+        if not normalized_source:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="source must not be empty")
+        assignments = [assignment for assignment in assignments if str(assignment.source).lower() == normalized_source]
+    if room_id is not None:
+        assignments = [assignment for assignment in assignments if assignment.room_id == room_id]
+    if created_after is not None:
+        assignments = [assignment for assignment in assignments if getattr(assignment, "created_at", None) and assignment.created_at >= created_after]
+    if created_before is not None:
+        assignments = [assignment for assignment in assignments if getattr(assignment, "created_at", None) and assignment.created_at <= created_before]
+    page_summary = build_booking_assignment_report_page(assignments)
+    total_assignments = page_summary.total_assignments
+    pages = (total_assignments + per_page - 1) // per_page if total_assignments else 0
+    offset = (page - 1) * per_page
+    assignments = assignments[offset:offset + per_page]
     control_posture = _current_control_posture(current_user)
-    decisions = [schemas.BookingAssignmentDecision(**decision) for decision in report["decisions"]]
-    if control_posture in {"constrained", "observed"}:
-        for decision in decisions:
-            decision.explanation = decision.explanation or "Controlled posture note: assignment recommendation is monitored."
 
-    return schemas.BookingAssignmentReport(
-        generated_at=report["generated_at"],
-        booking_id=report["booking_id"],
-        user_id=report["user_id"],
-        current_state=report["current_state"],
-        current_assignment_is_current=report["current_assignment_is_current"],
-        decisions=decisions,
+    items = build_typed_booking_assignment_reports_from_records(assignments, current_user, control_posture)
+
+    return schemas.BookingAssignmentReportPage(
+        booking_id=booking.id,
+        user_id=current_user.id,
+        total_assignments=total_assignments,
+        current_assignments=page_summary.current_assignments,
+        historical_assignments=page_summary.historical_assignments,
+        state_counts=page_summary.state_counts,
+        source_counts=page_summary.source_counts,
+        created_after=created_after,
+        created_before=created_before,
+        page=page,
+        per_page=per_page,
+        pages=pages,
+        items=items,
         control_posture=control_posture,
+    )
+
+
+@router.get("/{booking_id}/assignment/summary", response_model=schemas.BookingAssignmentSummary)
+async def get_booking_assignment_summary(
+    booking_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+    policy_score: models.CustomerPolicyScore = Depends(deps.get_current_customer_policy_score),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    if not can_user_access_booking_functionality(policy_score, "history"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Booking assignment history requires a higher policy tier")
+    booking = await get_owned_booking(db, booking_id, current_user)
+    assignments = await list_booking_assignments(db, booking.id, current_user.id)
+    assignment_summary = build_typed_booking_assignment_summary(
+        booking,
+        current_user,
+        assignments,
+        _current_control_posture(current_user),
+    )
+
+    return schemas.BookingAssignmentSummary(
+        booking_id=assignment_summary.booking_id,
+        user_id=assignment_summary.user_id,
+        total_assignments=assignment_summary.total_assignments,
+        current_assignments=assignment_summary.current_assignments,
+        historical_assignments=assignment_summary.historical_assignments,
+        state_counts=assignment_summary.state_counts,
+        control_posture=assignment_summary.control_posture,
     )
 
 
@@ -583,9 +773,6 @@ async def get_booking_audit_summary(
     )
     events = event_result.scalars().all()
     control_posture = _current_control_posture(current_user)
-    posture_note = None
-    if control_posture in {"constrained", "observed"}:
-        posture_note = "Controlled posture note: audit summary reflects monitored access."
 
     return schemas.BookingAuditSummary(
         booking_id=booking.id,
@@ -599,9 +786,8 @@ async def get_booking_audit_summary(
             {
                 field
                 for event in events[:5]
-                for field in (
-                    [] if not event.note else [field for field in ("title", "details", "scheduled_date", "service_type", "status") if field in event.note]
-                )
+                for field in ("title", "details", "scheduled_date", "service_type", "status")
+                if _event_contains_any_field(event.note, [field])
             }
         ),
         control_posture=control_posture,
@@ -633,14 +819,7 @@ async def get_booking_analytics_summary(
         select(func.count(models.BookingEvent.id)).where(models.BookingEvent.created_at >= recent_cutoff)
     )
 
-    status_counts = {
-        str(getattr(status_value, "value", status_value)): int(count or 0)
-        for status_value, count in status_rows.all()
-    }
-    bookings_by_status = {
-        status.value: status_counts.get(status.value, 0)
-        for status in models.BookingStatus
-    }
+    bookings_by_status = count_booking_statuses(status_rows.all())
     event_counts = [
         schemas.AnalyticsEventCount(event_type=str(event_type), count=int(count or 0))
         for event_type, count in event_rows.all()
@@ -648,14 +827,21 @@ async def get_booking_analytics_summary(
     assignment_events_total = sum(
         count for event_type, count in event_rows.all() if str(event_type).startswith("assignment_")
     )
+    booking_events_total = int(total_events_result.scalar() or 0)
+    assignment_event_ratio = (
+        float(assignment_events_total) / float(booking_events_total)
+        if booking_events_total
+        else 0.0
+    )
 
     return schemas.AdminAnalyticsSummary(
         generated_at=now,
         total_users=int(total_users_result.scalar() or 0),
         total_bookings=int(total_bookings_result.scalar() or 0),
         bookings_by_status=bookings_by_status,
-        booking_events_total=int(total_events_result.scalar() or 0),
+        booking_events_total=booking_events_total,
         assignment_events_total=int(assignment_events_total or 0),
+        assignment_event_ratio=assignment_event_ratio,
         booking_events_by_type=event_counts,
         recent_bookings=int(recent_bookings_result.scalar() or 0),
         recent_events=int(recent_events_result.scalar() or 0),
@@ -700,17 +886,10 @@ async def get_booking_event_summary(
     result = await db.execute(query)
     events = result.scalars().all()
 
-    status_counts = {
-        "pending": 0,
-        "confirmed": 0,
-        "cancelled": 0,
-        "completed": 0,
-    }
-    for event in events:
-        status_key = str(getattr(event.to_status, "value", event.to_status or "unknown"))
-        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+    status_counts = count_status_values(event.to_status for event in events)
 
     assignment_events = sum(1 for event in events if event.event_type.startswith("assignment_"))
+    assignment_event_ratio = (assignment_events / len(events)) if events else 0.0
 
     return schemas.BookingEventFilterSummary(
         generated_at=datetime.now(timezone.utc),
@@ -726,6 +905,7 @@ async def get_booking_event_summary(
         statuses=status_counts,
         events=events,
         assignment_events=assignment_events,
+        assignment_event_ratio=assignment_event_ratio,
     )
 
 
@@ -763,12 +943,14 @@ async def export_booking_data(
     if control_posture in {"constrained", "observed"}:
         events = [event for event in events if not event.event_type.startswith("assignment_")]
         assignment_events_total = 0
+    assignment_event_ratio = (assignment_events_total / len(events)) if events else 0.0
 
     return schemas.BookingExportReport(
         generated_at=datetime.now(timezone.utc),
         total_bookings=len(bookings),
         total_events=len(events),
         assignment_events_total=assignment_events_total,
+        assignment_event_ratio=assignment_event_ratio,
         bookings=bookings,
         events=events,
         control_posture=control_posture,

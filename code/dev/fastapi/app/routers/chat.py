@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func, desc
 from app import deps, models
 from app.schemas.chat import (
     ChatMessageIn,
@@ -73,17 +73,29 @@ from app.schemas.chat import (
     RetentionSnapshotOperationsLaunchReadiness,
     RetentionSnapshotOperationsGoNoGo,
     RetentionSnapshotOperationsReport,
+    RetentionCoverageReport,
+    RetentionOperationalReport,
     LoyaltyRecoveryReport,
     MonetizationCohortReport,
     WeightedSystemMonitoringReport,
     WeightedFocusItem,
 )
 from app.schemas.schemas import UserOut
+from app.services.chat_analytics import _booking_status_counts, _pending_or_cancelled_bookings
+from app.services.chat_analytics import build_dissatisfaction_recovery_report, build_loyalty_recovery_report
 from app.services.chat_analytics import build_monetization_cohorts
 from app.services.chat_analytics import build_retention_snapshot_operations_report
-from app.services.chat_analytics import build_dissatisfaction_recovery_report, build_loyalty_recovery_report
+from app.services.retention import (
+    build_retention_dashboard as _build_shared_retention_dashboard,
+    build_retention_coverage_report,
+    build_retention_snapshot_delta as _build_shared_retention_snapshot_delta,
+    build_retention_snapshot_report as _build_shared_retention_snapshot_report,
+    build_retention_snapshot_trends as _build_shared_retention_snapshot_trends,
+    build_retention_operational_report,
+)
 from fastapi.responses import JSONResponse
-import requests,os
+import os
+import requests
 from dotenv import load_dotenv
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -93,6 +105,7 @@ import json
 load_dotenv()
 
 router = APIRouter()
+
 
 
 def _current_control_posture(current_user: models.User) -> str:
@@ -344,6 +357,9 @@ def _build_capabilities_payload() -> dict[str, object]:
             "payment_logistics_intelligence",
             "platform_channel_mapper",
             "retention_forecast_engine",
+            "topic_ranking",
+            "topic_policy_decisions",
+            "booking_assignment_reporting",
             "retention_snapshot_health_reporting",
             "retention_snapshot_operations_status_reporting",
             "retention_snapshot_operations_compliance_reporting",
@@ -387,6 +403,9 @@ def _build_capabilities_payload() -> dict[str, object]:
             },
         ],
         "endpoints": {
+            "topic_ranking": "/chat/topic-ranking",
+            "topic_policy_decisions": "/chat/topic-policy-decisions",
+            "booking_assignment_report": "/bookings/{booking_id}/assignment",
             "retention_snapshot_health_recommendation": "/chat/admin/snapshot-health-recommendation",
             "retention_snapshot_operations_report": "/chat/admin/snapshot-operations-report",
             "retention_snapshot_operations_status": "/chat/admin/snapshot-operations-status",
@@ -429,7 +448,7 @@ def _score_area(messages: list[str], bookings: list[models.Booking], area: str) 
             evidence.append(message)
 
     if area == "booking_flow":
-        cancelled_or_pending = [b for b in bookings if str(getattr(b.status, "value", b.status)) in {"pending", "cancelled"}]
+        cancelled_or_pending = _pending_or_cancelled_bookings(bookings)
         score += min(len(cancelled_or_pending) * 0.6, 2.4)
         if cancelled_or_pending:
             evidence.append(f"{len(cancelled_or_pending)} bookings are pending/cancelled")
@@ -522,11 +541,11 @@ def _build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: 
     if repeated_issues:
         top_issues.append("repeated concerns")
 
+    status_counts = _booking_status_counts(bookings)
+
     strengths = []
-    if bookings:
-        completed = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "completed"]
-        if completed:
-            strengths.append("users complete bookings successfully")
+    if status_counts["completed"]:
+        strengths.append("users complete bookings successfully")
     if not sentiment or sentiment.label != "negative":
         strengths.append("no strong negative sentiment in the latest message")
     if len(messages) > 3:
@@ -544,15 +563,12 @@ def _build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: 
         recency_bonus += 6.0
     if len(chat_rows) >= 3:
         recency_bonus += 4.0
-    completed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "completed"]
-    confirmed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "confirmed"]
-    cancelled_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "cancelled"]
-    if completed_bookings:
-        recency_bonus += min(len(completed_bookings) * 8.0, 20.0)
-    if confirmed_bookings:
-        recency_bonus += min(len(confirmed_bookings) * 4.0, 12.0)
-    if cancelled_bookings:
-        recency_bonus -= min(len(cancelled_bookings) * 5.0, 15.0)
+    if status_counts["completed"]:
+        recency_bonus += min(status_counts["completed"] * 8.0, 20.0)
+    if status_counts["confirmed"]:
+        recency_bonus += min(status_counts["confirmed"] * 4.0, 12.0)
+    if status_counts["cancelled"]:
+        recency_bonus -= min(status_counts["cancelled"] * 5.0, 15.0)
     if sentiment and sentiment.label == "positive":
         recency_bonus += 4.0
 
@@ -563,7 +579,7 @@ def _build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: 
     monetization_readiness = loyalty_score
     monetization_readiness += recency_bonus
     monetization_readiness += min(pricing_signals * 6.0, 12.0)
-    monetization_readiness += min(len(completed_bookings) * 3.0, 9.0)
+    monetization_readiness += min(status_counts["completed"] * 3.0, 9.0)
     monetization_readiness -= min(support_signals * 4.0, 12.0)
     monetization_readiness -= min(reliability_signals * 5.0, 15.0)
     monetization_readiness = max(0.0, min(100.0, round(monetization_readiness, 2)))
@@ -595,6 +611,18 @@ def _build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: 
     else:
         churn_risk = "high"
 
+    control_posture = _current_control_posture(getattr(chat_rows[0], "user", None)) if chat_rows else "observed"
+    metadata = _summary_metadata(
+        bookings,
+        repeated_issues,
+        pricing_signals,
+        support_signals,
+        reliability_signals,
+        insights,
+        top_issues,
+    )
+    if _current_control_posture(current_user) in {"observed", "constrained"}:
+        summary.metadata["control_posture_note"] = "Controlled posture applied."
     return InteractionSummary(
         user_id=user_id,
         messages_analyzed=len(chat_rows),
@@ -607,14 +635,9 @@ def _build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: 
         top_issues=top_issues,
         strengths=strengths or ["interaction history is still too small to infer strong patterns"],
         insights=insights,
-        metadata={
-            "window_days": 30,
-            "repeated_messages": len(repeated_issues),
-            "booking_states": Counter(str(getattr(b.status, "value", b.status)) for b in bookings),
-        },
+        metadata=metadata,
         generated_at=datetime.now(timezone.utc),
     )
-
 
 def _build_system_improvement_pack(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Sentiment | None) -> SystemImprovementPack:
     messages = [row.message for row in chat_rows]
@@ -973,10 +996,7 @@ async def _build_churn_prediction(db: AsyncSession, user_id: int, window_days: i
         risk_score += min(repeated_concerns * 3.0, 15.0)
         warning_reasons.append("The same concern appears multiple times in recent chats")
 
-    pending_bookings = 0
-    for status_count in summary.metadata.get("booking_states", {}).items():
-        if status_count[0] in {"pending", "cancelled"}:
-            pending_bookings += int(status_count[1])
+    pending_bookings = _pending_booking_count(summary.metadata.get("booking_states", {}))
     if pending_bookings:
         risk_score += min(pending_bookings * 5.0, 15.0)
         warning_reasons.append("There are unresolved or cancelled bookings in the recent window")
@@ -1959,6 +1979,7 @@ async def _build_retention_snapshot_operations_status(db: AsyncSession, window_d
         window_days=window_days,
         stale_after_days=stale_after_days,
         status=status,
+        risk_level=overview_report.risk_level,
         overview=overview_report.overview,
     )
 
@@ -1976,6 +1997,7 @@ async def _build_retention_snapshot_operations_compliance(db: AsyncSession, wind
         window_days=window_days,
         stale_after_days=stale_after_days,
         compliance=compliance,
+        risk_level=status_report.risk_level,
         overview=status_report.overview,
     )
 
@@ -1993,6 +2015,7 @@ async def _build_retention_snapshot_operations_posture(db: AsyncSession, window_
         window_days=window_days,
         stale_after_days=stale_after_days,
         posture=posture,
+        risk_level=compliance_report.risk_level,
         overview=compliance_report.overview,
     )
 
@@ -2009,16 +2032,17 @@ async def _build_retention_snapshot_operations_automation(db: AsyncSession, wind
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
         stale_after_days=stale_after_days,
-        automation_ready=automation_ready,
+        automation=automation_ready,
+        risk_level=posture_report.risk_level,
         overview=posture_report.overview,
     )
 
 
 async def _build_retention_snapshot_operations_execution_state(db: AsyncSession, window_days: int, stale_after_days: int) -> RetentionSnapshotOperationsExecutionState:
     automation_report = await _build_retention_snapshot_operations_automation(db, window_days, stale_after_days)
-    if automation_report.automation_ready == "ready":
+    if automation_report.automation == "ready":
         execution_state = "go"
-    elif automation_report.automation_ready == "conditional":
+    elif automation_report.automation == "conditional":
         execution_state = "hold"
     else:
         execution_state = "block"
@@ -2027,6 +2051,7 @@ async def _build_retention_snapshot_operations_execution_state(db: AsyncSession,
         window_days=window_days,
         stale_after_days=stale_after_days,
         execution_state=execution_state,
+        risk_level=automation_report.risk_level,
         overview=automation_report.overview,
     )
 
@@ -2043,16 +2068,17 @@ async def _build_retention_snapshot_operations_launch_readiness(db: AsyncSession
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
         stale_after_days=stale_after_days,
-        launch_readiness=launch_readiness,
+        readiness=launch_readiness,
+        risk_level=execution_report.risk_level,
         overview=execution_report.overview,
     )
 
 
 async def _build_retention_snapshot_operations_go_no_go(db: AsyncSession, window_days: int, stale_after_days: int) -> RetentionSnapshotOperationsGoNoGo:
     launch_report = await _build_retention_snapshot_operations_launch_readiness(db, window_days, stale_after_days)
-    if launch_report.launch_readiness == "launch_ready":
+    if launch_report.readiness == "launch_ready":
         decision = "go"
-    elif launch_report.launch_readiness == "launch_pending":
+    elif launch_report.readiness == "launch_pending":
         decision = "hold"
     else:
         decision = "block"
@@ -2066,125 +2092,15 @@ async def _build_retention_snapshot_operations_go_no_go(db: AsyncSession, window
 
 
 async def _build_retention_snapshot_report(db: AsyncSession, user_id: int, window_days: int) -> RetentionSnapshotReport:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    query = (
-        select(models.RetentionSnapshot)
-        .where(models.RetentionSnapshot.user_id == user_id)
-        .where(models.RetentionSnapshot.created_at >= cutoff)
-        .order_by(desc(models.RetentionSnapshot.created_at))
-    )
-    result = await db.execute(query)
-    snapshots = result.scalars().all()
-    return RetentionSnapshotReport(
-        generated_at=datetime.now(timezone.utc),
-        window_days=window_days,
-        snapshots=[
-            RetentionSnapshotItem(
-                id=snapshot.id,
-                user_id=snapshot.user_id,
-                snapshot_type=snapshot.snapshot_type,
-                window_days=snapshot.window_days,
-                loyalty_score=snapshot.loyalty_score,
-                churn_risk=snapshot.churn_risk,
-                lifecycle_stage=snapshot.lifecycle_stage,
-                summary_json=snapshot.summary_json,
-                created_at=snapshot.created_at,
-            )
-            for snapshot in snapshots
-        ],
-    )
+    return await _build_shared_retention_snapshot_report(db, user_id, window_days)
 
 
 async def _build_retention_snapshot_delta(db: AsyncSession, user_id: int, window_days: int) -> RetentionSnapshotDelta:
-    report = await _build_retention_snapshot_report(db, user_id, window_days)
-    current = report.snapshots[0] if report.snapshots else None
-    previous = report.snapshots[1] if len(report.snapshots) > 1 else None
-
-    if not current:
-        return RetentionSnapshotDelta(
-            user_id=user_id,
-            window_days=window_days,
-            previous_snapshot_id=None,
-            current_snapshot_id=None,
-            loyalty_score_delta=0.0,
-            churn_risk_delta="none",
-            lifecycle_stage_delta="none",
-            churn_risk_changed=False,
-            lifecycle_stage_changed=False,
-            previous_created_at=None,
-            current_created_at=None,
-            generated_at=datetime.now(timezone.utc),
-        )
-
-    return RetentionSnapshotDelta(
-        user_id=user_id,
-        window_days=window_days,
-        previous_snapshot_id=previous.id if previous else None,
-        current_snapshot_id=current.id,
-        loyalty_score_delta=round(current.loyalty_score - (previous.loyalty_score if previous else current.loyalty_score), 2),
-        churn_risk_delta=f"{previous.churn_risk if previous else current.churn_risk}->{current.churn_risk}",
-        lifecycle_stage_delta=f"{previous.lifecycle_stage if previous else current.lifecycle_stage}->{current.lifecycle_stage}",
-        churn_risk_changed=bool(previous and previous.churn_risk != current.churn_risk),
-        lifecycle_stage_changed=bool(previous and previous.lifecycle_stage != current.lifecycle_stage),
-        previous_created_at=previous.created_at if previous else None,
-        current_created_at=current.created_at,
-        generated_at=datetime.now(timezone.utc),
-    )
+    return await _build_shared_retention_snapshot_delta(db, user_id, window_days)
 
 
 async def _build_retention_snapshot_trends(db: AsyncSession, user_id: int, window_days: int) -> RetentionSnapshotTrendReport:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    query = (
-        select(models.RetentionSnapshot)
-        .where(models.RetentionSnapshot.user_id == user_id)
-        .where(models.RetentionSnapshot.created_at >= cutoff)
-        .order_by(desc(models.RetentionSnapshot.created_at))
-    )
-    result = await db.execute(query)
-    snapshots = result.scalars().all()
-
-    grouped: dict[str, list[models.RetentionSnapshot]] = {}
-    for snapshot in snapshots:
-        grouped.setdefault(snapshot.snapshot_type, []).append(snapshot)
-
-    trend_items = []
-    for snapshot_type, items in sorted(grouped.items()):
-        avg_loyalty = sum(item.loyalty_score for item in items) / max(len(items), 1)
-        avg_churn = sum({"low": 0.0, "medium": 1.0, "high": 2.0, "critical": 3.0}.get(item.churn_risk, 0.0) for item in items) / max(len(items), 1)
-        trend_items.append(
-            RetentionSnapshotTrendItem(
-                snapshot_type=snapshot_type,
-                count=len(items),
-                avg_loyalty_score=round(avg_loyalty, 2),
-                avg_churn_risk_score=round(avg_churn, 2),
-                latest_created_at=items[0].created_at if items else None,
-            )
-        )
-
-    return RetentionSnapshotTrendReport(
-        generated_at=datetime.now(timezone.utc),
-        window_days=window_days,
-        trends=trend_items,
-    )
-
-
-async def _build_retention_dashboard(db: AsyncSession, user_id: int, window_days: int) -> RetentionDashboard:
-    chat_rows, bookings = await _load_user_interaction_window(db, user_id, window_days)
-    latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
-    summary = _build_summary(user_id, chat_rows, bookings, latest_sentiment)
-    churn_prediction = await _build_churn_prediction(db, user_id, window_days)
-    snapshot_report = await _build_retention_snapshot_report(db, user_id, window_days)
-    snapshot_delta = await _build_retention_snapshot_delta(db, user_id, window_days)
-    snapshot_trends = await _build_retention_snapshot_trends(db, user_id, window_days)
-    return RetentionDashboard(
-        generated_at=datetime.now(timezone.utc),
-        window_days=window_days,
-        summary=summary,
-        churn_prediction=churn_prediction,
-        snapshot_report=snapshot_report,
-        snapshot_delta=snapshot_delta,
-        snapshot_trends=snapshot_trends,
-    )
+    return await _build_shared_retention_snapshot_trends(db, user_id, window_days)
 
 
 @router.post("/retention/maintenance", response_model=RetentionMaintenanceResult)
@@ -2448,6 +2364,24 @@ async def get_retention_snapshot_operations_report(
     return await build_retention_snapshot_operations_report(db, window_days, stale_after_days)
 
 
+@router.get("/chat/admin/retention-coverage", response_model=RetentionCoverageReport)
+async def get_retention_coverage_report(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_retention_coverage_report(db, current_user.id, window_days)
+
+
+@router.get("/chat/admin/retention-operations", response_model=RetentionOperationalReport)
+async def get_retention_operational_report(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_retention_operational_report(db, current_user.id, window_days)
+
+
 @router.get("/chat/admin/snapshot-operations-status", response_model=RetentionSnapshotOperationsStatus)
 async def get_retention_snapshot_operations_status(
     stale_after_days: int = Query(default=14, ge=1, le=365),
@@ -2536,7 +2470,7 @@ def analyze_sentiment(text: str):
         label = result[0][0]["label"].lower()
         score = result[0][0]["score"]
         return Sentiment(label=label, score=score)
-    except Exception:
+    except (requests.RequestException, KeyError, IndexError, TypeError, ValueError):
         return None
 
 @router.post("/chat", response_model=ChatMessageOut)
@@ -2559,6 +2493,8 @@ async def chat_message(
     insights = _build_interaction_insights([row.message for row in chat_rows] + [user_message], bookings, sentiment)
     summary = _build_summary(current_user.id, chat_rows, bookings, sentiment)
     improvement_pack = _build_system_improvement_pack(current_user.id, chat_rows, bookings, sentiment)
+    if _current_control_posture(current_user) in {"observed", "constrained"}:
+        summary.metadata["control_posture_note"] = "Controlled posture applied."
 
     suggestions = [
         "Review the top retention risks",
@@ -2594,12 +2530,6 @@ async def chat_message(
         lifecycle_stage = "engaged"
     await _save_retention_snapshot(db, current_user.id, 30, "chat_response", summary, lifecycle_stage)
     await _prune_retention_snapshots(db, current_user.id, 30, keep=20)
-
-    control_posture = _current_control_posture(current_user)
-    if control_posture in {"constrained", "observed"}:
-        metadata = dict(getattr(summary, "metadata", {}))
-        metadata["control_posture_note"] = "Controlled posture applied."
-        summary.metadata = metadata
 
     return ChatMessageOut(
         text=ai_response,
@@ -2815,7 +2745,7 @@ async def get_retention_dashboard(
     db: AsyncSession = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user)
 ):
-    return await _build_retention_dashboard(db, current_user.id, window_days)
+    return await _build_shared_retention_dashboard(db, current_user.id, window_days)
 
 
 @router.get("/chat/recovery-dashboard", response_model=LoyaltyRecoveryReport)
@@ -2853,3 +2783,32 @@ async def get_improvement_pack(
     bookings = booking_result.scalars().all()
     latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
     return _build_system_improvement_pack(current_user.id, chat_rows, bookings, latest_sentiment)
+
+
+@router.get("/chat/signal-synthesis", response_model=InteractionSummary)
+async def get_signal_synthesis(
+    window_days: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user)
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    chat_query = (
+        select(models.ChatHistory)
+        .where(models.ChatHistory.user_id == current_user.id)
+        .where(models.ChatHistory.timestamp >= cutoff)
+        .order_by(desc(models.ChatHistory.timestamp))
+    )
+    booking_query = (
+        select(models.Booking)
+        .where(models.Booking.user_id == current_user.id)
+        .where(models.Booking.created_at >= cutoff)
+        .order_by(desc(models.Booking.created_at))
+    )
+
+    chat_result = await db.execute(chat_query)
+    booking_result = await db.execute(booking_query)
+    chat_rows = chat_result.scalars().all()
+    bookings = booking_result.scalars().all()
+    latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
+    synthesis = build_signal_synthesis_report(current_user.id, chat_rows, bookings, latest_sentiment)
+    return synthesis["summary"]
