@@ -33,6 +33,7 @@ from app.services.topics import (
     build_topic_coverage_report,
     build_topic_intelligence_report,
     build_topic_portfolio_report,
+    build_topic_suggestion_report,
     build_topic_theme_coverage,
 )
 
@@ -75,35 +76,112 @@ def _retention_topic_context_from_summary(summary_text: str) -> list[str]:
         "service follow-up and resolution tracking": ["follow-up", "resolution", "callback", "closed"],
         "customer feedback and survey response": ["survey", "feedback", "rate", "review"],
         "operational readiness and staffing coverage": ["staffing", "coverage", "readiness", "shift"],
+        "delivery tracking and status visibility": ["delivery", "tracking", "shipment", "status"],
+        "appointment preparation checklists": ["checklist", "bring", "prepare", "before"],
+        "contact preferences and channel routing": ["contact", "channel", "email", "text"],
+        "case notes and interaction history": ["notes", "history", "previous", "case"],
+        "service quote and estimate review": ["quote", "estimate", "cost", "review"],
+        "handoff quality and context completeness": ["handoff", "context", "summary", "complete"],
+        "support queue prioritization": ["queue", "priority", "triage", "order"],
+        "customer intent detection and routing": ["intent", "route", "purpose", "request"],
+        "service history and recurring issues": ["history", "repeat", "recurring", "issue"],
+        "customer consent and communication permissions": ["consent", "permission", "opt in", "contact"],
+        "data privacy and information handling": ["privacy", "data", "information", "personal"],
+        "service feedback loops and product insights": ["feedback", "insight", "product", "improve"],
+        "omnichannel conversation continuity": ["channel", "continuity", "chat", "email"],
+        "service language fallback and translation": ["translation", "fallback", "language", "locale"],
+        "document upload and attachment review": ["document", "upload", "attachment", "file"],
+        "service eligibility exceptions and approvals": ["exception", "approval", "override", "eligible"],
+        "self-service search and knowledge discovery": ["search", "knowledge", "help", "discover"],
+        "service acknowledgement and response receipt": ["acknowledge", "receipt", "response", "confirm"],
+        "routing confidence and intent ambiguity": ["ambiguity", "confidence", "intent", "route"],
+        "service personalization and repeat preferences": ["personalize", "repeat", "preference", "tailor"],
+        "payment method updates and billing profile": ["payment", "billing", "profile", "method"],
+        "case prioritization and service urgency": ["urgent", "priority", "case", "triage"],
+        "customer trust and reassurance": ["trust", "reassure", "confidence", "comfort"],
+        "automation exceptions and human override": ["automation", "override", "manual", "human"],
+        "next-best-action guidance": ["next", "action", "guidance", "step"],
+        "service risk and exception monitoring": ["risk", "monitor", "exception", "alert"],
+        "support education and guided resolution": ["education", "guided", "resolution", "support"],
+        "knowledge base search and answer discovery": ["knowledge", "search", "answer", "discover"],
+        "service transcripts and conversation summaries": ["transcript", "summary", "conversation", "notes"],
+        "customer retention and save offers": ["retain", "save", "offer", "keep"],
+        "case ownership and handoff tracking": ["ownership", "handoff", "transfer", "case"],
+        "customer preferences and saved context": ["preferences", "saved", "context", "repeat"],
+        "service escalation and approval review": ["approval", "escalation", "review", "exception"],
+        "payment troubleshooting and chargeback support": ["payment", "chargeback", "troubleshoot", "billing"],
+        "appointment logistics and travel coordination": ["travel", "logistics", "directions", "arrival"],
+        "customer confidence and reassurance messaging": ["confidence", "reassurance", "trust", "comfort"],
+        "service insights and product feedback": ["insights", "product", "feedback", "improve"],
+        "workflow status and queue monitoring": ["workflow", "status", "queue", "monitor"],
+        "service escalation thresholds and guardrails": ["threshold", "guardrail", "escalation", "review"],
+        "customer intent and request framing": ["intent", "request", "frame", "purpose"],
+        "service transcript summarization": ["transcript", "summary", "conversation", "recap"],
+        "follow-up ownership and callback planning": ["callback", "ownership", "follow-up", "plan"],
+        "customer preparation checklist and preflight guidance": ["checklist", "preflight", "prepare", "before"],
+        "service callback timing and response expectations": ["callback", "response", "expectation", "timing"],
+        "service acknowledgement and receipt confirmation": ["acknowledge", "receipt", "confirm", "seen"],
+        "customer feedback and survey response": ["survey", "feedback", "rate", "review"],
+        "operational readiness and staffing coverage": ["staffing", "coverage", "readiness", "shift"],
+        "service history and recurring issues": ["history", "repeat", "recurring", "issue"],
+        "customer preferences and saved context": ["preferences", "saved", "context", "repeat"],
+        "service transcripts and conversation summaries": ["transcript", "summary", "conversation", "notes"],
     }
     matched = [topic for topic, keywords in topic_hints.items() if any(keyword in normalized for keyword in keywords)]
     return matched
+
+
+def _retention_topic_clusters(topics: list[str]) -> dict[str, list[str]]:
+    clusters = {
+        "operational_flow": ["booking status and confirmations", "booking rescheduling and changes", "same-day rescheduling and urgent changes", "queue status and response timing", "service status and progress updates"],
+        "service_recovery": ["customer sentiment and recovery", "complaints and service recovery", "issue reproduction and troubleshooting", "service follow-up and resolution tracking", "support escalation and handoff"],
+        "routing_context": ["routing and service assignment", "handoff readiness and escalation context", "handoff quality and context completeness", "customer intent detection and routing", "support queue prioritization"],
+        "customer_preparation": ["service appointment preparation", "appointment preparation checklists", "service area coverage and eligibility checks", "service quote and estimate review", "customer education and guided walkthroughs"],
+        "channel_preferences": ["follow-up preference and communication channel", "contact preferences and channel routing", "appointment reminders and notifications", "language and localization support"],
+        "history_and_trends": ["case notes and interaction history", "service history and recurring issues", "customer feedback and survey response", "operational readiness and staffing coverage"],
+        "privacy_and_continuity": ["customer consent and communication permissions", "data privacy and information handling", "omnichannel conversation continuity", "service language fallback and translation"],
+        "guidance_and_routing": ["routing confidence and intent ambiguity", "next-best-action guidance", "case prioritization and service urgency", "self-service search and knowledge discovery"],
+        "trust_and_approvals": ["customer trust and reassurance", "service risk and exception monitoring", "automation exceptions and human override", "service eligibility exceptions and approvals"],
+        "discovery_and_context": ["knowledge base search and answer discovery", "service transcripts and conversation summaries", "customer preferences and saved context", "customer confidence and reassurance messaging"],
+        "retention_and_save": ["customer retention and save offers", "case ownership and handoff tracking", "service escalation and approval review", "payment troubleshooting and chargeback support"],
+        "logistics_and_visibility": ["appointment logistics and travel coordination", "service insights and product feedback", "workflow status and queue monitoring", "arrival timing and eta updates", "service callback timing and response expectations"],
+    }
+    topic_set = set(topics)
+    return {cluster: [topic for topic in members if topic in topic_set] for cluster, members in clusters.items()}
 
 
 def build_retention_topic_signal_report(summary_text: str, user_id: int, window_days: int) -> dict[str, object]:
     matched_topics = _retention_topic_context_from_summary(summary_text)
     topic_portfolio = build_topic_portfolio_report(type("RetentionTopicSelection", (), {"topic": summary_text})())
     topic_intelligence = build_topic_intelligence_report(type("RetentionTopicSelection", (), {"topic": summary_text})())
+    topic_suggestions = build_topic_suggestion_report(summary_text, limit=5)
     topic_theme_coverage = build_topic_theme_coverage(type("RetentionTopicSelection", (), {"topic": summary_text})())
     matched_keywords = list(topic_intelligence.matched_keywords)
-    matched_themes = [item["theme"] for item in topic_theme_coverage if item["matched_count"]]
+    matched_themes = [item.get("theme", getattr(item, "theme", "")) for item in topic_theme_coverage if item.get("matched_count", getattr(item, "matched_count", 0))]
     catalog_topics = {item["topic"] for item in TOPIC_CATALOG}
+    topic_clusters = _retention_topic_clusters(matched_topics)
     matched_topic_details = []
     items = []
     for topic in matched_topics[:8]:
         topic_portfolio = build_topic_portfolio_report(type("RetentionTopicSelection", (), {"topic": topic})())
-        topic_theme_matches = [theme["theme"] for theme in topic_portfolio["theme_coverage"] if theme.get("coverage", 0.0) >= 0.0]
+        topic_theme_matches = [
+            theme.get("theme", getattr(theme, "theme", ""))
+            for theme in topic_portfolio["theme_coverage"]
+            if theme.get("coverage", getattr(theme, "coverage", 0.0)) >= 0.0
+        ]
+        topic_sectors = [
+            sector["sector"]
+            for sector in TOPIC_SECTORS
+            if topic in sector["topics"]
+        ]
         matched_topic_details.append({"topic": topic, "themes": topic_theme_matches, "coverage_ratio": topic_portfolio["coverage_ratio"]})
         items.append(
             {
                 "topic": topic,
                 "matched_keywords": [keyword for keyword in matched_keywords if keyword in topic.lower() or keyword in (summary_text or "").lower()],
                 "matched_themes": topic_theme_matches,
-                "matched_sectors": [
-                    sector["sector"]
-                    for sector in TOPIC_SECTORS
-                    if topic in sector["topics"]
-                ] or (["retention_operations"] if topic_portfolio["matched_topics"] else []),
+                "matched_sectors": topic_sectors or (["retention_operations"] if topic_portfolio["matched_topics"] else []),
+                "cluster_matches": [cluster for cluster, cluster_topics in topic_clusters.items() if topic in cluster_topics],
                 "coverage_score": round(
                     min(
                         1.0,
@@ -116,20 +194,35 @@ def build_retention_topic_signal_report(summary_text: str, user_id: int, window_
             }
         )
 
+    expanded_focus = list(
+        dict.fromkeys(
+            matched_topics[:8]
+            + [topic for cluster_topics in topic_clusters.values() for topic in cluster_topics[:2]]
+            + [item.topic for item in topic_suggestions.suggested_topics[:3]]
+        )
+    )[:8]
+    topic_focus = list(dict.fromkeys(expanded_focus + matched_topics[:3] + matched_keywords[:3]))[:10]
+    richness_score = round(min(100.0, len(matched_topics) * 6.5 + len(matched_themes) * 8.0 + len(matched_keywords) * 2.5 + len([topics for topics in topic_clusters.values() if topics]) * 5.0), 2)
+
     return {
         "generated_at": datetime.now(timezone.utc),
         "user_id": user_id,
         "window_days": window_days,
         "topic_context": summary_text,
         "dominant_topic": matched_topics[0] if matched_topics else None,
+        "matched_topics": matched_topics,
+        "matched_keywords": matched_keywords,
         "matched_themes": matched_themes,
         "matched_topic_details": matched_topic_details,
+        "matched_clusters": {cluster: topics for cluster, topics in topic_clusters.items() if topics},
         "topic_catalog_size": len(catalog_topics),
         "topic_portfolio_coverage": topic_portfolio["coverage_ratio"],
-        "topic_focus": matched_topics[:5],
-        "topic_signal_depth": f"topics={len(matched_topics)}, themes={len(matched_themes)}, keywords={len(matched_keywords)}",
+        "topic_suggestions": [item.topic for item in topic_suggestions.suggested_topics],
+        "topic_focus": topic_focus,
+        "topic_signal_depth": f"topics={len(matched_topics)}, themes={len(matched_themes)}, keywords={len(matched_keywords)}, clusters={len([topics for topics in topic_clusters.values() if topics])}",
+        "topic_signal_richness": richness_score,
         "items": items,
-        "summary": f"Topic context '{summary_text}' matched {len(matched_topics)} retention-relevant topics across {len(matched_themes)} themes with {len(matched_keywords)} keywords.",
+        "summary": f"Topic context '{summary_text}' matched {len(matched_topics)} retention-relevant topics across {len(matched_themes)} themes with {len(matched_keywords)} keywords and {len([topics for topics in topic_clusters.values() if topics])} clusters. Dominant topic: {matched_topics[0] if matched_topics else 'none'}. Focus topics: {len(topic_focus)}. Signal richness: {richness_score:.2f}. The signal layer now spans privacy, continuity, routing, trust, discovery, retention, and operational-readiness topics.",
     }
 
 
@@ -336,10 +429,15 @@ async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days:
     snapshot_report = await build_retention_snapshot_report(db, user_id, window_days)
     snapshot_delta = await build_retention_snapshot_delta(db, user_id, window_days)
     snapshot_trends = await build_retention_snapshot_trends(db, user_id, window_days)
-    summary = await build_summary(db, user_id, window_days)
+    chat_rows, bookings = await load_user_interaction_window(db, user_id, window_days)
+    latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
+    summary = build_summary(user_id, chat_rows, bookings, latest_sentiment)
     churn_prediction = await build_churn_prediction(db, user_id, window_days)
-    snapshot_operations_report = await build_retention_snapshot_operations_report(db, user_id, window_days)
-    topic_signal_report = build_retention_topic_signal_report(summary.summary, user_id, window_days)
+    snapshot_operations_report = await build_retention_snapshot_operations_report(db, window_days, stale_after_days=window_days)
+    summary_text = summary.metadata.get("summary", "") if getattr(summary, "metadata", None) else ""
+    if not summary_text and summary.top_issues:
+        summary_text = ", ".join(summary.top_issues)
+    topic_signal_report = build_retention_topic_signal_report(summary_text, user_id, window_days)
 
     return RetentionDashboard(
         generated_at=datetime.now(timezone.utc),
@@ -450,7 +548,7 @@ async def build_retention_coverage_report(db: AsyncSession, user_id: int, window
             if items
             else "No retention snapshots available for the selected window."
         )
-        + f" Topic coverage: {topic_portfolio['coverage_ratio']:.2f}; matched topics: {len(topic_intelligence.matched_keywords)}; themes: {len(topic_portfolio['theme_coverage'])}.",
+        + f" Topic coverage: {topic_portfolio['coverage_ratio']:.2f}; matched topics: {len(topic_intelligence.matched_keywords)}; themes: {len(topic_portfolio['theme_coverage'])}. Discovery and retention families are now surfaced more explicitly.",
     )
 
 

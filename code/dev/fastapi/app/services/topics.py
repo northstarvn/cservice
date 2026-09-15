@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
 from app.schemas import schemas
+from app.schemas import chat as chat_schemas
 
 
 TOPIC_CATALOG: list[dict[str, str | float | list[str]]] = [
@@ -498,7 +499,7 @@ def build_topic_taxonomy_report() -> schemas.TopicTaxonomyReport:
         sectors=sorted({str(group["sector"]) for group in TOPIC_SECTORS}),
         topic_map=topic_map,
         theme_map=theme_map,
-        summary=f"Topic taxonomy spans {len(TOPIC_CATALOG)} topics across {len(TOPIC_THEME_GROUPS)} themes and {len(TOPIC_SECTORS)} sectors.",
+        summary=f"Topic taxonomy spans {len(TOPIC_CATALOG)} topics across {len(TOPIC_THEME_GROUPS)} themes and {len(TOPIC_SECTORS)} sectors with {len(topic_map[:5])} representative focus topics.",
         topic_focus=[item["topic"] for item in TOPIC_CATALOG[:5]],
     )
 
@@ -536,7 +537,7 @@ def build_topic_richness_report(selection: Optional[models.TopicSelection]) -> d
         "theme_matches": matched_themes,
         "coverage_ratio": intelligence.coverage_ratio,
         "richness_score": richness_score,
-        "summary": intelligence.summary,
+        "summary": f"{intelligence.summary} Richness score {richness_score:.2f} uses {keyword_count} keywords and {len(matched_themes)} matched themes.",
     }
 
 
@@ -549,6 +550,7 @@ def build_topic_selection_report(selection: models.TopicSelection) -> schemas.To
         rationale=selection.rationale,
         confidence=selection.confidence,
         is_current=bool(getattr(selection, "is_current", True)),
+        summary=f"Selection for '{selection.topic}' from {selection.source} with confidence {selection.confidence:.2f}.",
     )
 
 
@@ -564,6 +566,7 @@ def build_topic_selection_history_report(
         "generated_at": datetime.now(timezone.utc),
         "user_id": user_id,
         "items": [build_topic_selection_out(selection) for selection in selections],
+        "summary": f"Selection history tracks {len(selections)} topic selections for user {user_id}.",
     }
 
 
@@ -591,7 +594,7 @@ def build_topic_catalog_report() -> schemas.TopicCatalogReport:
         ],
         summary=(
             f"Topic catalog spans {len(TOPIC_CATALOG)} entries across {theme_report['total_themes']} themes."
-            f" Top prefixes emphasize the most common topic families."
+            f" Top prefixes emphasize the most common topic families with {len(category_counter.most_common(5))} dominant groups."
         ),
     )
 
@@ -613,11 +616,11 @@ def build_topic_theme_report() -> dict:
         "generated_at": datetime.now(timezone.utc),
         "total_themes": len(TOPIC_THEME_GROUPS),
         "themes": theme_counts,
-        "summary": f"Theme coverage tracks {len(TOPIC_THEME_GROUPS)} themes across {len(TOPIC_CATALOG)} catalog topics.",
+        "summary": f"Theme coverage tracks {len(TOPIC_THEME_GROUPS)} themes across {len(TOPIC_CATALOG)} catalog topics with {sum(1 for item in theme_counts if item['coverage'] >= 1.0)} fully covered themes.",
     }
 
 
-def build_topic_coverage_report(selection: Optional[models.TopicSelection]) -> dict:
+def build_topic_coverage_report(selection: Optional[models.TopicSelection]) -> chat_schemas.TopicCoverageReport:
     intelligence = build_topic_intelligence_report(selection)
     top_topics = intelligence.suggested_topics[:3]
     selected_topic = (selection.topic if selection else "") or ""
@@ -636,19 +639,62 @@ def build_topic_coverage_report(selection: Optional[models.TopicSelection]) -> d
                 "topic_count": len(covered),
             }
         )
-    return {
-        "generated_at": datetime.now(timezone.utc),
-        "topic": selection.topic if selection else None,
-        "matched_topics": [item["topic"] for item in matched_catalog_topics],
-        "keyword_matches": intelligence.matched_keywords,
-        "coverage_ratio": intelligence.coverage_ratio,
-        "top_recommendations": [item.topic for item in top_topics],
-        "theme_coverage": coverage_by_theme,
-        "summary": (
+    return chat_schemas.TopicCoverageReport(
+        generated_at=datetime.now(timezone.utc),
+        topic=selection.topic if selection else None,
+        matched_topics=[item["topic"] for item in matched_catalog_topics],
+        matched_topic_count=len(matched_catalog_topics),
+        keyword_matches=intelligence.matched_keywords,
+        keyword_match_count=len(intelligence.matched_keywords),
+        coverage_ratio=intelligence.coverage_ratio,
+        catalog_size=len(TOPIC_CATALOG),
+        top_recommendations=[item.topic for item in top_topics],
+        theme_coverage=[chat_schemas.TopicCoverageThemeItem(**item) for item in coverage_by_theme],
+        topic_focus=list(dict.fromkeys([selection.topic if selection else ""] + [item.topic for item in top_topics]))[:5],
+        matched_theme_topics=[topic for group in TOPIC_THEME_GROUPS for topic in group["topics"] if topic in selected_text],
+        summary=(
             f"Coverage report matches {len(matched_catalog_topics)} catalog topics"
-            f" across {len(coverage_by_theme)} themes for the current selection."
+            f" across {len(coverage_by_theme)} themes for the current selection with {len(top_topics)} top recommendations."
         ),
-    }
+    )
+
+
+def build_topic_suggestion_report(
+    query: str,
+    limit: int = 5,
+    theme: str | None = None,
+    sector: str | None = None,
+) -> schemas.TopicSuggestionReport:
+    normalized_query = (query or "").strip()
+    query_text = normalized_query.lower()
+    suggestions = []
+
+    for item in TOPIC_CATALOG:
+        topic_text = item["topic"].lower()
+        keyword_hits = [keyword for keyword in item.get("keywords", []) if keyword in query_text]
+        theme_hits = []
+        sector_hits = []
+        if theme:
+            theme_hits = [group["theme"] for group in TOPIC_THEME_GROUPS if group["theme"] == theme and item["topic"] in group["topics"]]
+        if sector:
+            sector_hits = [group["sector"] for group in TOPIC_SECTORS if group["sector"] == sector and item["topic"] in group["topics"]]
+        if query_text and (query_text in topic_text or keyword_hits or theme_hits or sector_hits):
+            suggestions.append(item)
+
+    if not suggestions:
+        suggestions = list(TOPIC_CATALOG[:limit])
+
+    trimmed = suggestions[:limit]
+    topic_focus = list(dict.fromkeys([item["topic"] for item in trimmed]))
+    return schemas.TopicSuggestionReport(
+        generated_at=datetime.now(timezone.utc),
+        query=normalized_query,
+        total_results=len(trimmed),
+        suggested_topics=[schemas.TopicSearchResult(topic=item["topic"], score=float(item["confidence"]) * 100.0, matched_keywords=list(item.get("keywords", []))) for item in trimmed],
+        catalog_size=len(TOPIC_CATALOG),
+        topic_focus=topic_focus,
+        summary=f"Found {len(trimmed)} topic suggestions for '{normalized_query or 'all topics'}'.",
+    )
 
 
 def build_topic_intelligence_report(selection: Optional[models.TopicSelection]) -> schemas.TopicIntelligenceReport:
@@ -690,30 +736,47 @@ def build_topic_intelligence_report(selection: Optional[models.TopicSelection]) 
     )
 
 
-def build_topic_recommendation_report(selection: Optional[models.TopicSelection]) -> dict:
+def build_topic_recommendation_report(selection: Optional[models.TopicSelection]) -> schemas.TopicRecommendationReport:
     intelligence = build_topic_intelligence_report(selection)
     suggested_topics = intelligence.suggested_topics
     primary_topic = suggested_topics[0].topic if suggested_topics else None
     portfolio = build_topic_portfolio_report(selection)
-    return {
-        "generated_at": intelligence.generated_at,
-        "topic": intelligence.topic,
-        "primary_topic": primary_topic,
-        "coverage_ratio": intelligence.coverage_ratio,
-        "match_count": intelligence.match_count,
-        "matched_themes": portfolio["matched_themes"],
-        "theme_coverage": portfolio["theme_coverage"],
-        "recommendations": [
+    topic_focus = list(
+        dict.fromkeys(
+            [topic for topic in [primary_topic] if topic]
+            + list(portfolio["matched_themes"])
+            + [item.topic for item in suggested_topics[:3]]
+        )
+    )[:5]
+    theme_coverage = []
+    for item in portfolio["theme_coverage"]:
+        theme_coverage.append(
             {
-                "topic": item.topic,
-                "source": item.source,
-                "confidence": item.confidence,
-                "rationale": item.rationale,
+                "theme": item.get("theme", getattr(item, "theme", "")),
+                "coverage": item.get("coverage", getattr(item, "coverage", 0.0)),
+                "topic_count": item.get("topic_count", getattr(item, "topic_count", 0)),
             }
+        )
+    return schemas.TopicRecommendationReport(
+        generated_at=intelligence.generated_at,
+        topic=intelligence.topic,
+        primary_topic=primary_topic,
+        coverage_ratio=intelligence.coverage_ratio,
+        match_count=intelligence.match_count,
+        matched_themes=portfolio["matched_themes"],
+        theme_coverage=theme_coverage,
+        topic_focus=topic_focus,
+        recommendations=[
+            schemas.TopicRecommendationItem(
+                topic=item.topic,
+                source=item.source,
+                confidence=item.confidence,
+                rationale=item.rationale,
+            )
             for item in suggested_topics[:3]
         ],
-        "summary": intelligence.summary + f" Theme matches: {len(portfolio['matched_themes'])}.",
-    }
+        summary=intelligence.summary + f" Theme matches: {len(portfolio['matched_themes'])}. Coverage entries: {len(theme_coverage)}.",
+    )
 
 
 def build_topic_portfolio_report(selection: Optional[models.TopicSelection]) -> dict:
@@ -722,21 +785,43 @@ def build_topic_portfolio_report(selection: Optional[models.TopicSelection]) -> 
     taxonomy_report = build_topic_taxonomy_report()
     coverage_report = build_topic_coverage_report(selection)
     richness_report = build_topic_richness_report(selection)
-    topic_focus = list(dict.fromkeys(coverage_report["matched_topics"] + coverage_report["top_recommendations"]))[:5]
+    topic_focus = list(dict.fromkeys(list(coverage_report.matched_topics) + list(coverage_report.top_recommendations)))[:5]
     return {
         "generated_at": datetime.now(timezone.utc),
         "topic": selection.topic if selection else None,
         "catalog_total": catalog.total_topics,
         "theme_total": theme_report["total_themes"],
         "taxonomy_total": taxonomy_report.total_topics,
-        "coverage_ratio": coverage_report["coverage_ratio"],
-        "top_recommendations": coverage_report["top_recommendations"],
-        "matched_topics": coverage_report["matched_topics"],
-        "theme_coverage": coverage_report["theme_coverage"],
+        "coverage_ratio": coverage_report.coverage_ratio,
+        "top_recommendations": list(coverage_report.top_recommendations),
+        "matched_topics": list(coverage_report.matched_topics),
+        "theme_coverage": [
+            {
+                "theme": item.theme,
+                "topic_count": item.topic_count,
+                "coverage": item.coverage,
+            }
+            for item in coverage_report.theme_coverage
+        ],
         "richness_score": richness_report["richness_score"],
         "matched_themes": [theme["theme"] for theme in richness_report["theme_matches"]],
         "topic_focus": topic_focus,
-        "summary": coverage_report["summary"] + f" Focus topics: {len(topic_focus)}.",
+        "summary": coverage_report.summary + f" Focus topics: {len(topic_focus)}.",
+    }
+
+
+def _topic_recommendation_dict(report: schemas.TopicRecommendationReport) -> dict[str, object]:
+    return {
+        "generated_at": report.generated_at,
+        "topic": report.topic,
+        "primary_topic": report.primary_topic,
+        "coverage_ratio": report.coverage_ratio,
+        "match_count": report.match_count,
+        "matched_themes": list(report.matched_themes),
+        "theme_coverage": list(report.theme_coverage),
+        "recommendations": list(report.recommendations),
+        "topic_focus": list(report.topic_focus),
+        "summary": report.summary,
     }
 
 
@@ -779,7 +864,79 @@ def build_typed_topic_theme_report() -> dict:
 
 
 def build_typed_topic_recommendation_report(selection: Optional[models.TopicSelection]) -> dict:
-    return build_topic_recommendation_report(selection)
+    return _topic_recommendation_dict(build_topic_recommendation_report(selection))
+
+
+def build_typed_topic_suggestion_report(
+    query: str,
+    limit: int = 5,
+    theme: str | None = None,
+    sector: str | None = None,
+) -> schemas.TopicSuggestionReport:
+    return build_topic_suggestion_report(query, limit=limit, theme=theme, sector=sector)
+
+
+def build_topic_search_report(
+    query: str,
+    limit: int = 5,
+    page: int = 1,
+    per_page: int = 5,
+    theme: str | None = None,
+    sector: str | None = None,
+) -> schemas.TopicSearchReport:
+    suggestion_report = build_topic_suggestion_report(query, limit=max(limit, per_page), theme=theme, sector=sector)
+    total_results = len(suggestion_report.suggested_topics)
+    total_pages = max(1, (total_results + max(1, per_page) - 1) // max(1, per_page))
+    start = max(0, (page - 1) * max(1, per_page))
+    end = start + max(1, per_page)
+    items = suggestion_report.suggested_topics[start:end]
+    window_start = start + 1 if total_results else 0
+    window_end = min(end, total_results)
+    return schemas.TopicSearchReport(
+        generated_at=suggestion_report.generated_at,
+        query=suggestion_report.query,
+        total_results=total_results,
+        page=page,
+        per_page=per_page,
+        total_pages=total_pages,
+        items=items,
+        catalog_size=suggestion_report.catalog_size,
+        topic_focus=list(suggestion_report.topic_focus),
+        summary=f"{suggestion_report.summary} Showing {window_start}-{window_end} of {total_results} results across {suggestion_report.catalog_size} catalog topics and {len(suggestion_report.suggested_topics)} ranked suggestions.",
+    )
+
+
+def build_topic_intelligence_overview(
+    user_id: int,
+    selection: Optional[models.TopicSelection],
+    selections: list[models.TopicSelection],
+) -> schemas.TopicIntelligenceOverview:
+    workspace = build_topic_workspace_report(user_id, selection, selections)
+    portfolio = workspace.portfolio
+    coverage = workspace.coverage
+    recommendations = _topic_recommendation_dict(build_topic_recommendation_report(selection))
+    suggested_topics = build_topic_search_report(
+        selection.topic if selection else "",
+        limit=5,
+        page=1,
+        per_page=5,
+    ).items
+    topic_focus = list(dict.fromkeys(workspace.topic_focus + [item.topic for item in suggested_topics]))[:8]
+    return schemas.TopicIntelligenceOverview(
+        generated_at=workspace.generated_at,
+        user_id=user_id,
+        topic=workspace.topic,
+        workspace=workspace,
+        portfolio=portfolio,
+        coverage=coverage,
+        recommendations=recommendations,
+        suggested_topics=suggested_topics,
+        catalog_size=workspace.catalog.total_topics,
+        matched_topic_count=len(coverage.get("matched_topics", [])),
+        suggestion_count=len(suggested_topics),
+        summary=f"Topic overview for user {user_id} with {len(coverage.get('matched_topics', []))} matched topics and {len(suggested_topics)} suggestions.",
+        topic_focus=topic_focus,
+    )
 
 
 def build_topic_workspace_report(
@@ -795,7 +952,19 @@ def build_topic_workspace_report(
     portfolio = build_topic_portfolio_report(selection)
     recommendations = build_typed_topic_recommendation_report(selection)
     history = build_typed_topic_selection_history_report(user_id, selections)
-    topic_focus = list(dict.fromkeys(portfolio.get("topic_focus", []) + recommendations.get("matched_themes", [])[:3]))[:5]
+    portfolio_themes = [
+        item.get("theme", "")
+        for item in portfolio.get("theme_coverage", [])
+        if item.get("theme")
+    ]
+    topic_focus = list(
+        dict.fromkeys(
+            portfolio.get("topic_focus", [])
+            + portfolio_themes[:3]
+            + recommendations.get("matched_themes", [])[:3]
+        )
+    )[:5]
+    coverage_payload = coverage.model_dump() if hasattr(coverage, "model_dump") else coverage
     return schemas.TopicWorkspaceReport(
         generated_at=datetime.now(timezone.utc),
         user_id=user_id,
@@ -804,12 +973,13 @@ def build_topic_workspace_report(
         taxonomy=taxonomy,
         themes=themes,
         intelligence=intelligence,
-        coverage=coverage,
+        coverage=coverage_payload,
         portfolio=portfolio,
         recommendations=recommendations,
         selection_history=history,
         richness_score=float(portfolio.get("richness_score", 0.0)),
         topic_focus=topic_focus,
+        summary=f"Workspace for user {user_id} with {catalog.total_topics} catalog topics and richness {float(portfolio.get('richness_score', 0.0)):.2f}.",
     )
 
 

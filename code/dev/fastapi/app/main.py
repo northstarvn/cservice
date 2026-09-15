@@ -103,9 +103,15 @@ async def app_metadata():
             "bookings",
             "booking_events",
             "topic_selection",
+            "topic_intelligence_overview",
+            "topic_taxonomy_expansion",
+            "topic_privacy_and_continuity",
+            "topic_search_and_suggestions_metadata",
             "chat",
             "chat_history_summary",
+            "chat_signal_synthesis_bundle",
             "retention",
+            "retention_topic_signal_expansion",
         ],
     }
 
@@ -118,6 +124,7 @@ async def app_capabilities():
 @app.get("/meta/ecosystem")
 async def app_ecosystem():
     capabilities = _build_capabilities_payload()
+    coverage = capabilities.get("coverage", {})
     return {
         "name": APP_NAME,
         "version": APP_VERSION,
@@ -156,10 +163,10 @@ async def app_ecosystem():
                     "/chat/admin/snapshot-operations-gonogo",
                 ],
                 "purpose": "snapshot health, compliance, launch readiness, and go/no-go checks",
-                "status": "ready" if capabilities["coverage"]["status"] == "ready" else "partial",
+                "status": "ready" if coverage.get("status") == "ready" else "partial",
                 "coverage": {
                     "routes": 7,
-                    "freshness_window_days": capabilities["coverage"]["freshness_window_days"],
+                    "freshness_window_days": coverage.get("freshness_window_days"),
                 },
             },
             "booking_assignment": {
@@ -170,7 +177,7 @@ async def app_ecosystem():
             "portfolio_intelligence": {
                 "routes": ["/chat/admin/monetization-cohorts", "/meta/capabilities"],
                 "purpose": "cross-segment monetization, capability discovery, and study-driven role coverage",
-                "status": "ready" if capabilities["coverage"]["status"] == "ready" else "partial",
+                "status": "ready" if coverage.get("status") == "ready" else "partial",
                 "roles": [
                     "youth_conversion_intelligence",
                     "market_penetration_adoption",
@@ -179,6 +186,21 @@ async def app_ecosystem():
                     "older_adult_value_model",
                     "low_penetration_engagement_engine",
                 ],
+            },
+            "topic_intelligence": {
+                "routes": ["/topics/overview", "/topics/workspace", "/topics/intelligence", "/topics/search", "/topics/suggestions"],
+                "purpose": "composite topic workspace, cross-service intelligence, and selection-aware topic discovery with broader topic coverage",
+                "status": "ready",
+                "coverage": {
+                    "routes": 5,
+                    "catalog_size": "exposed through overview, search, and suggestion responses",
+                    "expanded_topics": [
+                        "customer consent and communication permissions",
+                        "data privacy and information handling",
+                        "omnichannel conversation continuity",
+                        "routing confidence and intent ambiguity",
+                    ],
+                },
             },
         },
         "capabilities": capabilities,
@@ -201,6 +223,9 @@ async def app_feature_summary():
             "chat_history": "/chat/history",
             "topic_selection": "/topics/current",
             "topic_selection_history": "/topics/history",
+            "topic_catalog": "/topics/catalog",
+            "topic_workspace": "/topics/workspace",
+            "topic_search": "/topics/search",
             "retention_dashboard": "/retention/dashboard",
             "retention_maintenance": "/retention/maintenance",
         },

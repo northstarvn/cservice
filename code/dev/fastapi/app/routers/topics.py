@@ -6,9 +6,12 @@ from app.schemas import schemas
 from app.services.topics import (
     archive_topic_selection,
     build_topic_coverage_report,
+    build_topic_intelligence_overview,
+    build_topic_search_report,
     build_topic_catalog_report,
     build_topic_portfolio_report,
     build_topic_recommendation_report,
+    build_topic_suggestion_report,
     build_topic_theme_report,
     build_topic_workspace_report,
     build_topic_selection_history_report,
@@ -73,6 +76,38 @@ async def read_topic_workspace(
     selection = await get_latest_topic_selection(db, current_user.id)
     selections = await get_topic_selection_history(db, current_user.id)
     return build_topic_workspace_report(current_user.id, selection, selections)
+
+
+@router.get("/overview", response_model=schemas.TopicIntelligenceOverview)
+async def read_topic_overview(
+    current_user: models.User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    selection = await get_latest_topic_selection(db, current_user.id)
+    selections = await get_topic_selection_history(db, current_user.id)
+    return build_topic_intelligence_overview(current_user.id, selection, selections)
+
+
+@router.get("/search", response_model=schemas.TopicSearchReport)
+async def read_topic_search(
+    query: str,
+    limit: int = 5,
+    page: int = 1,
+    per_page: int = 5,
+    theme: str | None = None,
+    sector: str | None = None,
+):
+    return build_topic_search_report(query, limit=limit, page=page, per_page=per_page, theme=theme, sector=sector)
+
+
+@router.get("/suggestions", response_model=schemas.TopicSuggestionReport)
+async def read_topic_suggestions(
+    query: str,
+    limit: int = 5,
+    theme: str | None = None,
+    sector: str | None = None,
+):
+    return build_topic_suggestion_report(query, limit=limit, theme=theme, sector=sector)
 
 
 @router.get("/recommendations", response_model=schemas.TopicRecommendationReport)

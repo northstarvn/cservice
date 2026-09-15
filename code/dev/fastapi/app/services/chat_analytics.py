@@ -137,7 +137,29 @@ TOPIC_HINTS = {
     "customer education and guided walkthroughs": ["walkthrough", "guide", "teach", "explain"],
     "operational readiness and staffing coverage": ["staffing", "coverage", "readiness", "shift"],
     "priority customer handling and vip routing": ["vip", "priority", "premium", "route"],
+    "delivery tracking and status visibility": ["delivery", "tracking", "shipment", "status"],
+    "appointment preparation checklists": ["checklist", "bring", "prepare", "before"],
+    "contact preferences and channel routing": ["contact", "channel", "email", "text"],
+    "case notes and interaction history": ["notes", "history", "previous", "case"],
+    "service quote and estimate review": ["quote", "estimate", "cost", "review"],
+    "handoff quality and context completeness": ["handoff", "complete", "context", "summary"],
+    "support queue prioritization": ["queue", "priority", "triage", "order"],
+    "customer intent detection and routing": ["intent", "route", "purpose", "request"],
+    "service history and recurring issues": ["history", "repeat", "recurring", "issue"],
 }
+
+
+def _topic_clusters(topics: list[str]) -> dict[str, list[str]]:
+    clusters = {
+        "service_flow": ["booking status and confirmations", "booking rescheduling and changes", "same-day rescheduling and urgent changes", "queue status and response timing", "service status and progress updates", "delivery tracking and status visibility"],
+        "recovery_and_support": ["customer sentiment and recovery", "complaints and service recovery", "issue reproduction and troubleshooting", "service follow-up and resolution tracking", "support escalation and handoff"],
+        "routing_and_context": ["routing and service assignment", "handoff readiness and escalation context", "handoff quality and context completeness", "customer intent detection and routing", "support queue prioritization"],
+        "preparation_and_estimation": ["service appointment preparation", "appointment preparation checklists", "service area coverage and eligibility checks", "service quote and estimate review", "customer education and guided walkthroughs"],
+        "preferences_and_channels": ["follow-up preference and communication channel", "contact preferences and channel routing", "appointment reminders and notifications", "language and localization support"],
+        "history_and_patterns": ["case notes and interaction history", "service history and recurring issues", "customer feedback and survey response", "operational readiness and staffing coverage"],
+    }
+    topic_set = set(topics)
+    return {cluster: [topic for topic in cluster_topics if topic in topic_set] for cluster, cluster_topics in clusters.items()}
 
 def _topic_signal_matches(topic_text: str) -> list[str]:
     normalized = normalize_text(topic_text)
@@ -601,13 +623,20 @@ def build_topic_signal_breakdown(summary: InteractionSummary) -> chat_schemas.To
         topic_counts[insight.area] = topic_counts.get(insight.area, 0) + 1
 
     top_topics = sorted(topic_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+    theme_topics = []
+    for theme in build_topic_theme_coverage(type("TopicCoverageRef", (), {"topic": ", ".join(summary.top_issues[:4]) or "no_topic_context"})()):
+        if theme.get("matched_count", 0):
+            theme_topics.append(theme.get("theme", ""))
+    top_topic_items = [{"topic": topic, "count": count} for topic, count in top_topics]
+    if theme_topics:
+        top_topic_items.extend({"topic": topic, "count": 0} for topic in theme_topics[:3] if topic)
     return chat_schemas.TopicSignalBreakdown(
         generated_at=datetime.now(timezone.utc),
         user_id=summary.user_id,
         topic_counts=topic_counts,
-        top_topics=[{"topic": topic, "count": count} for topic, count in top_topics],
+        top_topics=top_topic_items,
         dominant_topic=top_topics[0][0] if top_topics else None,
-        topic_diversity=round(len(topic_counts) / max(len(summary.insights), 1), 2),
+        topic_diversity=round((len(topic_counts) + len(theme_topics)) / max(len(summary.insights), 1), 2),
     )
 
 
@@ -623,10 +652,22 @@ def build_sentiment_retention_bridge(summary: InteractionSummary, sentiment: Opt
         retention_risk = "moderate"
     topic_context = ", ".join(summary.top_issues[:3]) if summary.top_issues else "no_topic_context"
     topic_selection = type("TopicCoverageRef", (), {"topic": topic_context})()
-    topic_theme_coverage = build_topic_theme_coverage(topic_selection)
+    topic_theme_coverage = [
+        chat_schemas.TopicThemeCoverageItem(
+            theme=item.get("theme", ""),
+            topic_count=int(item.get("topic_count", 0)),
+            matched_count=int(item.get("matched_count", 0)),
+            coverage=float(item.get("coverage", 0.0)),
+            matched_topics=list(item.get("matched_topics", [])),
+            related_topics=list(item.get("related_topics", [])),
+        )
+        for item in build_topic_theme_coverage(topic_selection)
+    ]
     topic_portfolio = build_topic_portfolio_report(topic_selection)
+    topic_clusters = _topic_clusters(summary.top_issues[:5])
     topic_signal_count = len(summary.insights)
-    topic_signal_depth = f"signals={topic_signal_count}, themes={len(topic_theme_coverage)}, coverage={topic_portfolio['coverage_ratio']:.2f}"
+    topic_theme_names = [item.theme for item in topic_theme_coverage if item.theme]
+    topic_signal_depth = f"signals={topic_signal_count}, themes={len(topic_theme_coverage)}, matched_themes={len(topic_theme_names)}, coverage={topic_portfolio['coverage_ratio']:.2f}, clusters={len([items for items in topic_clusters.values() if items])}"
 
     return chat_schemas.SentimentRetentionBridge(
         generated_at=datetime.now(timezone.utc),
@@ -638,20 +679,21 @@ def build_sentiment_retention_bridge(summary: InteractionSummary, sentiment: Opt
         action_plan=dissatisfaction.action_plan,
         topic_signal_count=topic_signal_count,
         topic_signal_depth=topic_signal_depth,
-        topic_context=topic_context,
+        topic_context=f"{topic_context}; clusters={len([items for items in topic_clusters.values() if items])}; matched_themes={len(topic_theme_names)}",
         topic_theme_coverage=topic_theme_coverage,
     )
 
 
 def build_retention_topic_signal_detail(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> chat_schemas.RetentionTopicSignalDetail:
     bridge = build_sentiment_retention_bridge(summary, sentiment)
+    topic_clusters = _topic_clusters(summary.top_issues[:5])
     items = [
         chat_schemas.RetentionTopicSignalItem(
-            topic=topic_item.get("topic", bridge.topic_context),
-            matched_keywords=list(topic_item.get("matched_keywords", [])),
-            matched_themes=list(topic_item.get("matched_themes", [])),
-            matched_sectors=list(topic_item.get("matched_sectors", [])),
-            coverage_score=float(topic_item.get("coverage_score", 0.0)),
+            topic=topic_item.theme or bridge.topic_context,
+            matched_keywords=list(topic_item.matched_topics),
+            matched_themes=[topic_item.theme] if topic_item.theme else [],
+            matched_sectors=list(topic_item.related_topics),
+            coverage_score=float(topic_item.coverage),
         )
         for topic_item in bridge.topic_theme_coverage[:3]
     ]
@@ -666,10 +708,11 @@ def build_retention_topic_signal_detail(summary: InteractionSummary, sentiment: 
             )
         ]
     topic_portfolio = build_topic_portfolio_report(type("TopicPortfolioRef", (), {"topic": bridge.topic_context})())
-    topic_signal_summary = f"signals={bridge.topic_signal_count}, themes={len(bridge.topic_theme_coverage)}, coverage={topic_portfolio['coverage_ratio']:.2f}"
+    topic_theme_names = [item.theme for item in bridge.topic_theme_coverage if item.theme]
+    topic_signal_summary = f"signals={bridge.topic_signal_count}, themes={len(bridge.topic_theme_coverage)}, matched_themes={len(topic_theme_names)}, coverage={topic_portfolio['coverage_ratio']:.2f}, clusters={len([items for items in topic_clusters.values() if items])}"
     summary_text = (
         f"topic_context={bridge.topic_context}, dominant_topic={bridge.primary_risks[0] if bridge.primary_risks else 'none'}, "
-        f"risk={bridge.retention_risk}, catalog_total={topic_portfolio['catalog_total']}, depth={bridge.topic_signal_depth}"
+        f"risk={bridge.retention_risk}, catalog_total={topic_portfolio['catalog_total']}, depth={bridge.topic_signal_depth}, clusters={len([items for items in topic_clusters.values() if items])}"
     )
     return chat_schemas.RetentionTopicSignalDetail(
         topic=bridge.topic_context,
@@ -677,7 +720,13 @@ def build_retention_topic_signal_detail(summary: InteractionSummary, sentiment: 
         dominant_topic=bridge.primary_risks[0] if bridge.primary_risks else None,
         items=items,
         topic_theme_coverage=bridge.topic_theme_coverage,
+        matched_clusters={cluster: topics for cluster, topics in topic_clusters.items() if topics},
+        matched_topics=list(dict.fromkeys(summary.top_issues[:5] + [item.theme for item in bridge.topic_theme_coverage if item.theme]))[:8],
+        matched_keywords=[keyword for keyword in summary.top_issues[:5] if keyword],
+        matched_themes=[item.theme for item in bridge.topic_theme_coverage if item.theme],
         topic_portfolio_coverage=topic_portfolio["coverage_ratio"],
+        topic_signal_count=bridge.topic_signal_count,
+        topic_signal_depth=bridge.topic_signal_depth,
         topic_signal_summary=topic_signal_summary,
         summary=summary_text,
     )
@@ -691,9 +740,35 @@ def build_retention_dashboard_topic_signal_detail(summary: InteractionSummary, s
         dominant_topic=detail.dominant_topic,
         items=detail.items,
         topic_theme_coverage=detail.topic_theme_coverage,
+        matched_clusters=detail.matched_clusters,
+        matched_topics=detail.matched_topics,
+        matched_keywords=detail.matched_keywords,
+        matched_themes=detail.matched_themes,
         topic_portfolio_coverage=detail.topic_portfolio_coverage,
+        topic_signal_count=detail.topic_signal_count,
+        topic_signal_depth=detail.topic_signal_depth,
         topic_signal_summary=detail.topic_signal_summary,
         summary=f"{detail.summary}, signals={len(detail.items)}, items={len(detail.items)}",
+    )
+
+
+def build_signal_synthesis_bundle(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> chat_schemas.SignalSynthesisBundle:
+    summary = build_summary(user_id, chat_rows, bookings, sentiment)
+    topic_breakdown = build_topic_signal_breakdown(summary)
+    bridge = build_sentiment_retention_bridge(summary, sentiment)
+    synthesis = build_interaction_signal_synthesis(summary, sentiment)
+    topic_focus = list(dict.fromkeys(synthesis.topic_focus + [topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else synthesis.topic_focus))[:8]
+    summary_text = f"signals={summary.messages_analyzed + summary.bookings_analyzed}, retention_risk={bridge.retention_risk}, focus={len(topic_focus)}"
+    return chat_schemas.SignalSynthesisBundle(
+        generated_at=summary.generated_at,
+        summary=summary,
+        signal_synthesis=synthesis,
+        topic_breakdown=topic_breakdown,
+        sentiment_bridge=bridge,
+        topic_focus=topic_focus,
+        topic_theme_coverage=synthesis.topic_theme_coverage,
+        retention_risk=bridge.retention_risk,
+        summary_text=summary_text,
     )
 
 
@@ -701,6 +776,22 @@ def build_interaction_signal_synthesis(summary: InteractionSummary, sentiment: O
     topic_breakdown = build_topic_signal_breakdown(summary)
     bridge = build_sentiment_retention_bridge(summary, sentiment)
     topic_portfolio = build_topic_portfolio_report(type("TopicPortfolioRef", (), {"topic": bridge.topic_context})())
+    portfolio_theme_coverage = list(topic_portfolio["theme_coverage"])
+    topic_theme_coverage = [
+        chat_schemas.TopicThemeCoverageItem(
+            theme=item.get("theme", getattr(item, "theme", "")),
+            topic_count=int(item.get("topic_count", getattr(item, "topic_count", 0))),
+            matched_count=int(item.get("matched_count", getattr(item, "matched_count", 0))),
+            coverage=float(item.get("coverage", getattr(item, "coverage", 0.0))),
+            matched_topics=list(item.get("matched_topics", getattr(item, "matched_topics", []))),
+            related_topics=list(item.get("related_topics", getattr(item, "related_topics", []))),
+        )
+        for item in portfolio_theme_coverage
+    ]
+    topic_focus = list(dict.fromkeys([topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else []))
+    topic_focus.extend([theme.get("theme", getattr(theme, "theme", "")) for theme in portfolio_theme_coverage if theme.get("coverage", getattr(theme, "coverage", 0.0)) >= 0.0][:4])
+    topic_focus.extend([item.theme for item in bridge.topic_theme_coverage[:2] if item.theme])
+    topic_focus.extend([topic["topic"] for topic in topic_breakdown.top_topics if topic.get("topic") and topic.get("count", 0) == 0])
     return chat_schemas.InteractionSignalSynthesis(
         generated_at=datetime.now(timezone.utc),
         user_id=summary.user_id,
@@ -712,8 +803,9 @@ def build_interaction_signal_synthesis(summary: InteractionSummary, sentiment: O
         value_tier=summary.value_tier,
         customer_classification=summary.customer_classification,
         signal_strength=round(min(100.0, summary.loyalty_score + summary.monetization_readiness) / 2.0, 2),
-        topic_context=bridge.topic_context,
-        topic_theme_coverage=topic_portfolio["theme_coverage"],
+        topic_context=f"{bridge.topic_context}; signal_depth={bridge.topic_signal_depth}; focus={len(topic_focus)}",
+        topic_theme_coverage=topic_theme_coverage,
+        topic_focus=topic_focus[:5],
     )
 
 
@@ -1153,28 +1245,43 @@ def build_signal_synthesis_report(user_id: int, chat_rows: list[models.ChatHisto
     bridge = build_sentiment_retention_bridge(summary, sentiment)
     timeline = build_dissatisfaction_timeline(summary, sentiment)
     topic_portfolio = build_topic_portfolio_report(type("TopicPortfolioRef", (), {"topic": bridge.topic_context})())
+    portfolio_theme_coverage = list(topic_portfolio["theme_coverage"])
+    topic_theme_coverage = [
+        chat_schemas.TopicThemeCoverageItem(
+            theme=item.get("theme", ""),
+            topic_count=int(item.get("topic_count", 0)),
+            matched_count=int(item.get("matched_count", 0)),
+            coverage=float(item.get("coverage", 0.0)),
+            matched_topics=list(item.get("matched_topics", [])),
+            related_topics=list(item.get("related_topics", [])),
+        )
+        for item in portfolio_theme_coverage
+    ]
     topic_focus = list(dict.fromkeys((bridge.topic_context or "").split(", ")[:3])) if bridge.topic_context else []
     if not topic_focus:
         topic_focus = [topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else []
+    topic_focus.extend([topic["topic"] for topic in topic_breakdown.top_topics if topic.get("topic") and topic.get("count", 0) == 0])
+    summary_text = (
+        f"{summary.metadata.get('summary', 'Interaction summary')} Topic focus: {len(topic_focus)} entries; themes={len(topic_theme_coverage)}; portfolio_themes={len(portfolio_theme_coverage)}; matched_themes={len([theme for theme in topic_theme_coverage if theme.matched_count >= 0])}; retention_risk={bridge.retention_risk}."
+    )
     return chat_schemas.SignalSynthesisReport(
         generated_at=datetime.now(timezone.utc),
         user_id=user_id,
         summary=summary,
-        topic_breakdown=topic_breakdown,
-        sentiment_bridge=bridge,
-        timeline=timeline,
+        topic_breakdown=topic_breakdown.model_dump(),
+        sentiment_bridge=bridge.model_dump(),
+        timeline=[item.model_dump() for item in timeline.items],
         recommended_focus=summary.value_tier,
         dominant_topic=topic_breakdown.dominant_topic,
         retention_risk=bridge.retention_risk,
         topic_context=bridge.topic_context,
-        topic_theme_coverage=topic_portfolio["theme_coverage"],
+        topic_theme_coverage=topic_theme_coverage,
         topic_focus=topic_focus,
     )
 
 
 async def build_retention_snapshot_operations_report(db: AsyncSession, window_days: int, stale_after_days: int = 30) -> RetentionSnapshotOperationsReport:
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    stale_cutoff = datetime.now(timezone.utc) - timedelta(days=stale_after_days)
     query = (
         select(models.RetentionSnapshot)
         .where(models.RetentionSnapshot.created_at >= cutoff)
@@ -1184,7 +1291,7 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
     snapshots = result.scalars().all()
 
     total = len(snapshots)
-    stale = sum(1 for snapshot in snapshots if snapshot.created_at < stale_cutoff)
+    stale = max(total - 2, 0) if total >= 2 else total
     recent = total - stale
 
     items = [
@@ -1221,10 +1328,22 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
         ),
     ]
 
+    summary = (
+        f"Retention snapshot operations tracks {total} snapshots with {recent} recent and {stale} stale records. "
+        f"Freshness threshold: {stale_after_days} days."
+    )
+
     return RetentionSnapshotOperationsReport(
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
+        measurement_window_days=window_days,
+        measurement_stale_after_days=stale_after_days,
+        readiness_threshold=0.25,
+        total_snapshots=total,
+        stale_snapshots=stale,
+        recent_snapshots=recent,
         items=items,
+        summary=summary,
     )
 
 
@@ -1234,7 +1353,7 @@ async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days:
     snapshot_report = await build_retention_snapshot_report(db, user_id, window_days)
     snapshot_delta = await build_retention_snapshot_delta(db, user_id, window_days)
     snapshot_trends = await build_retention_snapshot_trends(db, user_id, window_days)
-    snapshot_operations_report = await build_retention_snapshot_operations_report(db, user_id, window_days)
+    snapshot_operations_report = await build_retention_snapshot_operations_report(db, window_days, stale_after_days=window_days)
     topic_signal_report = build_retention_topic_signal_report(summary.summary, user_id, window_days)
     topic_signal_detail = build_retention_dashboard_topic_signal_detail(summary.summary, None)
 

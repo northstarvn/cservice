@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import sys
+import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
@@ -46,17 +47,28 @@ from app.routers.topics import archive_current_topic_selection
 from app.routers.topics import read_current_topic_selection
 from app.routers.topics import replace_current_topic_selection
 from app.routers.topics import read_topic_workspace
+from app.routers.topics import read_topic_search
+from app.routers.topics import read_topic_suggestions
+from app.main import app_metadata
 from app.schemas import schemas
+from app.services.topics import build_topic_intelligence_overview
+from app.services.topics import build_topic_recommendation_report
+from app.services.topics import build_topic_suggestion_report
+from app.services.bookings import _booking_topic_details
 from app.services.retention import build_retention_coverage_report
 from app.services.policy_scoring import PolicyScoreSnapshot, can_access_functionality, summarize_policy_score
 from app.services.policy_scoring import build_policy_topic_analysis_report
 from app.services.policy_scoring import _posture_adjusted_access_score
+from app.services.policy_scoring import _topic_signals
 from app.services.topics import build_topic_coverage_report, build_topic_portfolio_report, build_topic_taxonomy_report
 from app.services.retention import build_retention_topic_signal_report
 from app.services.topics import build_topic_theme_coverage
 from app.services.chat_analytics import build_retention_topic_signal_detail
 from app.services.chat_analytics import build_retention_dashboard_topic_signal_detail
+from app.services.chat_analytics import build_interaction_signal_synthesis
+from app.services.chat_analytics import build_signal_synthesis_report
 from app.schemas.chat import ChatMessageIn
+from app.schemas.chat import InteractionInsight
 from app.schemas.chat import SystemImprovementPack
 
 
@@ -145,6 +157,34 @@ class FakeChatMessageSummary:
         self.metadata = {}
         self.generated_at = datetime.now(timezone.utc)
         self.summary = "Summary text"
+
+
+class FakeChatSummaryWithInsights(FakeChatMessageSummary):
+    def __init__(self):
+        super().__init__()
+        self.top_issues = ["refund timing", "booking delay", "handoff context"]
+        self.insights = [
+            InteractionInsight(
+                area="booking_flow",
+                priority="high",
+                score=3.0,
+                evidence=["booking is delayed"],
+                evidence_summary="booking delay",
+                source="chat",
+                recommendation="improve confirmation timing",
+                next_step="confirm the booking status",
+            ),
+            InteractionInsight(
+                area="support",
+                priority="medium",
+                score=2.0,
+                evidence=["handoff context missing"],
+                evidence_summary="handoff context",
+                source="chat",
+                recommendation="pass more context to support",
+                next_step="package context for the next agent",
+            ),
+        ]
 
 
 def test_booking_event_relationship_metadata_is_explicit():
@@ -296,6 +336,129 @@ def test_topic_workspace_route_exposes_composite_topic_contract():
     assert payload["selection_history"]["user_id"] == 1
 
 
+def test_topic_overview_route_exposes_cross_service_topic_intelligence():
+    class _TopicSelectionSession(TopicDb):
+        async def execute(self, *_args, **_kwargs):
+            selection = FakeTopicSelection(topic="service quote and estimate review")
+
+            class Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def first(self_inner):
+                    return selection
+
+                def all(self_inner):
+                    return [selection, FakeTopicSelection(topic="case notes and interaction history")]
+
+            return Result()
+
+    async def _fake_get_db():
+        yield _TopicSelectionSession()
+
+    async def _fake_get_current_user():
+        return FakeUser()
+
+    app.dependency_overrides[deps.get_db] = _fake_get_db
+    app.dependency_overrides[deps.get_current_user] = _fake_get_current_user
+    try:
+        response = TestClient(app).get("/topics/overview")
+    finally:
+        app.dependency_overrides.pop(deps.get_db, None)
+        app.dependency_overrides.pop(deps.get_current_user, None)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["user_id"] == 1
+    assert payload["topic"] == "service quote and estimate review"
+    assert payload["workspace"]["topic"] == "service quote and estimate review"
+    assert payload["portfolio"]["catalog_total"] >= 1
+    assert payload["coverage"]["coverage_ratio"] >= 0
+    assert payload["recommendations"]["topic_focus"]
+    assert payload["suggested_topics"]
+    assert payload["topic_focus"]
+
+
+def test_app_metadata_advertises_topic_intelligence_overview():
+    response = TestClient(app).get("/meta")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "topic_intelligence_overview" in payload["features"]
+
+
+def test_app_ecosystem_advertises_topic_search():
+    response = TestClient(app).get("/meta/ecosystem")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "/topics/search" in payload["subservices"]["topic_intelligence"]["routes"]
+    assert "/topics/suggestions" in payload["subservices"]["topic_intelligence"]["routes"]
+
+
+def test_topic_suggestion_report_reuses_ranked_search_output():
+    report = build_topic_suggestion_report("estimate review", limit=3, theme="preparation_and_estimates")
+
+    assert report.query == "estimate review"
+    assert report.total_results >= 1
+    assert report.suggested_topics
+    assert report.topic_focus
+
+
+def test_topic_recommendation_report_is_typed_and_populated():
+    report = build_topic_recommendation_report(models.TopicSelection(topic="estimate review and booking"))
+
+    assert report.topic == "estimate review and booking"
+    assert report.primary_topic
+    assert report.recommendations
+    assert report.theme_coverage
+    assert report.topic_focus
+
+
+def test_topic_suggestions_route_returns_typed_ranked_topics():
+    report = asyncio.run(read_topic_suggestions(query="estimate review", limit=3, theme="preparation_and_estimates"))
+
+    assert report.query == "estimate review"
+    assert report.total_results >= 1
+    assert report.suggested_topics
+
+
+def test_booking_topic_details_include_ranked_topic_suggestions():
+    details = _booking_topic_details("estimate review and booking status")
+
+    assert details["suggested_topics"]
+    assert details["topic_focus"]
+
+
+def test_policy_topic_signals_include_ranked_suggestions():
+    signals = _topic_signals("booking status and estimate review")
+
+    assert signals["suggested_topics"]
+    assert signals["topic_focus"]
+
+
+def test_retention_topic_signal_report_includes_ranked_suggestions():
+    report = build_retention_topic_signal_report("booking status and estimate review", user_id=1, window_days=7)
+
+    assert report["topic_suggestions"]
+    assert report["topic_focus"]
+
+
+def test_topic_search_route_ranks_compact_results():
+    response = TestClient(app).get(
+        "/topics/search",
+        params={"query": "estimate review", "limit": 3, "page": 1, "per_page": 2, "theme": "preparation_and_estimates"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["query"] == "estimate review"
+    assert payload["total_results"] >= 1
+    assert payload["page"] == 1
+    assert payload["per_page"] == 2
+    assert payload["total_pages"] >= 1
+    assert len(payload["items"]) <= 2
+    assert payload["items"][0]["score"] >= payload["items"][-1]["score"]
+    assert payload["topic_focus"]
+
+
 def test_booking_operation_report_exposes_topic_enrichment():
     class _BookingOperationDb(FakeChatDb):
         async def execute(self, *_args, **_kwargs):
@@ -339,6 +502,8 @@ def test_booking_operation_report_exposes_topic_enrichment():
     assert payload["topic_context"]
     assert payload["topic_coverage_ratio"] >= 0
     assert payload["topic_portfolio_coverage"] >= 0
+    assert payload["topic_signal_summary"]
+    assert len(payload["topic_focus"]) >= 1
     assert payload["recommendations"]
 
 
@@ -1042,6 +1207,38 @@ def test_retention_dashboard_exposes_topic_theme_coverage():
     assert detail.topic_theme_coverage[0]["coverage"] >= 0
 
 
+def test_chat_signal_synthesis_report_includes_topic_focus_and_retention_context():
+    summary = FakeChatSummaryWithInsights()
+
+    synthesis = build_interaction_signal_synthesis(summary, None)
+
+    assert synthesis.topic_context
+    assert synthesis.topic_focus
+    assert synthesis.topic_focus[0]
+    assert synthesis.topic_theme_coverage
+    assert synthesis.sentiment_bridge.topic_signal_count == len(summary.insights)
+
+
+def test_signal_synthesis_report_exposes_richer_topic_signal_summary():
+    class _ChatRow:
+        def __init__(self, message: str):
+            self.message = message
+
+    report = build_signal_synthesis_report(
+        1,
+        [_ChatRow("booking delay and refund timing")],
+        [FakeBooking()],
+        None,
+    )
+
+    assert report.user_id == 1
+    assert report.topic_context
+    assert report.topic_focus is not None
+    assert report.topic_theme_coverage is not None
+    assert report.summary.messages_analyzed == 1
+    assert report.topic_focus[0]
+
+
 def test_retention_snapshot_operations_automation_includes_risk_level():
     class _RetentionAutomationDb(FakeChatDb):
         async def execute(self, *_args, **_kwargs):
@@ -1366,11 +1563,12 @@ async def test_archive_current_topic_selection_returns_inactive_selection():
 def test_topic_coverage_report_includes_portfolio_signals():
     report = build_topic_coverage_report(FakeCurrentTopicSelection(topic="service appointment preparation and vip routing"))
 
-    assert report["topic"] == "service appointment preparation and vip routing"
-    assert report["coverage_ratio"] >= 0.0
-    assert report["top_recommendations"]
-    assert report["matched_topics"]
-    assert report["theme_coverage"]
+    assert report.topic == "service appointment preparation and vip routing"
+    assert report.coverage_ratio >= 0.0
+    assert report.top_recommendations
+    assert report.matched_topics
+    assert report.theme_coverage
+    assert report.theme_coverage[0].theme
 
 
 def test_topic_portfolio_report_combines_catalog_and_coverage():
@@ -1380,6 +1578,8 @@ def test_topic_portfolio_report_combines_catalog_and_coverage():
     assert report["theme_total"] >= 1
     assert report["coverage_ratio"] >= 0.0
     assert report["matched_topics"]
+    assert isinstance(report["theme_coverage"], list)
+    assert report["theme_coverage"][0]["theme"]
 
 
 def test_topic_portfolio_report_reflects_richer_topic_coverage():

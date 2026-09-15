@@ -16,6 +16,7 @@ from app.services.topics import (
     build_topic_coverage_report,
     build_topic_intelligence_report,
     build_topic_portfolio_report,
+    build_topic_suggestion_report,
     build_topic_theme_coverage,
 )
 
@@ -70,11 +71,26 @@ def _booking_topic_details(topic_text: str) -> dict[str, object]:
     selection = type("BookingTopicSelection", (), {"topic": topic_text})()
     intelligence = build_topic_intelligence_report(selection)
     portfolio = build_topic_portfolio_report(selection)
+    suggestions = build_topic_suggestion_report(topic_text, limit=5)
     coverage = build_topic_coverage_report(selection)
     theme_coverage = build_topic_theme_coverage(selection)
-    matched_themes = [item["theme"] for item in theme_coverage if item["matched_count"]]
+    matched_themes = [item.get("theme", getattr(item, "theme", "")) for item in theme_coverage if item.get("matched_count", getattr(item, "matched_count", 0))]
     matched_sectors = [sector["sector"] for sector in TOPIC_SECTORS if any(topic in topic_text.lower() for topic in sector["topics"])]
-    topic_focus = list(dict.fromkeys(coverage["matched_topics"] + [item.topic for item in intelligence.suggested_topics[:3]]))
+    matched_theme_topics = list(
+        dict.fromkeys(
+            topic
+            for group in TOPIC_THEME_GROUPS
+            for topic in group["topics"]
+            if topic in topic_text.lower()
+        )
+    )
+    topic_focus = list(
+        dict.fromkeys(
+            [topic_text] + list(coverage.matched_topics) + [item.topic for item in intelligence.suggested_topics[:5]]
+        )
+    )
+    theme_focus = list(dict.fromkeys(matched_themes + portfolio["matched_themes"]))
+    sector_focus = list(dict.fromkeys(matched_sectors + portfolio["matched_themes"]))
     return {
         "intelligence": intelligence,
         "portfolio": portfolio,
@@ -82,7 +98,11 @@ def _booking_topic_details(topic_text: str) -> dict[str, object]:
         "theme_coverage": theme_coverage,
         "matched_themes": matched_themes,
         "matched_sectors": matched_sectors,
+        "matched_theme_topics": matched_theme_topics,
         "topic_focus": topic_focus,
+        "theme_focus": theme_focus,
+        "sector_focus": sector_focus,
+        "suggested_topics": suggestions.suggested_topics,
         "catalog_total": len(TOPIC_CATALOG),
         "theme_total": len(TOPIC_THEME_GROUPS),
     }
@@ -113,6 +133,7 @@ def build_booking_assignment_decisions(
     source = requested_assignment.get("source", fallback_assignment["source"])
     explanation = requested_assignment.get("explanation", fallback_assignment["explanation"])
     state = requested_assignment.get("state", fallback_assignment["state"])
+    topic_details = _booking_topic_details(_booking_topic_context(booking, [], []))
     return [
         {
             "booking_id": booking.id,
@@ -122,6 +143,9 @@ def build_booking_assignment_decisions(
             "state": state,
             "source": source,
             "explanation": explanation,
+            "topic_focus": topic_details["topic_focus"],
+            "theme_focus": topic_details["theme_focus"],
+            "sector_focus": topic_details["sector_focus"],
             "created_at": created_at,
         }
     ]
@@ -134,12 +158,16 @@ def build_booking_assignment_report(
 ) -> dict:
     decisions = build_booking_assignment_decisions(booking, current_user, requested_assignment=requested_assignment)
     current_state = decisions[-1]["state"] if decisions else "suggested"
+    topic_details = _booking_topic_details(_booking_topic_context(booking, [], []))
     return {
         "generated_at": datetime.now(timezone.utc),
         "booking_id": booking.id,
         "user_id": current_user.id,
         "current_state": current_state,
         "decisions": decisions,
+        "topic_focus": topic_details["topic_focus"],
+        "theme_focus": topic_details["theme_focus"],
+        "sector_focus": topic_details["sector_focus"],
     }
 
 
@@ -154,12 +182,16 @@ def build_booking_assignment_report_payload(
 def build_booking_assignment_report_from_record(
     assignment: models.BookingAssignment,
 ) -> dict:
+    topic_details = _booking_topic_details(str(getattr(assignment, "match_reason", "") or getattr(assignment, "explanation", "") or ""))
     return {
         "generated_at": assignment.created_at,
         "booking_id": assignment.booking_id,
         "user_id": assignment.user_id,
         "current_state": normalize_assignment_state(assignment.state),
         "current_assignment_is_current": bool(getattr(assignment, "is_current", True)),
+        "topic_focus": topic_details["topic_focus"],
+        "theme_focus": topic_details["theme_focus"],
+        "sector_focus": topic_details["sector_focus"],
         "decisions": [
             {
                 "booking_id": assignment.booking_id,
@@ -255,9 +287,21 @@ def build_booking_service_summary(
     topic_signal_depth = (
         f"themes={len(topic_details['matched_themes'])}, "
         f"sectors={len(topic_details['matched_sectors'])}, "
+        f"theme_topics={len(topic_details['matched_theme_topics'])}, "
         f"coverage={topic_intelligence.coverage_ratio:.2f}, "
-        f"focus={len(topic_details['topic_focus'])}"
+        f"focus={len(topic_details['topic_focus'])}, "
+        f"portfolio_topics={len(topic_portfolio['topic_focus'])}, "
+        f"portfolio_themes={len(topic_portfolio['matched_themes'])}, "
+        f"portfolio_coverage={topic_portfolio['coverage_ratio']:.2f}"
     )
+    topic_focus = list(
+        dict.fromkeys(
+            topic_details["topic_focus"]
+            + topic_portfolio["topic_focus"]
+            + topic_details["matched_themes"]
+            + topic_details["matched_sectors"]
+        )
+    )[:12]
     return {
         "booking_id": booking.id,
         "user_id": getattr(booking, "user_id", None),
@@ -277,11 +321,13 @@ def build_booking_service_summary(
         "topic_portfolio_coverage": topic_portfolio["coverage_ratio"],
         "topic_theme_coverage": topic_portfolio["theme_coverage"],
         "topic_signal_depth": topic_signal_depth,
-        "topic_focus": topic_details["topic_focus"],
+        "topic_focus": topic_focus,
         "topic_catalog_total": topic_details["catalog_total"],
         "topic_theme_total": topic_details["theme_total"],
         "topic_matched_themes": topic_details["matched_themes"],
         "topic_matched_sectors": topic_details["matched_sectors"],
+        "topic_matched_theme_topics": topic_details["matched_theme_topics"],
+        "topic_portfolio_matched_themes": topic_portfolio["matched_themes"],
     }
 
 
@@ -313,8 +359,8 @@ def build_booking_timeline_summary(
         "latest_event_type": history_summary["latest_event_type"],
         "status_counts": status_counts,
         "state_counts": assignment_summary["state_counts"],
-        "topic_coverage_ratio": topic_coverage["coverage_ratio"],
-        "topic_recommendations": topic_coverage["top_recommendations"],
+        "topic_coverage_ratio": topic_coverage.coverage_ratio,
+        "topic_recommendations": list(topic_coverage.top_recommendations),
         "topic_theme_coverage": topic_details["theme_coverage"],
         "topic_matched_themes": topic_details["matched_themes"],
         "topic_focus": topic_details["topic_focus"],
@@ -349,11 +395,17 @@ def build_booking_operation_report(
         "topic_matched_themes": summary["topic_matched_themes"],
         "topic_matched_sectors": summary["topic_matched_sectors"],
         "topic_focus": summary["topic_focus"],
+        "topic_signal_summary": (
+            f"topics={len(summary['topic_focus'])}, themes={len(summary['topic_theme_coverage'])}, "
+            f"coverage={summary['topic_portfolio_coverage']:.2f}, sectors={len(summary['topic_matched_sectors'])}, "
+            f"portfolio_themes={len(summary['topic_portfolio_matched_themes'])}"
+        ),
         "recommendations": [
             "Review assignment history for repeated state changes.",
             "Surface the latest event type when booking details are shown.",
             "Use controlled posture notes when exposing booking details to users.",
             "Carry topic coverage and topic matches into booking decision prompts.",
+            "Expose the topic signal summary alongside the booking operation report.",
         ],
     }
 

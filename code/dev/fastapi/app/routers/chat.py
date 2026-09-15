@@ -23,7 +23,8 @@ from app.schemas.chat import (
     LifecycleStageItem,
     LifecycleStageReport,
     RetentionSnapshotItem,
-    RetentionSnapshotReport,
+        RetentionSnapshotReport,
+        SignalSynthesisBundle,
     RetentionSnapshotDelta,
     RetentionSnapshotTrendItem,
     RetentionSnapshotTrendReport,
@@ -85,6 +86,7 @@ from app.services.chat_analytics import _booking_status_counts, _pending_or_canc
 from app.services.chat_analytics import build_dissatisfaction_recovery_report, build_loyalty_recovery_report
 from app.services.chat_analytics import build_monetization_cohorts
 from app.services.chat_analytics import build_retention_snapshot_operations_report
+from app.services.chat_analytics import build_signal_synthesis_bundle
 from app.services.retention import (
     build_retention_dashboard as _build_shared_retention_dashboard,
     build_retention_coverage_report,
@@ -2785,7 +2787,7 @@ async def get_improvement_pack(
     return _build_system_improvement_pack(current_user.id, chat_rows, bookings, latest_sentiment)
 
 
-@router.get("/chat/signal-synthesis", response_model=InteractionSummary)
+@router.get("/chat/signal-synthesis", response_model=SignalSynthesisBundle)
 async def get_signal_synthesis(
     window_days: int = Query(default=30, ge=1, le=365),
     db: AsyncSession = Depends(deps.get_db),
@@ -2810,5 +2812,4 @@ async def get_signal_synthesis(
     chat_rows = chat_result.scalars().all()
     bookings = booking_result.scalars().all()
     latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
-    synthesis = build_signal_synthesis_report(current_user.id, chat_rows, bookings, latest_sentiment)
-    return synthesis["summary"]
+    return build_signal_synthesis_bundle(current_user.id, chat_rows, bookings, latest_sentiment)

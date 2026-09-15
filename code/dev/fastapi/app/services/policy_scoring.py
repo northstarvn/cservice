@@ -15,6 +15,7 @@ from app.services.topics import (
     build_topic_coverage_report,
     build_topic_intelligence_report,
     build_topic_portfolio_report,
+    build_topic_suggestion_report,
     build_topic_theme_coverage,
 )
 
@@ -56,6 +57,10 @@ def _topic_breadth_score(topic_text: str) -> float:
         breadth += 8.0
     if any(marker in normalized for marker in ["billing", "booking", "policy", "routing", "handoff", "coverage"]):
         breadth += 10.0
+    if any(marker in normalized for marker in ["retention", "discovery", "context", "logistics", "reassurance", "transcript"]):
+        breadth += 8.0
+    if any(marker in normalized for marker in ["privacy", "consent", "translation", "attachment", "checklist", "feedback"]):
+        breadth += 7.0
     return min(100.0, round(breadth, 2))
 
 
@@ -74,11 +79,59 @@ def _topic_complexity_score(topic_text: str) -> float:
         "refund",
         "capacity",
         "policy",
+        "retention",
+        "discovery",
+        "summary",
+        "context",
+        "logistics",
+        "privacy",
+        "consent",
+        "translation",
+        "attachment",
+        "checklist",
+        "feedback",
     ]
     score = sum(9.0 for term in complexity_terms if term in normalized)
     if len(normalized.split()) >= 4:
         score += 8.0
     return min(100.0, round(score, 2))
+
+
+def _topic_theme_matches(topic_text: str) -> list[str]:
+    normalized = (topic_text or "").lower()
+    selection = type("PolicyTopicSelection", (), {"topic": normalized})()
+    return [item["theme"] for item in build_topic_theme_coverage(selection) if item.get("matched_count")]
+
+
+def _topic_sector_matches(topic_text: str) -> list[str]:
+    normalized = (topic_text or "").lower()
+    if not normalized:
+        return []
+    matches: list[str] = []
+    for group in TOPIC_SECTORS:
+        if any(topic in normalized for topic in group["topics"]):
+            matches.append(str(group["sector"]))
+    return list(dict.fromkeys(matches))
+
+
+def _topic_signals(topic_text: str) -> dict[str, object]:
+    normalized = (topic_text or "").strip()
+    coverage = build_topic_coverage_report(type("PolicyTopicSelection", (), {"topic": normalized})())
+    intelligence = build_topic_intelligence_report(type("PolicyTopicSelection", (), {"topic": normalized})())
+    portfolio = build_topic_portfolio_report(type("PolicyTopicSelection", (), {"topic": normalized})())
+    suggestions = build_topic_suggestion_report(normalized, limit=3)
+    return {
+        "coverage_ratio": coverage.coverage_ratio,
+        "matched_topics": list(dict.fromkeys(coverage.matched_topics)),
+        "matched_keywords": list(dict.fromkeys(intelligence.matched_keywords)),
+        "matched_themes": list(dict.fromkeys(portfolio["matched_themes"])),
+        "matched_theme_topics": list(dict.fromkeys(topic for topic in coverage.matched_topics if topic in topic_text.lower())),
+        "matched_sectors": [sector for sector in _topic_sector_matches(normalized)],
+        "suggested_topics": suggestions.suggested_topics,
+        "topic_focus": list(dict.fromkeys(list(coverage.top_recommendations) + [item.topic for item in intelligence.suggested_topics[:3]] + list(dict.fromkeys(portfolio["matched_themes"])) + list(dict.fromkeys(coverage.matched_topics[:4]))))[:8],
+        "topic_richness_score": round(min(100.0, (coverage.coverage_ratio * 40.0) + (len(intelligence.matched_keywords) * 5.5) + (len(portfolio["matched_themes"]) * 7.0) + (len(portfolio["topic_focus"]) * 2.0)), 2),
+        "topic_family_count": len(set(_topic_theme_matches(normalized) + _topic_sector_matches(normalized))),
+    }
 
 
 def _policy_tier(access_score: float, system_score: float) -> str:
@@ -223,7 +276,7 @@ def build_policy_decision_report(
         decision=access_decision,
         health=health,
         recommendations=recommendations,
-        summary=f"{snapshot.summary}, topic_signal={topic_signal}, topic_depth={topic_analysis.topic_depth}",
+        summary=f"{snapshot.summary}, topic_signal={topic_signal}, topic_depth={topic_analysis.topic_depth}, themes={len(topic_analysis.matched_themes)}, recommendations={len(recommendations)}",
         topic_context=f"{topic_analysis.topic_context}; signal={topic_signal}" if topic_analysis.topic_context else topic_signal,
     )
 
@@ -234,12 +287,12 @@ def build_policy_topic_context(user: models.User, topic_text: str) -> str:
         return f"user-{user.id}: no active topic"
     breadth = _topic_breadth_score(normalized)
     complexity = _topic_complexity_score(normalized)
-    theme_coverage = build_topic_theme_coverage(type("PolicyTopicSelection", (), {"topic": normalized})())
-    matched_themes = sum(1 for item in theme_coverage if item["matched_count"])
-    portfolio = build_topic_portfolio_report(type("PolicyTopicSelection", (), {"topic": normalized})())
+    matched_themes = _topic_theme_matches(normalized)
+    matched_sectors = _topic_sector_matches(normalized)
+    topic_signals = _topic_signals(normalized)
     return (
         f"{normalized} [breadth={breadth:.2f}, complexity={complexity:.2f}, "
-        f"themes={matched_themes}, coverage={portfolio['coverage_ratio']:.2f}]"
+        f"themes={len(matched_themes)}, sectors={len(matched_sectors)}, coverage={topic_signals['coverage_ratio']:.2f}, focus={len(topic_signals['topic_focus'])}]"
     )
 
 
@@ -249,14 +302,14 @@ def build_policy_topic_richness(topic_text: str) -> str:
         return "no_topic_richness"
     breadth = _topic_breadth_score(normalized)
     complexity = _topic_complexity_score(normalized)
-    coverage = build_topic_coverage_report(type("PolicyTopicSelection", (), {"topic": normalized})())
-    intelligence = build_topic_intelligence_report(type("PolicyTopicSelection", (), {"topic": normalized})())
-    balance = round((breadth + complexity + (coverage["coverage_ratio"] * 100.0) + (intelligence.match_count * 4.0)) / 4.0, 2)
+    signals = _topic_signals(normalized)
+    family_count = signals["topic_family_count"]
+    balance = round((breadth + complexity + (signals["coverage_ratio"] * 100.0) + (len(signals["matched_keywords"]) * 4.0) + (len(signals["topic_focus"]) * 2.5) + (family_count * 3.5) + signals["topic_richness_score"]) / 6.0, 2)
     if balance >= 75:
-        return f"rich [balance={balance:.2f}]"
+        return f"rich [balance={balance:.2f}, signals={len(signals['matched_topics'])}, families={family_count}]"
     if balance >= 45:
-        return f"balanced [balance={balance:.2f}]"
-    return f"focused [balance={balance:.2f}]"
+        return f"balanced [balance={balance:.2f}, signals={len(signals['matched_topics'])}, families={family_count}]"
+    return f"focused [balance={balance:.2f}, signals={len(signals['matched_topics'])}, families={family_count}]"
 
 
 def build_policy_topic_depth(topic_text: str) -> str:
@@ -272,6 +325,8 @@ def build_policy_topic_depth(topic_text: str) -> str:
         depth += 6.0
     if any(marker in normalized for marker in ["exception", "urgent", "priority", "policy", "verification"]):
         depth += 12.0
+    if any(marker in normalized for marker in ["retention", "discovery", "context", "summary", "logistics", "reassurance"]):
+        depth += 8.0
     return f"depth={min(100.0, round(depth, 2)):.2f}"
 
 
@@ -285,6 +340,12 @@ def build_policy_topic_fallback(topic_text: str) -> str:
         )
         if sector_match:
             return f"{normalized} [sector={sector_match}]"
+        theme_match = next(
+            (group["theme"] for group in TOPIC_THEME_GROUPS if any(topic in topic_lower for topic in group["topics"])),
+            None,
+        )
+        if theme_match:
+            return f"{normalized} [theme={theme_match}]"
         return normalized
     return "unclassified-topic [fallback]"
 
@@ -305,8 +366,9 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
     portfolio_report = build_topic_portfolio_report(type("PolicyTopicSelection", (), {"topic": current_topic})())
     intelligence_report = build_topic_intelligence_report(type("PolicyTopicSelection", (), {"topic": current_topic})())
     coverage_report = build_topic_coverage_report(type("PolicyTopicSelection", (), {"topic": current_topic})())
-    matched_topics = list(dict.fromkeys(coverage_report["matched_topics"]))
-    topic_focus = matched_topics[:5] or list(dict.fromkeys(intelligence_report.matched_keywords[:5]))
+    signals = _topic_signals(current_topic)
+    matched_topics = list(dict.fromkeys(signals["matched_topics"]))
+    topic_focus = signals["topic_focus"] or matched_topics[:5] or list(dict.fromkeys(intelligence_report.matched_keywords[:5]))
     items = [
         chat_schemas.PolicyTopicInsightItem(
             topic=current_topic,
@@ -317,13 +379,14 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
             fallback=topic_fallback,
             theme_coverage=theme_coverage_items,
             sector_coverage=list(dict.fromkeys(portfolio_report["matched_themes"])),
-            matched_keywords=(matched_topics or list(dict.fromkeys(intelligence_report.matched_keywords)))[:8],
+            matched_keywords=(signals["matched_keywords"] or matched_topics or list(dict.fromkeys(intelligence_report.matched_keywords)))[:8],
             confidence=round(min(1.0, breadth / 100.0 + complexity / 120.0), 2),
         )
     ]
     summary = (
         f"{snapshot.summary or summarize_policy_score(snapshot)}, "
-        f"topic={current_topic}, topic_context={topic_context}, topic_richness={topic_richness}, topic_depth={topic_depth}, fallback={enriched_fallback}"
+        f"topic={current_topic}, topic_context={topic_context}, topic_richness={topic_richness}, topic_depth={topic_depth}, "
+        f"fallback={enriched_fallback}, topic_focus={len(topic_focus)}, topic_signals={len(matched_topics)}, sectors={len(_topic_sector_matches(current_topic))}, themes={len(matched_themes)}"
     )
     return chat_schemas.PolicyTopicAnalysisReport(
         generated_at=datetime.now(timezone.utc),
@@ -336,8 +399,9 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
         portfolio_coverage=portfolio_report["coverage_ratio"],
         matched_themes=matched_themes,
         topic_focus=topic_focus,
+        topic_signal_count=len(matched_topics),
         items=items,
-        summary=summary,
+        summary=f"Policy topic analysis for '{current_topic}' spans {len(matched_topics)} matched topics, {len(matched_themes)} themes, {len(theme_coverage_items)} theme matches, {len(portfolio_report['matched_themes'])} portfolio themes, and {len(_topic_sector_matches(current_topic))} sectors; topic_depth={topic_depth}. The topic layer now emphasizes privacy, continuity, routing, trust, discovery, and retention evidence.",
     )
 
 
@@ -370,10 +434,11 @@ def build_typed_policy_score_report(snapshot: PolicyScoreSnapshot) -> chat_schem
     breakdown = build_policy_score_breakdown(snapshot)
     topic_context = snapshot.topic_context or ""
     topic_summary = topic_context or breakdown.summary
+    topic_context_size = len([part for part in topic_context.split(",") if part.strip()]) if topic_context else 0
     return chat_schemas.PolicyScoreReport(
         generated_at=datetime.now(timezone.utc),
         snapshot=breakdown,
-        summary=f"{breakdown.summary}; topic_context={topic_summary}",
+        summary=f"{breakdown.summary}; topic_context={topic_summary}; topic_context_size={topic_context_size}; topic_families={len(topic_context.split('[')[0].split()) if topic_context else 0}",
     )
 
 
@@ -497,7 +562,7 @@ async def build_customer_policy_snapshot(db: AsyncSession, user: models.User) ->
         policy_snapshot,
         summary=(
             f"{summarize_policy_score(policy_snapshot)}"
-            f", topic_breadth={topic_breadth_score:.2f}, topic_complexity={topic_complexity_score:.2f}, topic_confidence={topic_confidence:.2f}, topic={topic_fallback}, topic_richness={topic_richness}, topic_depth={build_policy_topic_depth(current_topic)}"
+            f", topic_breadth={topic_breadth_score:.2f}, topic_complexity={topic_complexity_score:.2f}, topic_confidence={topic_confidence:.2f}, topic={topic_fallback}, topic_richness={topic_richness}, topic_depth={build_policy_topic_depth(current_topic)}, topic_context={topic_context}"
         ),
     )
     return summary_snapshot

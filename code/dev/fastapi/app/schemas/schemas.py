@@ -1,5 +1,5 @@
 from pydantic import BaseModel, field_validator, ConfigDict, EmailStr, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -86,7 +86,6 @@ class BookingAssignmentState(str, Enum):
     rejected = "rejected"
     expired = "expired"
     reassigned = "reassigned"
-
 
 class BookingAssignmentDecision(BaseModel):
     booking_id: int
@@ -202,6 +201,8 @@ class BookingOperationReport(BaseModel):
     topic_context: str = ""
     topic_coverage_ratio: float = 0.0
     topic_portfolio_coverage: float = 0.0
+    topic_signal_summary: str = ""
+    topic_focus: List[str] = Field(default_factory=list)
     recommendations: List[str] = Field(default_factory=list)
 
 
@@ -422,12 +423,15 @@ class TopicSelectionReport(BaseModel):
     rationale: str
     confidence: float
     is_current: bool = True
+    topic_focus: List[str] = Field(default_factory=list)
 
 
 class TopicSelectionHistoryReport(BaseModel):
     generated_at: datetime
     user_id: int
     items: List[TopicSelectionOut]
+    topic_focus: List[str] = Field(default_factory=list)
+    summary: str = ""
 
 
 class TopicCatalogItem(BaseModel):
@@ -462,6 +466,8 @@ class TopicCatalogReport(BaseModel):
     total_topics: int
     items: List[TopicCatalogItem]
     top_prefixes: List[dict[str, int | str]] = []
+    topic_focus: List[str] = Field(default_factory=list)
+    summary: str = ""
 
 
 class TopicThemeItem(BaseModel):
@@ -474,6 +480,8 @@ class TopicThemeReport(BaseModel):
     generated_at: datetime
     total_themes: int
     themes: List[TopicThemeItem]
+    topic_focus: List[str] = Field(default_factory=list)
+    summary: str = ""
 
 
 class TopicRecommendationItem(BaseModel):
@@ -490,6 +498,9 @@ class TopicRecommendationReport(BaseModel):
     coverage_ratio: float = 0.0
     match_count: int = 0
     recommendations: List[TopicRecommendationItem]
+    matched_themes: List[str] = Field(default_factory=list)
+    theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    topic_focus: List[str] = Field(default_factory=list)
     summary: str
 
 
@@ -500,6 +511,8 @@ class TopicIntelligenceReport(BaseModel):
     suggested_topics: List[TopicCatalogItem]
     coverage_ratio: float = 0.0
     match_count: int = 0
+    catalog_size: int = 0
+    topic_focus: List[str] = Field(default_factory=list)
     summary: str
 
 
@@ -517,6 +530,53 @@ class TopicWorkspaceReport(BaseModel):
     selection_history: TopicSelectionHistoryReport
     richness_score: float = 0.0
     topic_focus: List[str] = Field(default_factory=list)
+
+
+class TopicSearchResult(BaseModel):
+    topic: str
+    score: float
+    matched_keywords: List[str] = Field(default_factory=list)
+    theme: Optional[str] = None
+    sector: Optional[str] = None
+
+
+class TopicIntelligenceOverview(BaseModel):
+    generated_at: datetime
+    user_id: int
+    topic: Optional[str] = None
+    workspace: TopicWorkspaceReport
+    portfolio: Dict[str, Any] = Field(default_factory=dict)
+    coverage: Dict[str, Any] = Field(default_factory=dict)
+    recommendations: Dict[str, Any] = Field(default_factory=dict)
+    suggested_topics: List[TopicSearchResult] = Field(default_factory=list)
+    catalog_size: int = 0
+    matched_topic_count: int = 0
+    suggestion_count: int = 0
+    summary: str
+    topic_focus: List[str] = Field(default_factory=list)
+
+
+class TopicSuggestionReport(BaseModel):
+    generated_at: datetime
+    query: str
+    total_results: int
+    suggested_topics: List[TopicSearchResult]
+    catalog_size: int = 0
+    topic_focus: List[str] = Field(default_factory=list)
+    summary: str
+
+
+class TopicSearchReport(BaseModel):
+    generated_at: datetime
+    query: str
+    total_results: int
+    page: int = 1
+    per_page: int = 5
+    total_pages: int = 1
+    items: List[TopicSearchResult]
+    catalog_size: int = 0
+    topic_focus: List[str] = Field(default_factory=list)
+    summary: str
 
 class PaginatedBookings(BaseModel):
     items: List[BookingOut]

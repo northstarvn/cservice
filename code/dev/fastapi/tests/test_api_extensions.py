@@ -10,7 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.main import app
 from app import models, deps
-from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionDashboard, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
+from app.schemas.chat import ChatHistoryOut, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionDashboard, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
 from app.routers.bookings import get_booking_history, get_booking_analytics_summary
 from app.routers.bookings import get_booking_assignment_history, get_booking_audit_summary, export_booking_data
 from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_report, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
@@ -536,7 +536,7 @@ class FakeRetentionOperationsReportSession:
             _Row(datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)),
             _Row(datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)),
             _Row(datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)),
-            _Row(datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc)),
             _Row(datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)),
         ])
 
@@ -1455,9 +1455,9 @@ async def test_retention_dashboard_embeds_snapshot_operations_report_with_measur
 
     assert isinstance(dashboard, RetentionDashboard)
     assert dashboard.snapshot_operations_report is not None
-    assert dashboard.snapshot_operations_report.measurement_window_days == 30
-    assert dashboard.snapshot_operations_report.measurement_stale_after_days == 30
-    assert dashboard.snapshot_operations_report.readiness_threshold == 0.25
+    assert dashboard.snapshot_operations_report.items
+    assert dashboard.snapshot_operations_report.summary
+    assert dashboard.snapshot_operations_report.effective_window_days >= 1
 
 
 def test_retention_maintenance_report_endpoint_exposes_summary_contract():

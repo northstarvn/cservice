@@ -128,22 +128,78 @@ class PolicyTopicAnalysisReport(BaseModel):
     topic_coverage: List[Dict[str, Any]] = Field(default_factory=list)
     portfolio_coverage: float = 0.0
     matched_themes: List[str] = Field(default_factory=list)
+    topic_signal_count: int = 0
     items: List[PolicyTopicInsightItem]
     summary: str
+
+
+class TopicCoverageThemeItem(BaseModel):
+    theme: str
+    coverage: float
+    topic_count: int
+
+
+class TopicCoverageReport(BaseModel):
+    generated_at: datetime
+    topic: Optional[str] = None
+    matched_topics: List[str] = Field(default_factory=list)
+    matched_topic_count: int = 0
+    keyword_matches: List[str] = Field(default_factory=list)
+    keyword_match_count: int = 0
+    coverage_ratio: float = 0.0
+    catalog_size: int = 0
+    top_recommendations: List[str] = Field(default_factory=list)
+    theme_coverage: List[TopicCoverageThemeItem] = Field(default_factory=list)
+    topic_focus: List[str] = Field(default_factory=list)
+    matched_theme_topics: List[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class TopicRecommendationItem(BaseModel):
+    topic: str
+    source: str
+    confidence: float
+    rationale: str
+
+
+class TopicRecommendationReport(BaseModel):
+    generated_at: datetime
+    topic: Optional[str] = None
+    primary_topic: Optional[str] = None
+    coverage_ratio: float = 0.0
+    match_count: int = 0
+    catalog_size: int = 0
+    matched_themes: List[str] = Field(default_factory=list)
+    theme_coverage: List[TopicCoverageThemeItem] = Field(default_factory=list)
+    topic_focus: List[str] = Field(default_factory=list)
+    recommendations: List[TopicRecommendationItem] = Field(default_factory=list)
+    summary: str = ""
+
+
+class TopicThemeCoverageItem(BaseModel):
+    theme: str
+    topic_count: int
+    matched_count: int
+    coverage: float
+    matched_topics: List[str] = Field(default_factory=list)
+    related_topics: List[str] = Field(default_factory=list)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
 
 
 class SignalSynthesisReport(BaseModel):
     generated_at: datetime
     user_id: int
     summary: InteractionSummary
-    topic_breakdown: Dict[str, Any]
-    sentiment_bridge: Dict[str, Any]
-    timeline: List[Dict[str, Any]]
+    topic_breakdown: "TopicSignalBreakdown"
+    sentiment_bridge: "SentimentRetentionBridge"
+    timeline: List["SignalSynthesisTimelineItem"]
     recommended_focus: str
     dominant_topic: Optional[str] = None
     retention_risk: str
     topic_context: str = ""
-    topic_theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
     topic_focus: List[str] = Field(default_factory=list)
 
 
@@ -154,6 +210,12 @@ class TopicSignalBreakdown(BaseModel):
     top_topics: List[Dict[str, int | str]]
     dominant_topic: Optional[str] = None
     topic_diversity: float
+
+
+class SignalSynthesisTimelineItem(BaseModel):
+    label: str
+    value: str
+    severity: str
 
 
 class SentimentRetentionBridge(BaseModel):
@@ -167,7 +229,7 @@ class SentimentRetentionBridge(BaseModel):
     topic_signal_count: int = 0
     topic_signal_depth: str = ""
     topic_context: str = ""
-    topic_theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
 
 
 class InteractionSignalSynthesis(BaseModel):
@@ -182,7 +244,8 @@ class InteractionSignalSynthesis(BaseModel):
     customer_classification: str
     signal_strength: float
     topic_context: str = ""
-    topic_theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
+    topic_focus: List[str] = Field(default_factory=list)
 
 
 class DissatisfactionTimelineItem(BaseModel):
@@ -358,8 +421,42 @@ class RetentionSnapshotOperationItem(BaseModel):
 
 class RetentionSnapshotOperationsReport(BaseModel):
     generated_at: datetime
-    window_days: int
+    window_days: int = 0
+    measurement_window_days: int = 0
+    measurement_stale_after_days: int = 0
+    readiness_threshold: float = 0.0
+    total_snapshots: int = 0
+    stale_snapshots: int = 0
+    recent_snapshots: int = 0
     items: List[RetentionSnapshotOperationItem]
+    summary: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.window_days and not self.measurement_window_days:
+            object.__setattr__(self, "measurement_window_days", self.window_days)
+        elif self.measurement_window_days and not self.window_days:
+            object.__setattr__(self, "window_days", self.measurement_window_days)
+
+    @property
+    def measurement_window(self) -> int:
+        return self.measurement_window_days or self.window_days
+
+    @property
+    def effective_window_days(self) -> int:
+        return self.measurement_window_days or self.window_days
+
+    @property
+    def stale_ratio(self) -> float:
+        total = self.total_snapshots
+        return round(self.stale_snapshots / total, 2) if total else 0.0
+
+    @property
+    def stale_data_flag(self) -> bool:
+        return self.stale_ratio >= self.readiness_threshold
+
+    @property
+    def insufficient_history_flag(self) -> bool:
+        return self.total_snapshots == 0
 
 
 class RetentionSnapshotTrendReport(BaseModel):
@@ -383,7 +480,15 @@ class RetentionTopicSignalReport(BaseModel):
     topic_context: str
     dominant_topic: Optional[str] = None
     items: List[RetentionTopicSignalItem]
-    topic_theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
+    matched_clusters: Dict[str, List[str]] = Field(default_factory=dict)
+    matched_topics: List[str] = Field(default_factory=list)
+    matched_keywords: List[str] = Field(default_factory=list)
+    matched_themes: List[str] = Field(default_factory=list)
+    topic_catalog_size: int = 0
+    topic_portfolio_coverage: float = 0.0
+    topic_suggestions: List[str] = Field(default_factory=list)
+    topic_signal_depth: str = ""
     summary: str
 
 
@@ -392,10 +497,28 @@ class RetentionTopicSignalDetail(BaseModel):
     topic_context: str
     dominant_topic: Optional[str] = None
     items: List[RetentionTopicSignalItem]
-    topic_theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
+    matched_clusters: Dict[str, List[str]] = Field(default_factory=dict)
+    matched_topics: List[str] = Field(default_factory=list)
+    matched_keywords: List[str] = Field(default_factory=list)
+    matched_themes: List[str] = Field(default_factory=list)
     topic_portfolio_coverage: float = 0.0
+    topic_signal_count: int = 0
+    topic_signal_depth: str = ""
     topic_signal_summary: str = ""
     summary: str
+
+
+class SignalSynthesisBundle(BaseModel):
+    generated_at: datetime
+    summary: InteractionSummary
+    signal_synthesis: InteractionSignalSynthesis
+    topic_breakdown: TopicSignalBreakdown
+    sentiment_bridge: SentimentRetentionBridge
+    topic_focus: List[str] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
+    retention_risk: str = ""
+    summary_text: str = ""
 
 
 class RetentionDashboard(BaseModel):
@@ -409,7 +532,7 @@ class RetentionDashboard(BaseModel):
     snapshot_operations_report: Optional[RetentionSnapshotOperationsReport] = None
     topic_signal_report: Optional[RetentionTopicSignalReport] = None
     topic_signal_detail: Optional[RetentionTopicSignalDetail] = None
-    topic_theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
     trend_coverage: Optional[float] = None
     delta_coverage: Optional[float] = None
 
@@ -930,6 +1053,10 @@ class RetentionSnapshotOperationsLaunchReadiness(BaseModel):
     readiness: str
     risk_level: str
     overview: str
+
+    @property
+    def launch_readiness(self) -> str:
+        return self.readiness
 
 
 class RetentionSnapshotOperationsGoNoGo(BaseModel):
