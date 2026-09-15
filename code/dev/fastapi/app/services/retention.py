@@ -126,6 +126,13 @@ def _retention_topic_context_from_summary(summary_text: str) -> list[str]:
         "service history and recurring issues": ["history", "repeat", "recurring", "issue"],
         "customer preferences and saved context": ["preferences", "saved", "context", "repeat"],
         "service transcripts and conversation summaries": ["transcript", "summary", "conversation", "notes"],
+        "omnichannel conversation continuity": ["channel", "continuity", "chat", "email"],
+        "data privacy and information handling": ["privacy", "data", "information", "personal"],
+        "customer intent detection and request framing": ["intent", "purpose", "request", "frame"],
+        "service area coverage and eligibility checks": ["coverage", "area", "eligible", "service area"],
+        "service education and guided resolution": ["education", "guided", "resolution", "support"],
+        "service area coverage and eligibility checks": ["coverage", "area", "eligible", "service area"],
+        "customer confidence and reassurance messaging": ["confidence", "reassurance", "trust", "comfort"],
     }
     matched = [topic for topic, keywords in topic_hints.items() if any(keyword in normalized for keyword in keywords)]
     return matched
@@ -144,7 +151,9 @@ def _retention_topic_clusters(topics: list[str]) -> dict[str, list[str]]:
         "trust_and_approvals": ["customer trust and reassurance", "service risk and exception monitoring", "automation exceptions and human override", "service eligibility exceptions and approvals"],
         "discovery_and_context": ["knowledge base search and answer discovery", "service transcripts and conversation summaries", "customer preferences and saved context", "customer confidence and reassurance messaging"],
         "retention_and_save": ["customer retention and save offers", "case ownership and handoff tracking", "service escalation and approval review", "payment troubleshooting and chargeback support"],
-        "logistics_and_visibility": ["appointment logistics and travel coordination", "service insights and product feedback", "workflow status and queue monitoring", "arrival timing and eta updates", "service callback timing and response expectations"],
+        "logistics_and_visibility": ["appointment logistics and travel coordination", "service insights and product feedback", "workflow status and queue monitoring", "arrival timing and eta updates", "service callback timing and response expectations", "delivery tracking and status visibility"],
+        "knowledge_and_assurance": ["service transcript summarization", "service education and guided resolution", "customer confidence and reassurance messaging", "customer trust and reassurance", "knowledge base search and answer discovery"],
+        "identity_and_controls": ["account verification and identity checks", "service escalation thresholds and guardrails", "data privacy and information handling", "customer intent detection and request framing"],
     }
     topic_set = set(topics)
     return {cluster: [topic for topic in members if topic in topic_set] for cluster, members in clusters.items()}
@@ -158,6 +167,7 @@ def build_retention_topic_signal_report(summary_text: str, user_id: int, window_
     topic_theme_coverage = build_topic_theme_coverage(type("RetentionTopicSelection", (), {"topic": summary_text})())
     matched_keywords = list(topic_intelligence.matched_keywords)
     matched_themes = [item.get("theme", getattr(item, "theme", "")) for item in topic_theme_coverage if item.get("matched_count", getattr(item, "matched_count", 0))]
+    theme_overlap_scores = [item.get("overlap_score", getattr(item, "overlap_score", 0)) for item in topic_theme_coverage if item.get("matched_count", getattr(item, "matched_count", 0))]
     catalog_topics = {item["topic"] for item in TOPIC_CATALOG}
     topic_clusters = _retention_topic_clusters(matched_topics)
     matched_topic_details = []
@@ -218,11 +228,12 @@ def build_retention_topic_signal_report(summary_text: str, user_id: int, window_
         "topic_catalog_size": len(catalog_topics),
         "topic_portfolio_coverage": topic_portfolio["coverage_ratio"],
         "topic_suggestions": [item.topic for item in topic_suggestions.suggested_topics],
+        "topic_theme_overlap_score": sum(theme_overlap_scores),
         "topic_focus": topic_focus,
         "topic_signal_depth": f"topics={len(matched_topics)}, themes={len(matched_themes)}, keywords={len(matched_keywords)}, clusters={len([topics for topics in topic_clusters.values() if topics])}",
         "topic_signal_richness": richness_score,
         "items": items,
-        "summary": f"Topic context '{summary_text}' matched {len(matched_topics)} retention-relevant topics across {len(matched_themes)} themes with {len(matched_keywords)} keywords and {len([topics for topics in topic_clusters.values() if topics])} clusters. Dominant topic: {matched_topics[0] if matched_topics else 'none'}. Focus topics: {len(topic_focus)}. Signal richness: {richness_score:.2f}. The signal layer now spans privacy, continuity, routing, trust, discovery, retention, and operational-readiness topics.",
+        "summary": f"Topic context '{summary_text}' matched {len(matched_topics)} retention-relevant topics across {len(matched_themes)} themes with {len(matched_keywords)} keywords and {len([topics for topics in topic_clusters.values() if topics])} clusters. Dominant topic: {matched_topics[0] if matched_topics else 'none'}. Focus topics: {len(topic_focus)}. Signal richness: {richness_score:.2f}. Theme overlap score: {sum(theme_overlap_scores)}. The signal layer now spans privacy, continuity, routing, trust, discovery, retention, and operational-readiness topics.",
     }
 
 

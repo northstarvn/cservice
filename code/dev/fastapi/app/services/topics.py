@@ -375,6 +375,195 @@ TOPIC_CATALOG: list[dict[str, str | float | list[str]]] = [
         "confidence": 0.79,
         "keywords": ["vip", "priority", "premium", "route"],
     },
+    {
+        "topic": "customer intent detection and request framing",
+        "source": "system",
+        "rationale": "Helps classify the request goal early so the right flow can respond faster.",
+        "confidence": 0.83,
+        "keywords": ["intent", "request", "purpose", "frame"],
+    },
+    {
+        "topic": "customer preferences and saved context",
+        "source": "system",
+        "rationale": "Carries repeat preferences and prior context across sessions.",
+        "confidence": 0.82,
+        "keywords": ["preferences", "saved", "context", "repeat"],
+    },
+    {
+        "topic": "appointment preparation checklists",
+        "source": "system",
+        "rationale": "Captures pre-visit readiness steps and required preparations.",
+        "confidence": 0.8,
+        "keywords": ["checklist", "prepare", "bring", "before"],
+    },
+    {
+        "topic": "contact preferences and channel routing",
+        "source": "system",
+        "rationale": "Routes follow-up through the customer's preferred communication path.",
+        "confidence": 0.79,
+        "keywords": ["contact", "channel", "email", "text"],
+    },
+    {
+        "topic": "service transcript summarization",
+        "source": "system",
+        "rationale": "Turns long interactions into concise summaries that support review and handoff.",
+        "confidence": 0.81,
+        "keywords": ["transcript", "summary", "conversation", "recap"],
+    },
+    {
+        "topic": "service risk and exception monitoring",
+        "source": "system",
+        "rationale": "Highlights cases that need closer monitoring before they become escalations.",
+        "confidence": 0.78,
+        "keywords": ["risk", "monitor", "exception", "alert"],
+    },
+    {
+        "topic": "knowledge base search and answer discovery",
+        "source": "system",
+        "rationale": "Supports guided answer retrieval for routine questions and self-service discovery.",
+        "confidence": 0.79,
+        "keywords": ["knowledge", "search", "answer", "discover"],
+    },
+    {
+        "topic": "service callback timing and response expectations",
+        "source": "system",
+        "rationale": "Makes callback commitments and response windows easier to track.",
+        "confidence": 0.8,
+        "keywords": ["callback", "response", "expectation", "timing"],
+    },
+    {
+        "topic": "service area coverage and eligibility checks",
+        "source": "system",
+        "rationale": "Flags whether a request is supported in the customer's area or segment.",
+        "confidence": 0.79,
+        "keywords": ["coverage", "area", "eligible", "service area"],
+    },
+    {
+        "topic": "delivery tracking and status visibility",
+        "source": "system",
+        "rationale": "Brings shipping and delivery-style tracking into the shared topic model.",
+        "confidence": 0.77,
+        "keywords": ["delivery", "tracking", "shipment", "status"],
+    },
+    {
+        "topic": "case notes and interaction history",
+        "source": "system",
+        "rationale": "Makes past notes and prior interactions easier to surface in follow-up flows.",
+        "confidence": 0.8,
+        "keywords": ["notes", "history", "previous", "case"],
+    },
+    {
+        "topic": "workflow status and queue monitoring",
+        "source": "system",
+        "rationale": "Captures operational queue checks and workflow visibility needs.",
+        "confidence": 0.78,
+        "keywords": ["workflow", "status", "queue", "monitor"],
+    },
+    {
+        "topic": "customer confidence and reassurance messaging",
+        "source": "system",
+        "rationale": "Surfaces reassurance prompts when customers need more certainty.",
+        "confidence": 0.76,
+        "keywords": ["confidence", "reassurance", "trust", "comfort"],
+    },
+    {
+        "topic": "omnichannel conversation continuity",
+        "source": "system",
+        "rationale": "Tracks continuity across chat, email, and other support channels.",
+        "confidence": 0.77,
+        "keywords": ["channel", "continuity", "chat", "email"],
+    },
+    {
+        "topic": "data privacy and information handling",
+        "source": "system",
+        "rationale": "Keeps privacy-sensitive handling visible in topic routing and analysis.",
+        "confidence": 0.78,
+        "keywords": ["privacy", "data", "information", "personal"],
+    },
+    {
+        "topic": "service education and guided resolution",
+        "source": "system",
+        "rationale": "Covers guided support that teaches users how to resolve repeat issues.",
+        "confidence": 0.79,
+        "keywords": ["education", "guided", "resolution", "support"],
+    },
+    {
+        "topic": "service escalation thresholds and guardrails",
+        "source": "system",
+        "rationale": "Makes it easier to spot where escalation rules should kick in.",
+        "confidence": 0.77,
+        "keywords": ["threshold", "guardrail", "escalation", "review"],
+    },
+    {
+        "topic": "customer trust and reassurance",
+        "source": "system",
+        "rationale": "Keeps trust-building language visible as a first-class topic.",
+        "confidence": 0.75,
+        "keywords": ["trust", "reassure", "confidence", "comfort"],
+    },
+    {
+        "topic": "service continuity and follow-through",
+        "source": "system",
+        "rationale": "Connects recurring support, booking, and delivery-style work into a continuity-aware topic.",
+        "confidence": 0.8,
+        "keywords": ["continuity", "follow-through", "handoff", "resume"],
+    },
+    {
+        "topic": "case resolution ownership",
+        "source": "system",
+        "rationale": "Makes ownership and final resolution responsibility explicit for service operations.",
+        "confidence": 0.79,
+        "keywords": ["ownership", "resolution", "case", "resolve"],
+    },
+    {
+        "topic": "service insight and reporting",
+        "source": "system",
+        "rationale": "Adds analytics and reporting language for operations teams that monitor support performance.",
+        "confidence": 0.77,
+        "keywords": ["insight", "reporting", "analytics", "dashboard"],
+    },
+    {
+        "topic": "request prioritization and triage",
+        "source": "system",
+        "rationale": "Captures how incoming requests are sorted, prioritized, and routed to the right path.",
+        "confidence": 0.81,
+        "keywords": ["priority", "triage", "rank", "queue"],
+    },
+    {
+        "topic": "customer communication history",
+        "source": "system",
+        "rationale": "Provides a durable topic for conversations that depend on prior interactions and references.",
+        "confidence": 0.76,
+        "keywords": ["history", "previous", "conversation", "record"],
+    },
+    {
+        "topic": "service compliance and policy alignment",
+        "source": "system",
+        "rationale": "Keeps policy-sensitive support interactions visible when service rules matter.",
+        "confidence": 0.78,
+        "keywords": ["compliance", "policy", "alignment", "rule"],
+    },
+    {
+        "topic": "conversation summarization and handoff notes",
+        "source": "system",
+        "rationale": "Helps route long conversations into concise, transferable notes for the next handler.",
+        "confidence": 0.79,
+        "keywords": ["summary", "handoff", "notes", "recap"],
+    },
+    {
+        "topic": "service coordination and orchestration",
+        "source": "system",
+        "rationale": "Captures multi-step workflows that need coordination across teams or systems.",
+        "confidence": 0.8,
+        "keywords": ["coordination", "orchestration", "workflow", "sequence"],
+    },
+    {
+        "topic": "customer reminders and engagement",
+        "source": "system",
+        "rationale": "Extends reminder handling into proactive engagement and attendance recovery.",
+        "confidence": 0.77,
+        "keywords": ["reminder", "engagement", "follow-up", "nudge"],
+    },
 ]
 
 
@@ -419,6 +608,26 @@ TOPIC_THEME_GROUPS: list[dict[str, str | list[str]]] = [
         "theme": "communication_lifecycle",
         "topics": ["appointment reminders and notifications", "follow-up preference and communication channel", "handoff timing and ownership transfer", "handoff readiness and escalation context", "service follow-up and resolution tracking"],
     },
+    {
+        "theme": "customer_context",
+        "topics": ["customer intent detection and request framing", "customer preferences and saved context", "customer confidence and reassurance", "customer trust and reassurance", "case notes and interaction history"],
+    },
+    {
+        "theme": "knowledge_and_guidance",
+        "topics": ["FAQ and self-service guidance", "knowledge base search and answer discovery", "service education and guided resolution", "customer education and guided walkthroughs", "service transcript summarization"],
+    },
+    {
+        "theme": "communication_control",
+        "topics": ["contact preferences and channel routing", "omnichannel conversation continuity", "service callback timing and response expectations", "service escalation thresholds and guardrails", "data privacy and information handling"],
+    },
+    {
+        "theme": "operational_intelligence",
+        "topics": ["service insight and reporting", "service continuity and follow-through", "customer communication history", "conversation summarization and handoff notes", "service coordination and orchestration"],
+    },
+    {
+        "theme": "triage_and_priority",
+        "topics": ["issue severity and priority triage", "request prioritization and triage", "service compliance and policy alignment", "customer reminders and engagement", "case resolution ownership"],
+    },
 ]
 
 
@@ -429,6 +638,11 @@ TOPIC_SECTORS: list[dict[str, str | list[str]]] = [
     {"sector": "customer_enablement", "topics": ["FAQ and self-service guidance", "customer onboarding and first-time guidance", "service preferences and customization", "accessibility and assistance needs", "language and localization support", "customer education and guided walkthroughs", "customer follow-through and next-step planning"]},
     {"sector": "account_security", "topics": ["account access and profile help", "account verification and identity checks", "policy explanation and entitlement review", "service limits and quota usage", "subscription and membership status"]},
     {"sector": "financial_controls", "topics": ["billing and payment questions", "billing disputes and charge review", "refund timing and payout tracking", "cancellations and refunds"]},
+    {"sector": "customer_context", "topics": ["customer intent detection and request framing", "customer preferences and saved context", "customer confidence and reassurance", "customer trust and reassurance", "case notes and interaction history"]},
+    {"sector": "knowledge_and_guidance", "topics": ["FAQ and self-service guidance", "knowledge base search and answer discovery", "service education and guided resolution", "service transcript summarization", "appointment preparation checklists"]},
+    {"sector": "communication_control", "topics": ["contact preferences and channel routing", "omnichannel conversation continuity", "service callback timing and response expectations", "service escalation thresholds and guardrails", "data privacy and information handling"]},
+    {"sector": "operations_intelligence", "topics": ["service insight and reporting", "service continuity and follow-through", "customer communication history", "conversation summarization and handoff notes", "service coordination and orchestration"]},
+    {"sector": "priority_management", "topics": ["issue severity and priority triage", "request prioritization and triage", "service compliance and policy alignment", "customer reminders and engagement", "case resolution ownership"]},
 ]
 
 
@@ -474,6 +688,19 @@ def _related_topics_for(topic: str) -> list[str]:
     return related[:6]
 
 
+def _topic_overlap_score(topic: str, candidate: str) -> int:
+    topic_keywords = set(_topic_keywords(topic))
+    candidate_keywords = set(_topic_keywords(candidate))
+    shared_keywords = len(topic_keywords & candidate_keywords)
+    if topic in candidate or candidate in topic:
+        shared_keywords += 2
+    if _topic_theme_for(topic) and _topic_theme_for(topic) == _topic_theme_for(candidate):
+        shared_keywords += 2
+    if _topic_sector_for(topic) and _topic_sector_for(topic) == _topic_sector_for(candidate):
+        shared_keywords += 1
+    return shared_keywords
+
+
 def build_topic_taxonomy_report() -> schemas.TopicTaxonomyReport:
     topic_map = []
     for item in TOPIC_CATALOG:
@@ -499,8 +726,8 @@ def build_topic_taxonomy_report() -> schemas.TopicTaxonomyReport:
         sectors=sorted({str(group["sector"]) for group in TOPIC_SECTORS}),
         topic_map=topic_map,
         theme_map=theme_map,
-        summary=f"Topic taxonomy spans {len(TOPIC_CATALOG)} topics across {len(TOPIC_THEME_GROUPS)} themes and {len(TOPIC_SECTORS)} sectors with {len(topic_map[:5])} representative focus topics.",
-        topic_focus=[item["topic"] for item in TOPIC_CATALOG[:5]],
+        summary=f"Topic taxonomy spans {len(TOPIC_CATALOG)} topics across {len(TOPIC_THEME_GROUPS)} themes and {len(TOPIC_SECTORS)} sectors with {len(topic_map[:8])} representative focus topics and {len(theme_map)} theme groups.",
+        topic_focus=[item["topic"] for item in TOPIC_CATALOG[:8]],
     )
 
 
@@ -512,12 +739,14 @@ def build_topic_theme_coverage(selection: Optional[models.TopicSelection]) -> li
     for group in TOPIC_THEME_GROUPS:
         covered_topics = [topic for topic in group["topics"] if topic in catalog_topics]
         matched_topics = [topic for topic in covered_topics if topic.lower() in selected_text or any(keyword in selected_text for keyword in _topic_keywords(topic))]
+        overlap_score = sum(_topic_overlap_score(selected_topic, topic) for topic in matched_topics)
         coverage_items.append(
             {
                 "theme": group["theme"],
                 "topic_count": len(covered_topics),
                 "matched_count": len(matched_topics),
                 "coverage": round(len(covered_topics) / max(1, len(group["topics"])), 2),
+                "overlap_score": overlap_score,
             }
         )
     return coverage_items
@@ -650,11 +879,11 @@ def build_topic_coverage_report(selection: Optional[models.TopicSelection]) -> c
         catalog_size=len(TOPIC_CATALOG),
         top_recommendations=[item.topic for item in top_topics],
         theme_coverage=[chat_schemas.TopicCoverageThemeItem(**item) for item in coverage_by_theme],
-        topic_focus=list(dict.fromkeys([selection.topic if selection else ""] + [item.topic for item in top_topics]))[:5],
+        topic_focus=list(dict.fromkeys([selection.topic if selection else ""] + [item.topic for item in top_topics] + [item["topic"] for item in matched_catalog_topics[:3]]))[:6],
         matched_theme_topics=[topic for group in TOPIC_THEME_GROUPS for topic in group["topics"] if topic in selected_text],
         summary=(
             f"Coverage report matches {len(matched_catalog_topics)} catalog topics"
-            f" across {len(coverage_by_theme)} themes for the current selection with {len(top_topics)} top recommendations."
+            f" across {len(coverage_by_theme)} themes for the current selection with {len(top_topics)} top recommendations and {len(matched_catalog_topics)} keyword-linked matches."
         ),
     )
 
@@ -678,14 +907,25 @@ def build_topic_suggestion_report(
             theme_hits = [group["theme"] for group in TOPIC_THEME_GROUPS if group["theme"] == theme and item["topic"] in group["topics"]]
         if sector:
             sector_hits = [group["sector"] for group in TOPIC_SECTORS if group["sector"] == sector and item["topic"] in group["topics"]]
-        if query_text and (query_text in topic_text or keyword_hits or theme_hits or sector_hits):
-            suggestions.append(item)
+        overlap_hits = _topic_overlap_score(normalized_query, item["topic"])
+        if query_text and (query_text in topic_text or keyword_hits or theme_hits or sector_hits or overlap_hits >= 2):
+            enriched_item = dict(item)
+            enriched_item["confidence"] = round(min(0.99, float(item["confidence"]) + overlap_hits * 0.01), 2)
+            enriched_item["rationale"] = f"{item['rationale']} Matched on {len(keyword_hits)} keywords and {overlap_hits} overlap signals."
+            suggestions.append(enriched_item)
 
     if not suggestions:
-        suggestions = list(TOPIC_CATALOG[:limit])
+        suggestions = sorted(
+            TOPIC_CATALOG,
+            key=lambda item: (-len(_topic_keywords(str(item["topic"])))),
+        )[:limit]
 
-    trimmed = suggestions[:limit]
+    trimmed = sorted(
+        suggestions,
+        key=lambda item: (-_topic_overlap_score(normalized_query, str(item["topic"])), -float(item["confidence"]), str(item["topic"])),
+    )[:limit]
     topic_focus = list(dict.fromkeys([item["topic"] for item in trimmed]))
+    theme_coverage = build_topic_theme_coverage(type("TopicSuggestionSelection", (), {"topic": normalized_query})())
     return schemas.TopicSuggestionReport(
         generated_at=datetime.now(timezone.utc),
         query=normalized_query,
@@ -693,7 +933,7 @@ def build_topic_suggestion_report(
         suggested_topics=[schemas.TopicSearchResult(topic=item["topic"], score=float(item["confidence"]) * 100.0, matched_keywords=list(item.get("keywords", []))) for item in trimmed],
         catalog_size=len(TOPIC_CATALOG),
         topic_focus=topic_focus,
-        summary=f"Found {len(trimmed)} topic suggestions for '{normalized_query or 'all topics'}'.",
+        summary=f"Found {len(trimmed)} topic suggestions for '{normalized_query or 'all topics'}' across {len([item for item in theme_coverage if item['matched_count']])} matched themes.",
     )
 
 
@@ -721,9 +961,10 @@ def build_topic_intelligence_report(selection: Optional[models.TopicSelection]) 
             suggestions.append(item)
 
     if not suggestions:
-        suggestions = TOPIC_CATALOG[:5]
+        suggestions = sorted(TOPIC_CATALOG, key=lambda item: (-len(item.get("keywords", [])), str(item["topic"])))[:5]
 
     coverage_ratio = round(len(suggestions) / max(1, len(TOPIC_CATALOG)), 2)
+    matched_themes = [group["theme"] for group in TOPIC_THEME_GROUPS if selection.topic and any(topic in selection.topic.lower() for topic in group["topics"])]
 
     return schemas.TopicIntelligenceReport(
         generated_at=datetime.now(timezone.utc),
@@ -732,7 +973,9 @@ def build_topic_intelligence_report(selection: Optional[models.TopicSelection]) 
         suggested_topics=[schemas.TopicCatalogItem(**item) for item in suggestions],
         coverage_ratio=coverage_ratio,
         match_count=len(matched_keywords),
-        summary=f"Topic '{selection.topic}' is tracked with {len(matched_keywords)} keyword matches.",
+        topic_focus=list(dict.fromkeys([item["topic"] for item in suggestions[:3]] + matched_themes[:3])),
+        catalog_size=len(TOPIC_CATALOG),
+        summary=f"Topic '{selection.topic}' is tracked with {len(matched_keywords)} keyword matches across {len(matched_themes)} theme matches.",
     )
 
 
@@ -775,7 +1018,7 @@ def build_topic_recommendation_report(selection: Optional[models.TopicSelection]
             )
             for item in suggested_topics[:3]
         ],
-        summary=intelligence.summary + f" Theme matches: {len(portfolio['matched_themes'])}. Coverage entries: {len(theme_coverage)}.",
+        summary=intelligence.summary + f" Theme matches: {len(portfolio['matched_themes'])}. Coverage entries: {len(theme_coverage)}. Related recommendations: {len(suggested_topics[:3])}.",
     )
 
 
@@ -786,6 +1029,7 @@ def build_topic_portfolio_report(selection: Optional[models.TopicSelection]) -> 
     coverage_report = build_topic_coverage_report(selection)
     richness_report = build_topic_richness_report(selection)
     topic_focus = list(dict.fromkeys(list(coverage_report.matched_topics) + list(coverage_report.top_recommendations)))[:5]
+    theme_overlap = sum(item.get("overlap_score", 0) for item in build_topic_theme_coverage(selection))
     return {
         "generated_at": datetime.now(timezone.utc),
         "topic": selection.topic if selection else None,
@@ -805,8 +1049,9 @@ def build_topic_portfolio_report(selection: Optional[models.TopicSelection]) -> 
         ],
         "richness_score": richness_report["richness_score"],
         "matched_themes": [theme["theme"] for theme in richness_report["theme_matches"]],
+        "theme_overlap_score": theme_overlap,
         "topic_focus": topic_focus,
-        "summary": coverage_report.summary + f" Focus topics: {len(topic_focus)}.",
+        "summary": coverage_report.summary + f" Focus topics: {len(topic_focus)}. Theme coverage entries: {len(coverage_report.theme_coverage)}. Theme overlap score: {theme_overlap}.",
     }
 
 
@@ -902,7 +1147,7 @@ def build_topic_search_report(
         items=items,
         catalog_size=suggestion_report.catalog_size,
         topic_focus=list(suggestion_report.topic_focus),
-        summary=f"{suggestion_report.summary} Showing {window_start}-{window_end} of {total_results} results across {suggestion_report.catalog_size} catalog topics and {len(suggestion_report.suggested_topics)} ranked suggestions.",
+        summary=f"{suggestion_report.summary} Showing {window_start}-{window_end} of {total_results} results across {suggestion_report.catalog_size} catalog topics, {len(suggestion_report.suggested_topics)} ranked suggestions, and {len(suggestion_report.topic_focus)} focus topics.",
     )
 
 
@@ -921,7 +1166,7 @@ def build_topic_intelligence_overview(
         page=1,
         per_page=5,
     ).items
-    topic_focus = list(dict.fromkeys(workspace.topic_focus + [item.topic for item in suggested_topics]))[:8]
+    topic_focus = list(dict.fromkeys(workspace.topic_focus + [item.topic for item in suggested_topics]))[:10]
     return schemas.TopicIntelligenceOverview(
         generated_at=workspace.generated_at,
         user_id=user_id,
@@ -934,7 +1179,7 @@ def build_topic_intelligence_overview(
         catalog_size=workspace.catalog.total_topics,
         matched_topic_count=len(coverage.get("matched_topics", [])),
         suggestion_count=len(suggested_topics),
-        summary=f"Topic overview for user {user_id} with {len(coverage.get('matched_topics', []))} matched topics and {len(suggested_topics)} suggestions.",
+        summary=f"Topic overview for user {user_id} with {len(coverage.get('matched_topics', []))} matched topics, {len(suggested_topics)} suggestions, {len(portfolio.get('matched_themes', []))} matched themes, {len(portfolio.get('topic_focus', []))} portfolio focus entries, and {len(workspace.selection_history.items)} history items.",
         topic_focus=topic_focus,
     )
 
@@ -963,7 +1208,7 @@ def build_topic_workspace_report(
             + portfolio_themes[:3]
             + recommendations.get("matched_themes", [])[:3]
         )
-    )[:5]
+    )[:8]
     coverage_payload = coverage.model_dump() if hasattr(coverage, "model_dump") else coverage
     return schemas.TopicWorkspaceReport(
         generated_at=datetime.now(timezone.utc),
@@ -978,8 +1223,8 @@ def build_topic_workspace_report(
         recommendations=recommendations,
         selection_history=history,
         richness_score=float(portfolio.get("richness_score", 0.0)),
-        topic_focus=topic_focus,
-        summary=f"Workspace for user {user_id} with {catalog.total_topics} catalog topics and richness {float(portfolio.get('richness_score', 0.0)):.2f}.",
+        topic_focus=topic_focus[:8],
+        summary=f"Workspace for user {user_id} with {catalog.total_topics} catalog topics, {taxonomy.total_topics} taxonomy topics, {len(portfolio.get('matched_themes', []))} matched themes, richness {float(portfolio.get('richness_score', 0.0)):.2f}, and {len(portfolio.get('topic_focus', []))} portfolio focus entries.",
     )
 
 

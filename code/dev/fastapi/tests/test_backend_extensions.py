@@ -503,6 +503,8 @@ def test_booking_operation_report_exposes_topic_enrichment():
     assert payload["topic_coverage_ratio"] >= 0
     assert payload["topic_portfolio_coverage"] >= 0
     assert payload["topic_signal_summary"]
+    assert payload["topic_theme_overlap"] >= 0
+    assert "overlap=" in payload["topic_signal_summary"]
     assert len(payload["topic_focus"]) >= 1
     assert payload["recommendations"]
 
@@ -1577,9 +1579,11 @@ def test_topic_portfolio_report_combines_catalog_and_coverage():
     assert report["catalog_total"] >= len(report["top_recommendations"])
     assert report["theme_total"] >= 1
     assert report["coverage_ratio"] >= 0.0
+    assert report["theme_overlap_score"] >= 0
     assert report["matched_topics"]
     assert isinstance(report["theme_coverage"], list)
     assert report["theme_coverage"][0]["theme"]
+    assert "Theme overlap score:" in report["summary"]
 
 
 def test_topic_portfolio_report_reflects_richer_topic_coverage():

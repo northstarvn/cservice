@@ -63,6 +63,15 @@ def _booking_topic_context(booking: models.Booking, assignments: List[models.Boo
         " ".join(count_status_values([booking.status]).keys()),
         " ".join(normalize_status_value(assignment.state) for assignment in assignments[:3]),
         " ".join(str(getattr(event, "event_type", "")) for event in events[:3]),
+        " ".join(
+            part
+            for part in [
+                str(getattr(booking, "notes", "") or ""),
+                str(getattr(booking, "comment", "") or ""),
+                str(getattr(booking, "special_instructions", "") or ""),
+            ]
+            if part
+        ),
     ]
     return " ".join(part for part in status_parts if part)
 
@@ -89,7 +98,7 @@ def _booking_topic_details(topic_text: str) -> dict[str, object]:
             [topic_text] + list(coverage.matched_topics) + [item.topic for item in intelligence.suggested_topics[:5]]
         )
     )
-    theme_focus = list(dict.fromkeys(matched_themes + portfolio["matched_themes"]))
+    theme_focus = list(dict.fromkeys(matched_themes + portfolio["matched_themes"] + [item.get("theme", "") for item in theme_coverage if item.get("matched_count", 0)]))
     sector_focus = list(dict.fromkeys(matched_sectors + portfolio["matched_themes"]))
     return {
         "intelligence": intelligence,
@@ -284,6 +293,7 @@ def build_booking_service_summary(
     topic_details = _booking_topic_details(booking_topic_text)
     topic_intelligence = topic_details["intelligence"]
     topic_portfolio = topic_details["portfolio"]
+    topic_theme_overlap = sum(item.get("overlap_score", 0) for item in topic_portfolio["theme_coverage"])
     topic_signal_depth = (
         f"themes={len(topic_details['matched_themes'])}, "
         f"sectors={len(topic_details['matched_sectors'])}, "
@@ -292,7 +302,10 @@ def build_booking_service_summary(
         f"focus={len(topic_details['topic_focus'])}, "
         f"portfolio_topics={len(topic_portfolio['topic_focus'])}, "
         f"portfolio_themes={len(topic_portfolio['matched_themes'])}, "
-        f"portfolio_coverage={topic_portfolio['coverage_ratio']:.2f}"
+        f"portfolio_coverage={topic_portfolio['coverage_ratio']:.2f}, "
+        f"theme_overlap={topic_theme_overlap}, "
+        f"catalog={topic_details['catalog_total']}, "
+        f"themes_total={topic_details['theme_total']}"
     )
     topic_focus = list(
         dict.fromkeys(
@@ -315,7 +328,7 @@ def build_booking_service_summary(
         "latest_event_at": history_summary["latest_event_at"],
         "latest_event_type": history_summary["latest_event_type"],
         "has_mutations": history_summary["has_mutations"],
-        "topic_context": f"{topic_intelligence.summary}; themes={len(topic_details['matched_themes'])}; sectors={len(topic_details['matched_sectors'])}",
+        "topic_context": f"{topic_intelligence.summary}; themes={len(topic_details['matched_themes'])}; sectors={len(topic_details['matched_sectors'])}; overlap={topic_theme_overlap}",
         "topic_coverage_ratio": topic_intelligence.coverage_ratio,
         "topic_matches": [item.topic for item in topic_intelligence.suggested_topics[:3]],
         "topic_portfolio_coverage": topic_portfolio["coverage_ratio"],
@@ -328,6 +341,13 @@ def build_booking_service_summary(
         "topic_matched_sectors": topic_details["matched_sectors"],
         "topic_matched_theme_topics": topic_details["matched_theme_topics"],
         "topic_portfolio_matched_themes": topic_portfolio["matched_themes"],
+        "topic_theme_focus": topic_details["theme_focus"],
+        "topic_sector_focus": topic_details["sector_focus"],
+        "topic_theme_overlap": topic_theme_overlap,
+        "topic_signal_summary": (
+            f"topics={len(topic_focus)}, themes={len(topic_details['matched_themes'])}, sectors={len(topic_details['matched_sectors'])}, "
+            f"coverage={topic_intelligence.coverage_ratio:.2f}, portfolio={topic_portfolio['coverage_ratio']:.2f}, overlap={topic_theme_overlap}"
+        ),
     }
 
 
@@ -364,6 +384,8 @@ def build_booking_timeline_summary(
         "topic_theme_coverage": topic_details["theme_coverage"],
         "topic_matched_themes": topic_details["matched_themes"],
         "topic_focus": topic_details["topic_focus"],
+        "topic_theme_focus": topic_details["theme_focus"],
+        "topic_sector_focus": topic_details["sector_focus"],
     }
 
 
@@ -395,10 +417,13 @@ def build_booking_operation_report(
         "topic_matched_themes": summary["topic_matched_themes"],
         "topic_matched_sectors": summary["topic_matched_sectors"],
         "topic_focus": summary["topic_focus"],
+        "topic_theme_focus": summary["topic_theme_focus"],
+        "topic_sector_focus": summary["topic_sector_focus"],
+        "topic_theme_overlap": summary["topic_theme_overlap"],
         "topic_signal_summary": (
             f"topics={len(summary['topic_focus'])}, themes={len(summary['topic_theme_coverage'])}, "
             f"coverage={summary['topic_portfolio_coverage']:.2f}, sectors={len(summary['topic_matched_sectors'])}, "
-            f"portfolio_themes={len(summary['topic_portfolio_matched_themes'])}"
+            f"portfolio_themes={len(summary['topic_portfolio_matched_themes'])}, overlap={summary['topic_theme_overlap']}"
         ),
         "recommendations": [
             "Review assignment history for repeated state changes.",
@@ -406,6 +431,7 @@ def build_booking_operation_report(
             "Use controlled posture notes when exposing booking details to users.",
             "Carry topic coverage and topic matches into booking decision prompts.",
             "Expose the topic signal summary alongside the booking operation report.",
+            "Treat theme overlap as an operational signal for richer routing and follow-through.",
         ],
     }
 
@@ -416,7 +442,9 @@ def build_typed_booking_operation_report(
     events: List[models.BookingEvent],
     control_posture: str,
 ) -> dict:
-    return build_booking_operation_report(booking, assignments, events, control_posture)
+    report = build_booking_operation_report(booking, assignments, events, control_posture)
+    report["topic_theme_overlap"] = report.get("topic_theme_overlap", 0)
+    return report
 
 
 def build_typed_booking_timeline_summary(

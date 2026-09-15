@@ -201,6 +201,7 @@ class BookingOperationReport(BaseModel):
     topic_context: str = ""
     topic_coverage_ratio: float = 0.0
     topic_portfolio_coverage: float = 0.0
+    topic_theme_overlap: int = 0
     topic_signal_summary: str = ""
     topic_focus: List[str] = Field(default_factory=list)
     recommendations: List[str] = Field(default_factory=list)

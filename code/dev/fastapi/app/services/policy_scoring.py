@@ -61,6 +61,8 @@ def _topic_breadth_score(topic_text: str) -> float:
         breadth += 8.0
     if any(marker in normalized for marker in ["privacy", "consent", "translation", "attachment", "checklist", "feedback"]):
         breadth += 7.0
+    if any(marker in normalized for marker in ["intent", "frame", "preferences", "knowledge", "callback", "visibility", "continuity"]):
+        breadth += 9.0
     return min(100.0, round(breadth, 2))
 
 
@@ -90,6 +92,12 @@ def _topic_complexity_score(topic_text: str) -> float:
         "attachment",
         "checklist",
         "feedback",
+        "intent",
+        "knowledge",
+        "callback",
+        "visibility",
+        "continuity",
+        "reassurance",
     ]
     score = sum(9.0 for term in complexity_terms if term in normalized)
     if len(normalized.split()) >= 4:
@@ -125,6 +133,7 @@ def _topic_signals(topic_text: str) -> dict[str, object]:
         "matched_topics": list(dict.fromkeys(coverage.matched_topics)),
         "matched_keywords": list(dict.fromkeys(intelligence.matched_keywords)),
         "matched_themes": list(dict.fromkeys(portfolio["matched_themes"])),
+        "theme_overlap_score": sum(item.get("overlap_score", 0) for item in build_topic_theme_coverage(type("PolicyTopicSelection", (), {"topic": normalized})()) if item.get("matched_count")),
         "matched_theme_topics": list(dict.fromkeys(topic for topic in coverage.matched_topics if topic in topic_text.lower())),
         "matched_sectors": [sector for sector in _topic_sector_matches(normalized)],
         "suggested_topics": suggestions.suggested_topics,
@@ -292,7 +301,8 @@ def build_policy_topic_context(user: models.User, topic_text: str) -> str:
     topic_signals = _topic_signals(normalized)
     return (
         f"{normalized} [breadth={breadth:.2f}, complexity={complexity:.2f}, "
-        f"themes={len(matched_themes)}, sectors={len(matched_sectors)}, coverage={topic_signals['coverage_ratio']:.2f}, focus={len(topic_signals['topic_focus'])}]"
+        f"themes={len(matched_themes)}, sectors={len(matched_sectors)}, coverage={topic_signals['coverage_ratio']:.2f}, focus={len(topic_signals['topic_focus'])}, "
+        f"family_count={topic_signals['topic_family_count']}, richness={topic_signals['topic_richness_score']:.2f}]"
     )
 
 
@@ -369,6 +379,7 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
     signals = _topic_signals(current_topic)
     matched_topics = list(dict.fromkeys(signals["matched_topics"]))
     topic_focus = signals["topic_focus"] or matched_topics[:5] or list(dict.fromkeys(intelligence_report.matched_keywords[:5]))
+    theme_overlap_score = int(signals.get("theme_overlap_score", 0))
     items = [
         chat_schemas.PolicyTopicInsightItem(
             topic=current_topic,
@@ -386,7 +397,7 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
     summary = (
         f"{snapshot.summary or summarize_policy_score(snapshot)}, "
         f"topic={current_topic}, topic_context={topic_context}, topic_richness={topic_richness}, topic_depth={topic_depth}, "
-        f"fallback={enriched_fallback}, topic_focus={len(topic_focus)}, topic_signals={len(matched_topics)}, sectors={len(_topic_sector_matches(current_topic))}, themes={len(matched_themes)}"
+        f"fallback={enriched_fallback}, topic_focus={len(topic_focus)}, topic_signals={len(matched_topics)}, sectors={len(_topic_sector_matches(current_topic))}, themes={len(matched_themes)}, overlap={theme_overlap_score}"
     )
     return chat_schemas.PolicyTopicAnalysisReport(
         generated_at=datetime.now(timezone.utc),
@@ -401,7 +412,7 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
         topic_focus=topic_focus,
         topic_signal_count=len(matched_topics),
         items=items,
-        summary=f"Policy topic analysis for '{current_topic}' spans {len(matched_topics)} matched topics, {len(matched_themes)} themes, {len(theme_coverage_items)} theme matches, {len(portfolio_report['matched_themes'])} portfolio themes, and {len(_topic_sector_matches(current_topic))} sectors; topic_depth={topic_depth}. The topic layer now emphasizes privacy, continuity, routing, trust, discovery, and retention evidence.",
+        summary=f"Policy topic analysis for '{current_topic}' spans {len(matched_topics)} matched topics, {len(matched_themes)} themes, {len(theme_coverage_items)} theme matches, {len(portfolio_report['matched_themes'])} portfolio themes, {len(_topic_sector_matches(current_topic))} sectors, and theme_overlap_score={theme_overlap_score}; topic_depth={topic_depth}. The topic layer now emphasizes privacy, continuity, routing, trust, discovery, retention, checklist, callback, and knowledge evidence.",
     )
 
 
