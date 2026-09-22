@@ -87,6 +87,7 @@ class BookingAssignmentState(str, Enum):
     expired = "expired"
     reassigned = "reassigned"
 
+
 class BookingAssignmentDecision(BaseModel):
     booking_id: int
     user_id: int
@@ -106,33 +107,6 @@ class BookingAssignmentReport(BaseModel):
     current_state: BookingAssignmentState
     current_assignment_is_current: bool = True
     decisions: List[BookingAssignmentDecision]
-    control_posture: str = "observed"
-
-
-class BookingAssignmentSummary(BaseModel):
-    booking_id: int
-    user_id: int
-    total_assignments: int
-    current_assignments: int
-    historical_assignments: int
-    state_counts: dict[str, int]
-    control_posture: str = "observed"
-
-
-class BookingAssignmentReportPage(BaseModel):
-    booking_id: int
-    user_id: int
-    total_assignments: int
-    current_assignments: int = 0
-    historical_assignments: int = 0
-    state_counts: dict[str, int]
-    source_counts: dict[str, int]
-    created_after: Optional[datetime] = None
-    created_before: Optional[datetime] = None
-    page: int
-    per_page: int
-    pages: int
-    items: List[BookingAssignmentReport]
     control_posture: str = "observed"
 
 
@@ -189,43 +163,6 @@ class BookingAuditSummary(BaseModel):
     control_posture: str = "observed"
 
 
-class BookingOperationReport(BaseModel):
-    generated_at: datetime
-    booking_id: int
-    user_id: Optional[int] = None
-    control_posture: str = "observed"
-    summary: dict[str, object] = Field(default_factory=dict)
-    timeline: dict[str, object] = Field(default_factory=dict)
-    typed_summary: dict[str, object] = Field(default_factory=dict)
-    typed_assignment_summary: dict[str, object] = Field(default_factory=dict)
-    topic_context: str = ""
-    topic_coverage_ratio: float = 0.0
-    topic_portfolio_coverage: float = 0.0
-    topic_theme_overlap: int = 0
-    topic_signal_summary: str = ""
-    topic_focus: List[str] = Field(default_factory=list)
-    recommendations: List[str] = Field(default_factory=list)
-
-
-class BookingSummary(BaseModel):
-    booking_id: int
-    user_id: int
-    current_status: BookingStatus
-    status_counts: dict[str, int] = Field(default_factory=dict)
-    assignment_count: int = 0
-    control_posture: str = "observed"
-
-
-class BookingSummaryReport(BaseModel):
-    generated_at: datetime
-    booking_id: int
-    user_id: int
-    current_status: BookingStatus
-    status_counts: dict[str, int] = Field(default_factory=dict)
-    assignment_count: int = 0
-    control_posture: str = "observed"
-
-
 class BookingTransitionResult(BaseModel):
     booking: BookingOut
     event: BookingEventOut
@@ -247,6 +184,70 @@ class BookingHistoryReport(BaseModel):
     control_posture: str = "observed"
 
 
+class BookingSummary(BaseModel):
+    booking_id: int
+    user_id: int
+    current_status: BookingStatus
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    assignment_count: int = 0
+    control_posture: str = "observed"
+
+
+class BookingSummaryReport(BaseModel):
+    generated_at: datetime
+    booking_id: int
+    user_id: int
+    current_status: BookingStatus
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    assignment_count: int = 0
+    control_posture: str = "observed"
+
+
+class BookingOperationReport(BaseModel):
+    generated_at: datetime
+    booking_id: int
+    user_id: Optional[int] = None
+    control_posture: str = "observed"
+    summary: dict[str, object] = Field(default_factory=dict)
+    timeline: dict[str, object] = Field(default_factory=dict)
+    typed_summary: dict[str, object] = Field(default_factory=dict)
+    typed_assignment_summary: dict[str, object] = Field(default_factory=dict)
+    topic_context: str = ""
+    topic_coverage_ratio: float = 0.0
+    topic_portfolio_coverage: float = 0.0
+    topic_theme_overlap: int = 0
+    topic_signal_summary: str = ""
+    topic_focus: List[str] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
+
+
+class BookingAssignmentSummary(BaseModel):
+    booking_id: int
+    user_id: int
+    total_assignments: int
+    current_assignments: int
+    historical_assignments: int
+    state_counts: dict[str, int]
+    control_posture: str = "observed"
+
+
+class BookingAssignmentReportPage(BaseModel):
+    booking_id: int
+    user_id: int
+    total_assignments: int
+    current_assignments: int = 0
+    historical_assignments: int = 0
+    state_counts: dict[str, int]
+    source_counts: dict[str, int]
+    created_after: Optional[datetime] = None
+    created_before: Optional[datetime] = None
+    page: int
+    per_page: int
+    pages: int
+    items: List[BookingAssignmentReport]
+    control_posture: str = "observed"
+
+
 class BookingAssignmentHistoryReport(BaseModel):
     booking_id: int
     user_id: int
@@ -265,6 +266,7 @@ class BookingAssignmentHistorySummary(BaseModel):
     latest_event_at: Optional[datetime] = None
     latest_event_type: Optional[str] = None
     event_type_counts: dict[str, int] = Field(default_factory=dict)
+    items: List[BookingEventOut] = Field(default_factory=list)
     control_posture: str = "observed"
 
 
@@ -324,6 +326,47 @@ class UserOut(BaseModel):
     updated_at: datetime
     is_admin: bool = False
 
+class PaginatedBookings(BaseModel):
+    items: List[BookingOut]
+    total: int
+    page: int
+    per_page: int
+    pages: int
+
+class UserBase(BaseModel):
+    username: str
+    email: EmailStr
+    full_name: Optional[str] = None
+
+class UserCreate(UserBase):
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    expires_in: int
+
+class TokenData(BaseModel):
+    username: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+    locale: Optional[str] = None
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class PasswordChangeResult(BaseModel):
+    message: str
+
+
+# ---------------------------------------------------------------------------
+# Customer policy scoring
+# ---------------------------------------------------------------------------
 
 class CustomerPolicyScoreOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -357,15 +400,6 @@ class CustomerPolicyAccessOut(BaseModel):
     system_score: float
 
 
-class CustomerPolicyDecisionReportOut(BaseModel):
-    policy_decision: "CustomerPolicyDecisionSummaryOut"
-    policy_score: CustomerPolicyScoreOut
-    control_posture: str
-    policy_tier: str
-    topic_context: str = ""
-    topic_analysis: Optional[dict[str, object]] = None
-
-
 class CustomerPolicyHealthSummaryOut(BaseModel):
     generated_at: datetime
     policy_tier: str
@@ -394,6 +428,19 @@ class CustomerPolicyDecisionSummaryOut(BaseModel):
     summary: str
     topic_context: str = ""
 
+
+class CustomerPolicyDecisionReportOut(BaseModel):
+    policy_decision: CustomerPolicyDecisionSummaryOut
+    policy_score: CustomerPolicyScoreOut
+    control_posture: str
+    policy_tier: str
+    topic_context: str = ""
+    topic_analysis: Optional[dict[str, object]] = None
+
+
+# ---------------------------------------------------------------------------
+# Topic intelligence
+# ---------------------------------------------------------------------------
 
 class TopicSelectionCreate(BaseModel):
     topic: str
@@ -578,40 +625,3 @@ class TopicSearchReport(BaseModel):
     catalog_size: int = 0
     topic_focus: List[str] = Field(default_factory=list)
     summary: str
-
-class PaginatedBookings(BaseModel):
-    items: List[BookingOut]
-    total: int
-    page: int
-    per_page: int
-    pages: int
-
-class UserBase(BaseModel):
-    username: str
-    email: EmailStr
-    full_name: Optional[str] = None
-
-class UserCreate(UserBase):
-    password: str
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-    expires_in: int
-
-class TokenData(BaseModel):
-    username: str
-
-class UserLogin(BaseModel):
-    username: str
-    password: str
-    locale: Optional[str] = None
-
-
-class PasswordChange(BaseModel):
-    current_password: str
-    new_password: str
-
-
-class PasswordChangeResult(BaseModel):
-    message: str

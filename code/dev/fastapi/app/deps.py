@@ -10,6 +10,12 @@ import jwt
 # Security scheme
 security_scheme = HTTPBearer()
 
+
+def current_control_posture(current_user: models.User) -> str:
+    """Resolve a user's control posture, defaulting to 'observed' when unknown."""
+    policy_score = getattr(current_user, "policy_score", None)
+    return getattr(policy_score, "control_posture", "observed") if policy_score else "observed"
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     db: AsyncSession = Depends(get_db)
@@ -64,13 +70,6 @@ async def get_current_policy_or_admin_user(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Policy-controlled admin access required",
     )
-
-
-async def get_current_policy_admin_user(
-    current_user: models.User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> models.User:
-    return await get_current_policy_or_admin_user(current_user=current_user, db=db)
 
 
 async def get_current_customer_policy_score(

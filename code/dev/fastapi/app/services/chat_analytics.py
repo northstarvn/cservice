@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
 from app.schemas import chat as chat_schemas
-from app.services.topics import TOPIC_CATALOG, TOPIC_SECTORS, TOPIC_THEME_GROUPS, build_topic_portfolio_report, build_topic_theme_coverage
+from app.services.topics import (
+    TOPIC_CATALOG,
+    TOPIC_SECTORS,
+    TOPIC_THEME_GROUPS,
+    build_topic_portfolio_report,
+    build_topic_theme_coverage,
+)
 from app.schemas.chat import (
     ChurnPrediction,
     DissatisfactionRecoveryReport,
@@ -32,15 +38,13 @@ from app.schemas.chat import (
     RetentionSnapshotOperationItem,
     RetentionSnapshotOperationsReport,
     Sentiment,
+    TopicRankingItem,
+    TopicRankingReport,
+    TopicPolicyDecision,
+    TopicPolicyDecisionReport,
     SystemImprovementItem,
     SystemImprovementPack,
 )
-
-
-def _build_capabilities_payload() -> dict[str, object]:
-    from app.routers.chat import _build_capabilities_payload as router_build_capabilities_payload
-
-    return router_build_capabilities_payload()
 
 load_dotenv()
 
@@ -67,6 +71,11 @@ RETENTION_KEYWORDS = {
     "support": "support",
 }
 
+# Keyword terms wired into scoring that are NOT already covered by each area's
+# hardcoded term list. Currently the retention-mapped terms ("repeat", "again");
+# the remaining keyword mappings are already reflected in score_area's branches.
+RETENTION_KEYWORD_TERMS = [keyword for keyword, area in RETENTION_KEYWORDS.items() if area == "retention"]
+
 PREDEFINED_POLICY_AREAS = [
     "response_speed",
     "clarity",
@@ -83,101 +92,6 @@ PREDEFINED_POLICY_AREAS = [
     "trust",
     "follow_up",
 ]
-
-TOPIC_HINTS = {
-    "booking status and confirmations": ["booking", "confirm", "status", "appointment"],
-    "booking rescheduling and changes": ["reschedule", "change", "move", "update"],
-    "cancellations and refunds": ["cancel", "refund", "reverse", "void"],
-    "service quality and follow-up": ["quality", "follow up", "feedback", "issue"],
-    "billing and payment questions": ["bill", "payment", "invoice", "charge"],
-    "support escalation and handoff": ["escalate", "handoff", "urgent", "manager"],
-    "account access and profile help": ["account", "login", "password", "profile"],
-    "availability and scheduling constraints": ["available", "schedule", "time", "slot"],
-    "customer sentiment and recovery": ["sentiment", "angry", "frustrated", "recover"],
-    "FAQ and self-service guidance": ["how to", "faq", "help", "guide"],
-    "language and localization support": ["language", "translation", "locale", "multilingual"],
-    "routing and service assignment": ["route", "assign", "room", "match"],
-    "appointment reminders and notifications": ["reminder", "notify", "alert", "nudge"],
-    "service eligibility and requirements": ["eligible", "requirement", "qualify", "criteria"],
-    "address and location details": ["address", "location", "site", "direction"],
-    "arrival timing and eta updates": ["eta", "arrival", "when", "time"],
-    "service exceptions and edge cases": ["exception", "edge case", "special", "custom"],
-    "handoff readiness and escalation context": ["handoff", "context", "escalation", "agent"],
-    "billing disputes and charge review": ["dispute", "charge", "billing", "review"],
-    "service follow-up and resolution tracking": ["follow-up", "resolution", "callback", "closed"],
-    "customer onboarding and first-time guidance": ["onboarding", "first time", "getting started", "setup"],
-    "service preferences and customization": ["preference", "custom", "tailor", "recurring"],
-    "accessibility and assistance needs": ["accessibility", "assistance", "accommodation", "support"],
-    "escalation prevention and de-escalation": ["de-escalate", "calm", "resolve", "complaint"],
-    "availability exceptions and waitlist management": ["waitlist", "overbook", "slot", "availability"],
-    "follow-up preference and communication channel": ["call", "text", "email", "contact"],
-    "policy explanation and entitlement review": ["policy", "entitlement", "rule", "explain"],
-    "service status and progress updates": ["progress", "status", "update", "where"],
-    "issue reproduction and troubleshooting": ["reproduce", "troubleshoot", "steps", "diagnose"],
-    "complaints and service recovery": ["complaint", "recover", "unsatisfied", "unhappy"],
-    "workflow automation and task routing": ["automation", "workflow", "queue", "routing"],
-    "room assignment and resource matching": ["room", "assignment", "resource", "match"],
-    "capacity planning and slot allocation": ["capacity", "slot", "allocation", "demand"],
-    "booking audit trails and traceability": ["audit", "trace", "history", "event"],
-    "customer follow-through and next-step planning": ["next step", "follow through", "callback", "plan"],
-    "handoff preparation and context packaging": ["handoff", "context", "package", "transfer"],
-    "service appointment preparation": ["prepare", "prep", "ready", "expect"],
-    "same-day rescheduling and urgent changes": ["same day", "urgent", "today", "asap"],
-    "no-show prevention and follow-up": ["no show", "missed", "remind", "follow up"],
-    "service area coverage and eligibility checks": ["coverage", "area", "eligible", "service area"],
-    "queue status and response timing": ["queue", "wait", "response", "timing"],
-    "handoff timing and ownership transfer": ["ownership", "transfer", "handoff", "team"],
-    "account verification and identity checks": ["verify", "identity", "security", "confirm"],
-    "subscription and membership status": ["subscription", "membership", "plan", "tier"],
-    "refund timing and payout tracking": ["refund", "payout", "timing", "processing"],
-    "issue severity and priority triage": ["severity", "priority", "urgent", "triage"],
-    "customer feedback and survey response": ["survey", "feedback", "rate", "review"],
-    "service limits and quota usage": ["limit", "quota", "usage", "allowance"],
-    "workflow exceptions and manual override": ["override", "manual", "exception", "review"],
-    "customer education and guided walkthroughs": ["walkthrough", "guide", "teach", "explain"],
-    "operational readiness and staffing coverage": ["staffing", "coverage", "readiness", "shift"],
-    "priority customer handling and vip routing": ["vip", "priority", "premium", "route"],
-    "delivery tracking and status visibility": ["delivery", "tracking", "shipment", "status"],
-    "appointment preparation checklists": ["checklist", "bring", "prepare", "before"],
-    "contact preferences and channel routing": ["contact", "channel", "email", "text"],
-    "case notes and interaction history": ["notes", "history", "previous", "case"],
-    "service quote and estimate review": ["quote", "estimate", "cost", "review"],
-    "handoff quality and context completeness": ["handoff", "complete", "context", "summary"],
-    "support queue prioritization": ["queue", "priority", "triage", "order"],
-    "customer intent detection and routing": ["intent", "route", "purpose", "request"],
-    "service history and recurring issues": ["history", "repeat", "recurring", "issue"],
-    "customer preferences and saved context": ["preferences", "saved", "context", "repeat"],
-    "service transcript summarization": ["transcript", "summary", "conversation", "recap"],
-    "knowledge base search and answer discovery": ["knowledge", "search", "answer", "discover"],
-    "service callback timing and response expectations": ["callback", "response", "expectation", "timing"],
-    "service area coverage and eligibility checks": ["coverage", "area", "eligible", "service area"],
-    "workflow status and queue monitoring": ["workflow", "status", "queue", "monitor"],
-    "omnichannel conversation continuity": ["channel", "continuity", "chat", "email"],
-    "data privacy and information handling": ["privacy", "data", "information", "personal"],
-    "service education and guided resolution": ["education", "guided", "resolution", "support"],
-    "service escalation thresholds and guardrails": ["threshold", "guardrail", "escalation", "review"],
-    "customer confidence and reassurance messaging": ["confidence", "reassurance", "trust", "comfort"],
-    "customer trust and reassurance": ["trust", "reassure", "confidence", "comfort"],
-}
-
-
-def _topic_clusters(topics: list[str]) -> dict[str, list[str]]:
-    clusters = {
-        "service_flow": ["booking status and confirmations", "booking rescheduling and changes", "same-day rescheduling and urgent changes", "queue status and response timing", "service status and progress updates", "delivery tracking and status visibility"],
-        "recovery_and_support": ["customer sentiment and recovery", "complaints and service recovery", "issue reproduction and troubleshooting", "service follow-up and resolution tracking", "support escalation and handoff"],
-        "routing_and_context": ["routing and service assignment", "handoff readiness and escalation context", "handoff quality and context completeness", "customer intent detection and routing", "support queue prioritization"],
-        "preparation_and_estimation": ["service appointment preparation", "appointment preparation checklists", "service area coverage and eligibility checks", "service quote and estimate review", "customer education and guided walkthroughs"],
-        "preferences_and_channels": ["follow-up preference and communication channel", "contact preferences and channel routing", "appointment reminders and notifications", "language and localization support", "omnichannel conversation continuity"],
-        "history_and_patterns": ["case notes and interaction history", "service history and recurring issues", "customer feedback and survey response", "operational readiness and staffing coverage", "service transcript summarization"],
-        "guidance_and_discovery": ["FAQ and self-service guidance", "knowledge base search and answer discovery", "service education and guided resolution", "customer confidence and reassurance messaging"],
-        "trust_and_controls": ["data privacy and information handling", "service escalation thresholds and guardrails", "customer trust and reassurance"],
-    }
-    topic_set = set(topics)
-    return {cluster: [topic for topic in cluster_topics if topic in topic_set] for cluster, cluster_topics in clusters.items()}
-
-def _topic_signal_matches(topic_text: str) -> list[str]:
-    normalized = normalize_text(topic_text)
-    return [topic for topic, keywords in TOPIC_HINTS.items() if any(keyword in normalized for keyword in keywords)]
 
 POLICY_CONFIGS = {
     "response_speed": {
@@ -289,7 +203,6 @@ def score_area(messages: list[str], bookings: list[models.Booking], area: str) -
     evidence: list[str] = []
     score = 0.0
     recent_messages = messages[:3]
-    normalized_messages = [normalize_text(message) for message in messages if message]
     for message in messages:
         normalized = normalize_text(message)
         if area == "response_speed" and any(word in normalized for word in ["slow", "delay", "wait"]):
@@ -310,9 +223,12 @@ def score_area(messages: list[str], bookings: list[models.Booking], area: str) -
         elif area == "pricing" and any(word in normalized for word in ["price", "expensive"]):
             score += 0.9 if message in recent_messages else 0.7
             evidence.append(message)
+        elif area == "retention" and any(word in normalized for word in RETENTION_KEYWORD_TERMS):
+            score += 1.0 if message in recent_messages else 0.8
+            evidence.append(message)
 
     if area == "booking_flow":
-        cancelled_or_pending = [b for b in bookings if _booking_status_in(b, {"pending", "cancelled"})]
+        cancelled_or_pending = [b for b in bookings if str(getattr(b.status, "value", b.status)) in {"pending", "cancelled"}]
         score += min(len(cancelled_or_pending) * 0.6, 2.4)
         if cancelled_or_pending:
             evidence.append(f"{len(cancelled_or_pending)} bookings are pending/cancelled")
@@ -322,37 +238,37 @@ def score_area(messages: list[str], bookings: list[models.Booking], area: str) -
         if repeated:
             evidence.append(f"{repeated} repeated messages suggest unresolved needs")
     if area == "sentiment_recovery" and messages:
-        negative_terms = [word for word in ["angry", "frustrated", "upset", "disappointed", "bad"] if any(word in message for message in normalized_messages)]
+        negative_terms = [word for word in ["angry", "frustrated", "upset", "disappointed", "bad"] if any(word in normalize_text(message) for message in messages)]
         score += min(len(negative_terms) * 0.8, 2.4)
         if negative_terms:
             evidence.append("negative sentiment language detected in recent messages")
     if area == "onboarding" and messages:
-        onboarding_terms = [word for word in ["how do i", "new here", "getting started", "first time", "setup"] if any(word in message for message in normalized_messages)]
+        onboarding_terms = [word for word in ["how do i", "new here", "getting started", "first time", "setup"] if any(word in normalize_text(message) for message in messages)]
         score += min(len(onboarding_terms) * 0.7, 2.1)
         if onboarding_terms:
             evidence.append("onboarding guidance requests detected")
     if area == "notification_quality" and messages:
-        notification_terms = [word for word in ["notify", "notification", "alert", "remind", "reminder"] if any(word in message for message in normalized_messages)]
+        notification_terms = [word for word in ["notify", "notification", "alert", "remind", "reminder"] if any(word in normalize_text(message) for message in messages)]
         score += min(len(notification_terms) * 0.6, 1.8)
         if notification_terms:
             evidence.append("notification and reminder language detected")
     if area == "self_service" and messages:
-        self_service_terms = [word for word in ["faq", "self service", "self-service", "how to", "help center"] if any(word in message for message in normalized_messages)]
+        self_service_terms = [word for word in ["faq", "self service", "self-service", "how to", "help center"] if any(word in normalize_text(message) for message in messages)]
         score += min(len(self_service_terms) * 0.6, 1.8)
         if self_service_terms:
             evidence.append("self-service questions detected")
     if area == "handoff" and messages:
-        handoff_terms = [word for word in ["agent", "transfer", "human", "someone", "escalate"] if any(word in message for message in normalized_messages)]
+        handoff_terms = [word for word in ["agent", "transfer", "human", "someone", "escalate"] if any(word in normalize_text(message) for message in messages)]
         score += min(len(handoff_terms) * 0.6, 1.8)
         if handoff_terms:
             evidence.append("handoff and escalation language detected")
     if area == "trust" and messages:
-        trust_terms = [word for word in ["trust", "refund", "guarantee", "secure", "safe"] if any(word in message for message in normalized_messages)]
+        trust_terms = [word for word in ["trust", "refund", "guarantee", "secure", "safe"] if any(word in normalize_text(message) for message in messages)]
         score += min(len(trust_terms) * 0.5, 1.5)
         if trust_terms:
             evidence.append("trust-related concerns detected")
     if area == "follow_up" and messages:
-        follow_up_terms = [word for word in ["follow up", "follow-up", "still waiting", "again", "remind"] if any(word in message for message in normalized_messages)]
+        follow_up_terms = [word for word in ["follow up", "follow-up", "still waiting", "again", "remind"] if any(word in normalize_text(message) for message in messages)]
         score += min(len(follow_up_terms) * 0.7, 2.1)
         if follow_up_terms:
             evidence.append("follow-up language detected")
@@ -368,67 +284,116 @@ def _evidence_summary(evidence: list[str]) -> str:
     return f"{evidence[0]} (+{len(evidence) - 1} more)"
 
 
-def _booking_status_value(booking: models.Booking) -> str:
-    return str(getattr(booking.status, "value", booking.status))
-
-
-def _booking_status_buckets(bookings: list[models.Booking]) -> dict[str, list[models.Booking]]:
-    buckets = {"completed": [], "confirmed": [], "cancelled": []}
-    for booking in bookings:
-        status_value = _booking_status_value(booking)
-        if status_value in buckets:
-            buckets[status_value].append(booking)
-    return buckets
-
-
-def _booking_status_counts(bookings: list[models.Booking]) -> dict[str, int]:
-    buckets = _booking_status_buckets(bookings)
-    return {status_name: len(items) for status_name, items in buckets.items()}
-
-
-def _booking_status_count(bookings: list[models.Booking], status_name: str) -> int:
-    return _booking_status_counts(bookings).get(status_name, 0)
-
-
-def _pending_or_cancelled_bookings(bookings: list[models.Booking]) -> list[models.Booking]:
-    return [booking for booking in bookings if _booking_status_in(booking, {"pending", "cancelled"})]
-
-
-def _booking_status_in(booking: models.Booking, allowed_statuses: set[str]) -> bool:
-    return _booking_status_value(booking) in allowed_statuses
-
-
-def _summary_metadata(
-    bookings: list[models.Booking],
-    repeated_issues: list[str],
-    pricing_signals: int,
-    support_signals: int,
-    reliability_signals: int,
-    insights: list[InteractionInsight],
-    top_issues: list[str],
-) -> dict:
-    status_buckets = _booking_status_buckets(bookings)
+def _signal_payload(item: InteractionInsight, summary: InteractionSummary) -> dict[str, object]:
     return {
-        "window_days": 30,
-        "repeated_messages": len(repeated_issues),
-        "booking_states": Counter({
-            "completed": len(status_buckets["completed"]),
-            "confirmed": len(status_buckets["confirmed"]),
-            "cancelled": len(status_buckets["cancelled"]),
-        }),
-        "completed_bookings": len(status_buckets["completed"]),
-        "confirmed_bookings": len(status_buckets["confirmed"]),
-        "cancelled_bookings": len(status_buckets["cancelled"]),
-        "pricing_signals": pricing_signals,
-        "support_signals": support_signals,
-        "reliability_signals": reliability_signals,
-        "signal_strength": round(sum(item.score for item in insights), 2),
-        "top_issue_count": len(top_issues),
+        "area": item.area,
+        "priority": item.priority,
+        "score": item.score,
+        "source": item.source,
+        "evidence": item.evidence,
+        "evidence_summary": item.evidence_summary,
+        "recommendation": item.recommendation,
+        "next_step": item.next_step,
+        "summary": {
+            "loyalty_score": summary.loyalty_score,
+            "monetization_readiness": summary.monetization_readiness,
+            "churn_risk": summary.churn_risk,
+            "repeat_messages": summary.metadata.get("repeated_messages", 0),
+            "booking_states": dict(summary.metadata.get("booking_states", {})),
+            "signal_strength": summary.metadata.get("signal_strength", 0.0),
+        },
     }
 
 
-def _pending_booking_count(booking_states: dict[str, int]) -> int:
-    return sum(int(count) for status_name, count in booking_states.items() if status_name in {"pending", "cancelled"})
+def rank_interaction_areas(messages: list[str], bookings: list[models.Booking], limit: int = 5) -> list[dict[str, object]]:
+    """Return the highest-scoring policy areas with compact evidence for reuse in routing or UI hints."""
+    ranking: list[dict[str, object]] = []
+    for area in PREDEFINED_POLICY_AREAS:
+        score, evidence = score_area(messages, bookings, area)
+        if score <= 0:
+            continue
+        evidence_list = list(dict.fromkeys(evidence))[:4]
+        config = POLICY_CONFIGS.get(area, {})
+        ranking.append(
+            {
+                "area": area,
+                "score": round(float(score), 2),
+                "priority": config.get("priority", "medium"),
+                "impact": config.get("impact", "medium"),
+                "owner_hint": config.get("owner_hint", "backend"),
+                "evidence": evidence_list,
+                "evidence_summary": _evidence_summary(evidence_list),
+                "recommendation": config.get("recommendation", "Create a closed-loop retention workflow for unresolved interactions."),
+                "next_step": config.get("next_step", "Trigger follow-up prompts when the same concern repeats across sessions."),
+            }
+        )
+
+    ranking.sort(key=lambda item: item["score"], reverse=True)
+    return ranking[: max(1, limit)]
+
+
+def build_topic_ranking_report(messages: list[str], bookings: list[models.Booking], window_days: int = 30, limit: int = 5) -> TopicRankingReport:
+    ranked_areas = rank_interaction_areas(messages, bookings, limit=limit)
+    topics = [
+        TopicRankingItem(
+            topic=item["area"],
+            score=float(item["score"]),
+            priority=str(item["priority"]),
+            impact=str(item["impact"]),
+            owner_hint=str(item["owner_hint"]),
+            evidence=list(item.get("evidence", [])),
+            evidence_summary=str(item.get("evidence_summary", "No direct evidence captured")),
+            recommendation=str(item.get("recommendation", "Create a closed-loop retention workflow for unresolved interactions.")),
+            next_step=str(item.get("next_step", "Trigger follow-up prompts when the same concern repeats across sessions.")),
+        )
+        for item in ranked_areas
+    ]
+
+    return TopicRankingReport(
+        generated_at=datetime.now(timezone.utc),
+        window_days=window_days,
+        topics=topics,
+    )
+
+
+def build_topic_policy_decision_report(messages: list[str], bookings: list[models.Booking], window_days: int = 30, limit: int = 5) -> TopicPolicyDecisionReport:
+    ranked_areas = rank_interaction_areas(messages, bookings, limit=limit)
+    decisions: list[TopicPolicyDecision] = []
+
+    for item in ranked_areas:
+        topic = str(item["area"])
+        score = float(item["score"])
+        evidence = list(item.get("evidence", []))
+        rationale = evidence[:3] or [str(item.get("evidence_summary", "No direct evidence captured"))]
+
+        if topic in {"reliability", "sentiment_recovery", "handoff"} and score >= 3.0:
+            outcome = "review-required"
+            recommended_action = "Route to human review before surfacing this topic to the customer."
+        elif topic in {"pricing", "trust", "support"} and score >= 2.0:
+            outcome = "allowed"
+            recommended_action = "Surface the topic with the stronger recovery guidance attached."
+        elif score >= 1.0:
+            outcome = "allowed"
+            recommended_action = "Surface the topic with a concise explanation and monitor follow-up."
+        else:
+            outcome = "blocked"
+            recommended_action = "Hold the topic back until stronger evidence appears."
+
+        decisions.append(
+            TopicPolicyDecision(
+                topic=topic,
+                outcome=outcome,
+                rationale=rationale,
+                rule_version="topic_policy_r1",
+                recommended_action=recommended_action,
+            )
+        )
+
+    return TopicPolicyDecisionReport(
+        generated_at=datetime.now(timezone.utc),
+        window_days=window_days,
+        decisions=decisions,
+    )
 
 
 def build_interaction_insights(messages: list[str], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> list[InteractionInsight]:
@@ -443,14 +408,11 @@ def build_interaction_insights(messages: list[str], bookings: list[models.Bookin
     for area, score, evidence in ranking[:4]:
         if score <= 0:
             continue
-        config = POLICY_CONFIGS.get(
-            area,
-            {
-                "recommendation": "Create a closed-loop retention workflow for unresolved interactions.",
-                "next_step": "Trigger follow-up prompts when the same concern repeats across sessions.",
-                "priority": "high",
-            },
-        )
+        config = POLICY_CONFIGS.get(area, {
+            "recommendation": "Create a closed-loop retention workflow for unresolved interactions.",
+            "next_step": "Trigger follow-up prompts when the same concern repeats across sessions.",
+            "priority": "high",
+        })
         recommendation = config["recommendation"]
         next_step = config["next_step"]
         priority = config["priority"]
@@ -484,24 +446,6 @@ def build_interaction_insights(messages: list[str], bookings: list[models.Bookin
             ),
         )
 
-    topic_context = " ".join(messages[:4])
-    topic_matches = _topic_signal_matches(topic_context)
-    if topic_matches:
-        topic_portfolio = build_topic_portfolio_report(type("ChatTopicSelection", (), {"topic": topic_context})())
-        topic_themes = [theme["theme"] for theme in build_topic_theme_coverage(type("ChatTopicSelection", (), {"topic": topic_context})()) if theme["matched_count"]]
-        insights.append(
-            InteractionInsight(
-                area="topic_coverage",
-                priority="medium" if len(topic_matches) < 4 else "high",
-                score=round(min(100.0, len(topic_matches) * 4.5 + topic_portfolio["coverage_ratio"] * 25.0), 2),
-                evidence=topic_matches[:4],
-                evidence_summary=f"Matched {len(topic_matches)} topic hints across {len(topic_themes)} themes",
-                source="topic_catalog",
-                recommendation="Use the richer topic taxonomy to route the conversation to the best follow-up path.",
-                next_step=f"Review themes: {', '.join(topic_themes[:3]) or 'none'}",
-            )
-        )
-
     return insights
 
 
@@ -529,41 +473,43 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
     message_counter = Counter(normalize_text(message) for message in messages if message)
     repeated_issues = [message for message, count in message_counter.items() if count > 1]
     insights = build_interaction_insights(messages, bookings, sentiment)
-    status_counts = _booking_status_counts(bookings)
 
     top_issues = [item.area.replace("_", " ") for item in insights[:3]]
     if repeated_issues:
         top_issues.append("repeated concerns")
-    if any(item.area == "topic_coverage" for item in insights):
-        top_issues.append("topic coverage gaps")
 
     strengths = []
-    if _booking_status_count(bookings, "completed"):
-        strengths.append("users complete bookings successfully")
+    if bookings:
+        completed = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "completed"]
+        if completed:
+            strengths.append("users complete bookings successfully")
     if not sentiment or sentiment.label != "negative":
         strengths.append("no strong negative sentiment in the latest message")
     if len(messages) > 3:
         strengths.append("users are returning for follow-up interactions")
-    if any(item.area == "topic_coverage" for item in insights):
-        strengths.append("topic classification is rich enough for downstream routing")
 
     loyalty_score = 100.0
     loyalty_score -= min(sum(item.score for item in insights), 35.0)
+    loyalty_score -= min(len(repeated_issues) * 4.0, 12.0)
     if sentiment and sentiment.label == "negative":
         loyalty_score -= 10.0
     loyalty_score = max(0.0, round(loyalty_score, 2))
+
+    completed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "completed"]
+    confirmed_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "confirmed"]
+    cancelled_bookings = [b for b in bookings if str(getattr(b.status, "value", b.status)) == "cancelled"]
 
     recency_bonus = 0.0
     if chat_rows:
         recency_bonus += 6.0
     if len(chat_rows) >= 3:
         recency_bonus += 4.0
-    if _booking_status_count(bookings, "completed"):
-        recency_bonus += min(_booking_status_count(bookings, "completed") * 8.0, 20.0)
-    if _booking_status_count(bookings, "confirmed"):
-        recency_bonus += min(_booking_status_count(bookings, "confirmed") * 4.0, 12.0)
-    if _booking_status_count(bookings, "cancelled"):
-        recency_bonus -= min(_booking_status_count(bookings, "cancelled") * 5.0, 15.0)
+    if completed_bookings:
+        recency_bonus += min(len(completed_bookings) * 8.0, 20.0)
+    if confirmed_bookings:
+        recency_bonus += min(len(confirmed_bookings) * 4.0, 12.0)
+    if cancelled_bookings:
+        recency_bonus -= min(len(cancelled_bookings) * 5.0, 15.0)
     if sentiment and sentiment.label == "positive":
         recency_bonus += 4.0
 
@@ -574,7 +520,7 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
     monetization_readiness = loyalty_score
     monetization_readiness += recency_bonus
     monetization_readiness += min(pricing_signals * 6.0, 12.0)
-    monetization_readiness += min(_booking_status_count(bookings, "completed") * 3.0, 9.0)
+    monetization_readiness += min(len(completed_bookings) * 3.0, 9.0)
     monetization_readiness -= min(support_signals * 4.0, 12.0)
     monetization_readiness -= min(reliability_signals * 5.0, 15.0)
     monetization_readiness = max(0.0, min(100.0, round(monetization_readiness, 2)))
@@ -618,17 +564,36 @@ def build_summary(user_id: int, chat_rows: list[models.ChatHistory], bookings: l
         top_issues=top_issues,
         strengths=strengths or ["interaction history is still too small to infer strong patterns"],
         insights=insights,
-        metadata=_summary_metadata(
-            bookings,
-            repeated_issues,
-            pricing_signals,
-            support_signals,
-            reliability_signals,
-            insights,
-            top_issues,
-        ),
+        metadata={
+            "window_days": 30,
+            "repeated_messages": len(repeated_issues),
+            "booking_states": Counter(str(getattr(b.status, "value", b.status)) for b in bookings),
+            "completed_bookings": len(completed_bookings),
+            "confirmed_bookings": len(confirmed_bookings),
+            "cancelled_bookings": len(cancelled_bookings),
+            "pricing_signals": pricing_signals,
+            "support_signals": support_signals,
+            "reliability_signals": reliability_signals,
+            "signal_strength": round(sum(item.score for item in insights), 2),
+            "top_issue_count": len(top_issues),
+        },
         generated_at=datetime.now(timezone.utc),
     )
+
+
+def _topic_clusters(topics: list[str]) -> dict[str, list[str]]:
+    clusters = {
+        "service_flow": ["booking status and confirmations", "booking rescheduling and changes", "same-day rescheduling and urgent changes", "queue status and response timing", "service status and progress updates", "delivery tracking and status visibility"],
+        "recovery_and_support": ["customer sentiment and recovery", "complaints and service recovery", "issue reproduction and troubleshooting", "service follow-up and resolution tracking", "support escalation and handoff"],
+        "routing_and_context": ["routing and service assignment", "handoff readiness and escalation context", "handoff quality and context completeness", "customer intent detection and routing", "support queue prioritization"],
+        "preparation_and_estimation": ["service appointment preparation", "appointment preparation checklists", "service area coverage and eligibility checks", "service quote and estimate review", "customer education and guided walkthroughs"],
+        "preferences_and_channels": ["follow-up preference and communication channel", "contact preferences and channel routing", "appointment reminders and notifications", "language and localization support", "omnichannel conversation continuity"],
+        "history_and_patterns": ["case notes and interaction history", "service history and recurring issues", "customer feedback and survey response", "operational readiness and staffing coverage", "service transcript summarization"],
+        "guidance_and_discovery": ["FAQ and self-service guidance", "knowledge base search and answer discovery", "service education and guided resolution", "customer confidence and reassurance messaging"],
+        "trust_and_controls": ["data privacy and information handling", "service escalation thresholds and guardrails", "customer trust and reassurance"],
+    }
+    topic_set = set(topics)
+    return {cluster: [topic for topic in cluster_topics if topic in topic_set] for cluster, cluster_topics in clusters.items()}
 
 
 def build_topic_signal_breakdown(summary: InteractionSummary) -> chat_schemas.TopicSignalBreakdown:
@@ -780,26 +745,6 @@ def build_retention_dashboard_topic_signal_detail(summary: InteractionSummary, s
     )
 
 
-def build_signal_synthesis_bundle(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> chat_schemas.SignalSynthesisBundle:
-    summary = build_summary(user_id, chat_rows, bookings, sentiment)
-    topic_breakdown = build_topic_signal_breakdown(summary)
-    bridge = build_sentiment_retention_bridge(summary, sentiment)
-    synthesis = build_interaction_signal_synthesis(summary, sentiment)
-    topic_focus = list(dict.fromkeys(synthesis.topic_focus + [topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else synthesis.topic_focus))[:8]
-    summary_text = f"signals={summary.messages_analyzed + summary.bookings_analyzed}, retention_risk={bridge.retention_risk}, focus={len(topic_focus)}"
-    return chat_schemas.SignalSynthesisBundle(
-        generated_at=summary.generated_at,
-        summary=summary,
-        signal_synthesis=synthesis,
-        topic_breakdown=topic_breakdown,
-        sentiment_bridge=bridge,
-        topic_focus=topic_focus,
-        topic_theme_coverage=synthesis.topic_theme_coverage,
-        retention_risk=bridge.retention_risk,
-        summary_text=summary_text,
-    )
-
-
 def build_interaction_signal_synthesis(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> chat_schemas.InteractionSignalSynthesis:
     topic_breakdown = build_topic_signal_breakdown(summary)
     bridge = build_sentiment_retention_bridge(summary, sentiment)
@@ -838,79 +783,23 @@ def build_interaction_signal_synthesis(summary: InteractionSummary, sentiment: O
     )
 
 
-def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> DissatisfactionRecoveryReport:
-    issue_weights = {
-        "repeated concerns": 2.0,
-        "support": 1.6,
-        "clarity": 1.4,
-        "response_speed": 1.4,
-        "reliability": 1.8,
-        "booking_flow": 1.5,
-        "pricing": 1.2,
-        "trust": 1.3,
-        "follow_up": 1.5,
-    }
-
-    recovery_signals: list[RecoverySignal] = []
-    primary_risks: list[str] = []
-    dissatisfaction_score = 0.0
-
-    for item in summary.insights:
-        if item.area == "sentiment":
-            dissatisfaction_score += item.score * 2.5
-            primary_risks.append("negative sentiment")
-            recovery_signals.append(
-                RecoverySignal(
-                    area="sentiment",
-                    intensity=round(min(item.score * 2.5, 5.0), 2),
-                    evidence=item.evidence[:3],
-                    recommended_action="Acknowledge the issue and route to fast follow-up.",
-                )
-            )
-            continue
-
-        weight = issue_weights.get(item.area, 1.0)
-        intensity = round(min(item.score * weight, 5.0), 2)
-        if intensity <= 0:
-            continue
-        dissatisfaction_score += intensity
-        primary_risks.append(item.area.replace("_", " "))
-        recovery_signals.append(
-            RecoverySignal(
-                area=item.area,
-                intensity=intensity,
-                evidence=item.evidence[:3],
-                recommended_action=item.next_step,
-            )
-        )
-
-    if sentiment and sentiment.label == "negative":
-        dissatisfaction_score += 4.0
-        if "negative sentiment" not in primary_risks:
-            primary_risks.insert(0, "negative sentiment")
-
-    dissatisfaction_score = round(min(dissatisfaction_score, 100.0), 2)
-    if dissatisfaction_score >= 18:
-        recovery_readiness = "critical"
-        action_plan = "Open a recovery case now, assign an owner, and contact the user within 24 hours."
-    elif dissatisfaction_score >= 10:
-        recovery_readiness = "high"
-        action_plan = "Trigger proactive follow-up and resolve the top issue before the next session."
-    elif dissatisfaction_score >= 5:
-        recovery_readiness = "moderate"
-        action_plan = "Monitor the issue closely and tighten the next-best-action flow."
-    else:
-        recovery_readiness = "low"
-        action_plan = "Keep the current support cadence and continue monitoring for recurrence."
-
-    return DissatisfactionRecoveryReport(
-        generated_at=datetime.now(timezone.utc),
-        window_days=30,
-        dissatisfaction_score=dissatisfaction_score,
-        recovery_readiness=recovery_readiness,
-        primary_risks=primary_risks[:5] or ["no major dissatisfaction signals detected"],
-        recovery_signals=recovery_signals[:5],
-        action_plan=action_plan,
+def build_signal_synthesis_bundle(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> chat_schemas.SignalSynthesisBundle:
+    summary = build_summary(user_id, chat_rows, bookings, sentiment)
+    topic_breakdown = build_topic_signal_breakdown(summary)
+    bridge = build_sentiment_retention_bridge(summary, sentiment)
+    synthesis = build_interaction_signal_synthesis(summary, sentiment)
+    topic_focus = list(dict.fromkeys(synthesis.topic_focus + [topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else synthesis.topic_focus))[:8]
+    summary_text = f"signals={summary.messages_analyzed + summary.bookings_analyzed}, retention_risk={bridge.retention_risk}, focus={len(topic_focus)}"
+    return chat_schemas.SignalSynthesisBundle(
+        generated_at=summary.generated_at,
+        summary=summary,
+        signal_synthesis=synthesis,
+        topic_breakdown=topic_breakdown,
+        sentiment_bridge=bridge,
+        topic_focus=topic_focus,
+        topic_theme_coverage=synthesis.topic_theme_coverage,
+        retention_risk=bridge.retention_risk,
+        summary_text=summary_text,
     )
 
 
@@ -937,6 +826,130 @@ def build_dissatisfaction_timeline(summary: InteractionSummary, sentiment: Optio
         generated_at=datetime.now(timezone.utc),
         user_id=summary.user_id,
         items=events,
+    )
+
+
+def build_signal_synthesis_report(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> chat_schemas.SignalSynthesisReport:
+    summary = build_summary(user_id, chat_rows, bookings, sentiment)
+    topic_breakdown = build_topic_signal_breakdown(summary)
+    bridge = build_sentiment_retention_bridge(summary, sentiment)
+    timeline = build_dissatisfaction_timeline(summary, sentiment)
+    topic_portfolio = build_topic_portfolio_report(type("TopicPortfolioRef", (), {"topic": bridge.topic_context})())
+    portfolio_theme_coverage = list(topic_portfolio["theme_coverage"])
+    topic_theme_coverage = [
+        chat_schemas.TopicThemeCoverageItem(
+            theme=item.get("theme", ""),
+            topic_count=int(item.get("topic_count", 0)),
+            matched_count=int(item.get("matched_count", 0)),
+            coverage=float(item.get("coverage", 0.0)),
+            matched_topics=list(item.get("matched_topics", [])),
+            related_topics=list(item.get("related_topics", [])),
+        )
+        for item in portfolio_theme_coverage
+    ]
+    topic_focus = list(dict.fromkeys((bridge.topic_context or "").split(", ")[:3])) if bridge.topic_context else []
+    if not topic_focus:
+        topic_focus = [topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else []
+    topic_focus.extend([topic["topic"] for topic in topic_breakdown.top_topics if topic.get("topic") and topic.get("count", 0) == 0])
+    summary_text = (
+        f"{summary.metadata.get('summary', 'Interaction summary')} Topic focus: {len(topic_focus)} entries; themes={len(topic_theme_coverage)}; portfolio_themes={len(portfolio_theme_coverage)}; matched_themes={len([theme for theme in topic_theme_coverage if theme.matched_count >= 0])}; retention_risk={bridge.retention_risk}."
+    )
+    return chat_schemas.SignalSynthesisReport(
+        generated_at=datetime.now(timezone.utc),
+        user_id=user_id,
+        summary=summary,
+        topic_breakdown=topic_breakdown.model_dump(),
+        sentiment_bridge=bridge.model_dump(),
+        timeline=[item.model_dump() for item in timeline.items],
+        recommended_focus=summary.value_tier,
+        dominant_topic=topic_breakdown.dominant_topic,
+        retention_risk=bridge.retention_risk,
+        topic_context=bridge.topic_context,
+        topic_theme_coverage=topic_theme_coverage,
+        topic_focus=topic_focus,
+    )
+
+
+def build_dissatisfaction_recovery_report(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> DissatisfactionRecoveryReport:
+    issue_weights = {
+        "repeated concerns": 2.0,
+        "support": 1.6,
+        "clarity": 1.4,
+        "response_speed": 1.4,
+        "reliability": 1.8,
+        "booking_flow": 1.5,
+        "pricing": 1.2,
+        "trust": 1.3,
+        "follow_up": 1.5,
+    }
+
+    recovery_signals: list[RecoverySignal] = []
+    primary_risks: list[str] = []
+    dissatisfaction_score = 0.0
+
+    for item in summary.insights:
+        if item.area == "sentiment":
+            dissatisfaction_score += item.score * 2.5
+            primary_risks.append("negative sentiment")
+            recovery_signals.append(
+                RecoverySignal(
+                    area="sentiment",
+                    intensity=round(min(item.score * 2.5, 5.0), 2),
+                    evidence=item.evidence[:3],
+                    evidence_summary=_evidence_summary(item.evidence[:3]),
+                    recommended_action="Acknowledge the issue and route to fast follow-up.",
+                )
+            )
+            continue
+
+        weight = issue_weights.get(item.area, 1.0)
+        intensity = round(min(item.score * weight, 5.0), 2)
+        if intensity <= 0:
+            continue
+        dissatisfaction_score += intensity
+        primary_risks.append(item.area.replace("_", " "))
+        recovery_signals.append(
+            RecoverySignal(
+                area=item.area,
+                intensity=intensity,
+                evidence=item.evidence[:3],
+                evidence_summary=_evidence_summary(item.evidence[:3]),
+                recommended_action=item.next_step,
+            )
+        )
+
+    if sentiment and sentiment.label == "negative":
+        dissatisfaction_score += 4.0
+        if "negative sentiment" not in primary_risks:
+            primary_risks.insert(0, "negative sentiment")
+
+    if summary.metadata.get("repeated_messages", 0):
+        dissatisfaction_score += min(float(summary.metadata.get("repeated_messages", 0)) * 1.2, 6.0)
+    if int(summary.metadata.get("booking_states", {}).get("pending", 0)) or int(summary.metadata.get("booking_states", {}).get("cancelled", 0)):
+        dissatisfaction_score += 2.0
+
+    dissatisfaction_score = round(min(dissatisfaction_score, 100.0), 2)
+    if dissatisfaction_score >= 18:
+        recovery_readiness = "critical"
+        action_plan = "Open a recovery case now, assign an owner, and contact the user within 24 hours."
+    elif dissatisfaction_score >= 10:
+        recovery_readiness = "high"
+        action_plan = "Trigger proactive follow-up and resolve the top issue before the next session."
+    elif dissatisfaction_score >= 5:
+        recovery_readiness = "moderate"
+        action_plan = "Monitor the issue closely and tighten the next-best-action flow."
+    else:
+        recovery_readiness = "low"
+        action_plan = "Keep the current support cadence and continue monitoring for recurrence."
+
+    return DissatisfactionRecoveryReport(
+        generated_at=datetime.now(timezone.utc),
+        window_days=30,
+        dissatisfaction_score=dissatisfaction_score,
+        recovery_readiness=recovery_readiness,
+        primary_risks=primary_risks[:5] or ["no major dissatisfaction signals detected"],
+        recovery_signals=recovery_signals[:5],
+        action_plan=action_plan,
     )
 
 
@@ -973,6 +986,22 @@ def build_loyalty_recovery_report(summary: InteractionSummary, sentiment: Option
     )
 
     return dissatisfaction, recommendation_model, action_plan_model, retention_risk
+
+
+def build_recovery_signal_payloads(summary: InteractionSummary, sentiment: Optional[Sentiment]) -> list[dict[str, object]]:
+    recovery_report = build_dissatisfaction_recovery_report(summary, sentiment)
+    payloads: list[dict[str, object]] = []
+    for signal in recovery_report.recovery_signals:
+        payloads.append(
+            {
+                "area": signal.area,
+                "intensity": signal.intensity,
+                "evidence": signal.evidence,
+                "evidence_summary": signal.evidence_summary,
+                "recommended_action": signal.recommended_action,
+            }
+        )
+    return payloads
 
 
 async def build_churn_prediction(db: AsyncSession, user_id: int, window_days: int) -> ChurnPrediction:
@@ -1012,7 +1041,10 @@ async def build_churn_prediction(db: AsyncSession, user_id: int, window_days: in
         risk_score += min(repeated_concerns * 3.0, 15.0)
         warning_reasons.append("The same concern appears multiple times in recent chats")
 
-    pending_bookings = _pending_booking_count(summary.metadata.get("booking_states", {}))
+    pending_bookings = 0
+    for status_name, count in summary.metadata.get("booking_states", {}).items():
+        if status_name in {"pending", "cancelled"}:
+            pending_bookings += int(count)
     if pending_bookings:
         risk_score += min(pending_bookings * 5.0, 15.0)
         warning_reasons.append("There are unresolved or cancelled bookings in the recent window")
@@ -1131,6 +1163,7 @@ async def build_retention_cohorts(db: AsyncSession, window_days: int) -> Retenti
             cohorts[cohort_name] = {
                 "user_count": 0,
                 "total_loyalty": 0.0,
+                "total_readiness": 0.0,
                 "total_signal": 0.0,
                 "primary_risk": primary_risk,
                 "recommended_action": recommended_action,
@@ -1139,6 +1172,7 @@ async def build_retention_cohorts(db: AsyncSession, window_days: int) -> Retenti
 
         cohorts[cohort_name]["user_count"] += 1
         cohorts[cohort_name]["total_loyalty"] += summary.loyalty_score
+        cohorts[cohort_name]["total_readiness"] += summary.monetization_readiness
         cohorts[cohort_name]["total_signal"] += signal_score
 
     cohort_items = []
@@ -1149,6 +1183,7 @@ async def build_retention_cohorts(db: AsyncSession, window_days: int) -> Retenti
                 cohort=cohort_name,
                 user_count=user_count,
                 avg_loyalty_score=round(float(values["total_loyalty"]) / max(user_count, 1), 2),
+                avg_monetization_readiness=round(float(values["total_readiness"]) / max(user_count, 1), 2),
                 avg_signal_score=round(float(values["total_signal"]) / max(user_count, 1), 2),
                 primary_risk=str(values["primary_risk"]),
                 recommended_action=str(values["recommended_action"]),
@@ -1219,7 +1254,7 @@ async def build_monetization_cohorts(db: AsyncSession, window_days: int) -> Mone
     )
 
 
-async def build_system_improvement_pack(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> SystemImprovementPack:
+def build_system_improvement_pack(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> SystemImprovementPack:
     summary = build_summary(user_id, chat_rows, bookings, sentiment)
     insights = summary.insights
     item_map = {
@@ -1268,47 +1303,6 @@ async def build_system_improvement_pack(user_id: int, chat_rows: list[models.Cha
     )
 
 
-def build_signal_synthesis_report(user_id: int, chat_rows: list[models.ChatHistory], bookings: list[models.Booking], sentiment: Optional[Sentiment]) -> chat_schemas.SignalSynthesisReport:
-    summary = build_summary(user_id, chat_rows, bookings, sentiment)
-    topic_breakdown = build_topic_signal_breakdown(summary)
-    bridge = build_sentiment_retention_bridge(summary, sentiment)
-    timeline = build_dissatisfaction_timeline(summary, sentiment)
-    topic_portfolio = build_topic_portfolio_report(type("TopicPortfolioRef", (), {"topic": bridge.topic_context})())
-    portfolio_theme_coverage = list(topic_portfolio["theme_coverage"])
-    topic_theme_coverage = [
-        chat_schemas.TopicThemeCoverageItem(
-            theme=item.get("theme", ""),
-            topic_count=int(item.get("topic_count", 0)),
-            matched_count=int(item.get("matched_count", 0)),
-            coverage=float(item.get("coverage", 0.0)),
-            matched_topics=list(item.get("matched_topics", [])),
-            related_topics=list(item.get("related_topics", [])),
-        )
-        for item in portfolio_theme_coverage
-    ]
-    topic_focus = list(dict.fromkeys((bridge.topic_context or "").split(", ")[:3])) if bridge.topic_context else []
-    if not topic_focus:
-        topic_focus = [topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else []
-    topic_focus.extend([topic["topic"] for topic in topic_breakdown.top_topics if topic.get("topic") and topic.get("count", 0) == 0])
-    summary_text = (
-        f"{summary.metadata.get('summary', 'Interaction summary')} Topic focus: {len(topic_focus)} entries; themes={len(topic_theme_coverage)}; portfolio_themes={len(portfolio_theme_coverage)}; matched_themes={len([theme for theme in topic_theme_coverage if theme.matched_count >= 0])}; retention_risk={bridge.retention_risk}."
-    )
-    return chat_schemas.SignalSynthesisReport(
-        generated_at=datetime.now(timezone.utc),
-        user_id=user_id,
-        summary=summary,
-        topic_breakdown=topic_breakdown.model_dump(),
-        sentiment_bridge=bridge.model_dump(),
-        timeline=[item.model_dump() for item in timeline.items],
-        recommended_focus=summary.value_tier,
-        dominant_topic=topic_breakdown.dominant_topic,
-        retention_risk=bridge.retention_risk,
-        topic_context=bridge.topic_context,
-        topic_theme_coverage=topic_theme_coverage,
-        topic_focus=topic_focus,
-    )
-
-
 async def build_retention_snapshot_operations_report(db: AsyncSession, window_days: int, stale_after_days: int = 30) -> RetentionSnapshotOperationsReport:
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     query = (
@@ -1322,6 +1316,13 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
     total = len(snapshots)
     stale = max(total - 2, 0) if total >= 2 else total
     recent = total - stale
+    stale_ratio = round(stale / max(total, 1), 2)
+    freshest_snapshot_at = max((snapshot.created_at for snapshot in snapshots), default=None)
+    oldest_snapshot_at = min((snapshot.created_at for snapshot in snapshots), default=None)
+    stale_data_flag = stale > 0
+    insufficient_history_flag = total < 3
+    readiness_threshold = 0.25
+    readiness_status = "go" if total and (stale / max(total, 1)) < readiness_threshold else "watch"
 
     items = [
         RetentionSnapshotOperationItem(
@@ -1330,8 +1331,8 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
             count=recent,
             details=[
                 f"{recent} recent snapshots within the active window",
-                f"{stale} snapshots are stale relative to the freshness threshold",
-                f"topic catalog tracks {len(TOPIC_CATALOG)} canonical topics across {len(TOPIC_THEME_GROUPS)} themes",
+                f"{stale} snapshots are stale relative to the {stale_after_days}-day freshness threshold",
+                f"stale ratio is {stale_ratio:.2f} across {total} tracked snapshots",
             ],
             recommended_owner="data operations",
         ),
@@ -1340,69 +1341,40 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
             status="hold" if stale < total else "escalate",
             count=stale,
             details=[
-                "Prune stale snapshots only after validating recent retention coverage",
-                f"topic sectors available for retention triage: {len(TOPIC_SECTORS)}",
+                f"Prune stale snapshots only after validating {recent} recent snapshots remain covered",
+                f"cleanup scope is {stale} stale snapshots out of {total} total",
             ],
             recommended_owner="backend engineering",
         ),
         RetentionSnapshotOperationItem(
             label="readiness",
-            status="go" if total and stale / max(total, 1) < 0.25 else "watch",
+            status=readiness_status,
             count=total,
             details=[
-                "Snapshot portfolio is ready when fresh coverage dominates stale records",
-                f"topic coverage is anchored by {len(TOPIC_CATALOG)} catalog entries and theme coverage reports",
+                f"Snapshot portfolio is ready when fresh coverage dominates stale records",
+                f"readiness uses a {stale_after_days}-day freshness threshold over the {window_days}-day window",
             ],
             recommended_owner="product operations",
         ),
     ]
 
-    summary = (
-        f"Retention snapshot operations tracks {total} snapshots with {recent} recent and {stale} stale records. "
-        f"Freshness threshold: {stale_after_days} days."
-    )
-
     return RetentionSnapshotOperationsReport(
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
+        stale_after_days=stale_after_days,
+        measurement_generated_at=datetime.now(timezone.utc),
         measurement_window_days=window_days,
         measurement_stale_after_days=stale_after_days,
-        readiness_threshold=0.25,
         total_snapshots=total,
         stale_snapshots=stale,
         recent_snapshots=recent,
+        stale_ratio=stale_ratio,
+        freshest_snapshot_at=freshest_snapshot_at,
+        oldest_snapshot_at=oldest_snapshot_at,
+        stale_data_flag=stale_data_flag,
+        insufficient_history_flag=insufficient_history_flag,
+        readiness_threshold=readiness_threshold,
         items=items,
-        summary=summary,
-    )
-
-
-async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days: int) -> chat_schemas.RetentionDashboard:
-    summary = await build_summary_for_user(db, user_id, window_days)
-    churn_prediction = await build_churn_prediction(db, user_id, window_days)
-    snapshot_report = await build_retention_snapshot_report(db, user_id, window_days)
-    snapshot_delta = await build_retention_snapshot_delta(db, user_id, window_days)
-    snapshot_trends = await build_retention_snapshot_trends(db, user_id, window_days)
-    snapshot_operations_report = await build_retention_snapshot_operations_report(db, window_days, stale_after_days=window_days)
-    topic_signal_report = build_retention_topic_signal_report(summary.summary, user_id, window_days)
-    topic_signal_detail = build_retention_dashboard_topic_signal_detail(summary.summary, None)
-
-    trend_coverage = round(len(snapshot_trends.trends) / max(len(snapshot_report.snapshots), 1), 2)
-    delta_coverage = round(1.0 if snapshot_delta.current_snapshot_id else 0.0, 2)
-
-    return chat_schemas.RetentionDashboard(
-        generated_at=datetime.now(timezone.utc),
-        window_days=window_days,
-        summary=summary.summary,
-        churn_prediction=churn_prediction,
-        snapshot_report=snapshot_report,
-        snapshot_delta=snapshot_delta,
-        snapshot_trends=snapshot_trends,
-        snapshot_operations_report=snapshot_operations_report,
-        topic_signal_report=topic_signal_report,
-        topic_signal_detail=topic_signal_detail,
-        topic_theme_coverage=topic_signal_detail.topic_theme_coverage if topic_signal_detail else [],
-        trend_coverage=trend_coverage,
-        delta_coverage=delta_coverage,
     )
 
 
@@ -1471,6 +1443,14 @@ def classify_lifecycle_stage(summary: InteractionSummary, churn_prediction: Chur
 
 
 def analyze_sentiment(text: str):
-    from app.routers.chat import analyze_sentiment as router_analyze_sentiment
-
-    return router_analyze_sentiment(text)
+    """Run Hugging Face inference for message-level sentiment, returning None on failure."""
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
+    try:
+        response = requests.post(HF_SENTIMENT_URL, headers=headers, json={"inputs": text}, timeout=10)
+        response.raise_for_status()
+        result = response.json()
+        label = result[0][0]["label"].lower()
+        score = result[0][0]["score"]
+        return Sentiment(label=label, score=score)
+    except Exception:
+        return None

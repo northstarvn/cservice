@@ -10,9 +10,7 @@ from app.services.policy_scoring import build_policy_access_decision, build_poli
 router = APIRouter()
 
 
-def _current_control_posture(current_user: models.User) -> str:
-    policy_score = getattr(current_user, "policy_score", None)
-    return getattr(policy_score, "control_posture", "observed") if policy_score else "observed"
+_current_control_posture = deps.current_control_posture
 
 @router.post("/register", response_model=schemas.UserOut)
 async def register(user_in: schemas.UserCreate, db: AsyncSession = Depends(deps.get_db)):

@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import Base, engine, get_db
 from app.i18n import locale_payload
 from app.routers import bookings, chat, topics, users
-from app.services.chat_analytics import _build_capabilities_payload
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -86,8 +85,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
-app.include_router(topics.router)
 app.include_router(chat.router, tags=["chat"])
+app.include_router(topics.router, tags=["topics"])
 
 
 @app.get("/meta")
@@ -102,29 +101,22 @@ async def app_metadata():
             "auth",
             "bookings",
             "booking_events",
-            "topic_selection",
-            "topic_intelligence_overview",
-            "topic_taxonomy_expansion",
-            "topic_privacy_and_continuity",
-            "topic_search_and_suggestions_metadata",
             "chat",
             "chat_history_summary",
-            "chat_signal_synthesis_bundle",
             "retention",
-            "retention_topic_signal_expansion",
+            "topic_intelligence_overview",
         ],
     }
 
 
 @app.get("/meta/capabilities")
 async def app_capabilities():
-    return _build_capabilities_payload()
+    return chat._build_capabilities_payload()
 
 
 @app.get("/meta/ecosystem")
 async def app_ecosystem():
-    capabilities = _build_capabilities_payload()
-    coverage = capabilities.get("coverage", {})
+    capabilities = chat._build_capabilities_payload()
     return {
         "name": APP_NAME,
         "version": APP_VERSION,
@@ -144,13 +136,11 @@ async def app_ecosystem():
                 "routes": [
                     "/chat/history",
                     "/chat/insights",
-                    "/chat/topic-ranking",
-                    "/chat/topic-policy-decisions",
                     "/chat/system-priorities",
                     "/chat/trends",
                     "/chat/retention-dashboard",
                 ],
-                "purpose": "conversation memory, sentiment analysis, topic decisioning, and retention scoring",
+                "purpose": "conversation memory, sentiment analysis, and retention scoring",
                 "status": "ready",
             },
             "retention_ops": {
@@ -163,21 +153,16 @@ async def app_ecosystem():
                     "/chat/admin/snapshot-operations-gonogo",
                 ],
                 "purpose": "snapshot health, compliance, launch readiness, and go/no-go checks",
-                "status": "ready" if coverage.get("status") == "ready" else "partial",
+                "status": "ready" if capabilities["coverage"]["status"] == "ready" else "partial",
                 "coverage": {
                     "routes": 7,
-                    "freshness_window_days": coverage.get("freshness_window_days"),
+                    "freshness_window_days": capabilities["coverage"]["freshness_window_days"],
                 },
-            },
-            "booking_assignment": {
-                "routes": ["/bookings/{booking_id}/assignment"],
-                "purpose": "deterministic booking assignment reporting and persisted assignment history",
-                "status": "ready",
             },
             "portfolio_intelligence": {
                 "routes": ["/chat/admin/monetization-cohorts", "/meta/capabilities"],
                 "purpose": "cross-segment monetization, capability discovery, and study-driven role coverage",
-                "status": "ready" if coverage.get("status") == "ready" else "partial",
+                "status": "ready" if capabilities["coverage"]["status"] == "ready" else "partial",
                 "roles": [
                     "youth_conversion_intelligence",
                     "market_penetration_adoption",
@@ -188,19 +173,15 @@ async def app_ecosystem():
                 ],
             },
             "topic_intelligence": {
-                "routes": ["/topics/overview", "/topics/workspace", "/topics/intelligence", "/topics/search", "/topics/suggestions"],
-                "purpose": "composite topic workspace, cross-service intelligence, and selection-aware topic discovery with broader topic coverage",
+                "routes": [
+                    "/topics/search",
+                    "/topics/suggestions",
+                    "/topics/workspace",
+                    "/topics/overview",
+                    "/topics/intelligence",
+                ],
+                "purpose": "topic catalog search, ranked suggestions, workspace portfolio, and cross-service topic intelligence",
                 "status": "ready",
-                "coverage": {
-                    "routes": 5,
-                    "catalog_size": "exposed through overview, search, and suggestion responses",
-                    "expanded_topics": [
-                        "customer consent and communication permissions",
-                        "data privacy and information handling",
-                        "omnichannel conversation continuity",
-                        "routing confidence and intent ambiguity",
-                    ],
-                },
             },
         },
         "capabilities": capabilities,
@@ -221,12 +202,7 @@ async def app_feature_summary():
             "booking_events": "/bookings/analytics/events",
             "booking_export": "/bookings/analytics/export",
             "chat_history": "/chat/history",
-            "topic_selection": "/topics/current",
-            "topic_selection_history": "/topics/history",
-            "topic_catalog": "/topics/catalog",
-            "topic_workspace": "/topics/workspace",
-            "topic_search": "/topics/search",
-            "retention_dashboard": "/retention/dashboard",
+            "retention_dashboard": "/chat/retention-dashboard",
             "retention_maintenance": "/retention/maintenance",
         },
     }
@@ -252,12 +228,6 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             },
             "locale": locale_payload(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "runtime": {
-                "python": platform.python_version(),
-                "implementation": platform.python_implementation(),
-                "system": platform.system(),
-                "release": platform.release(),
-            },
         }
     except Exception as e:
         return {
@@ -271,12 +241,6 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                 "connected": False,
             },
             "locale": locale_payload(),
-            "runtime": {
-                "python": platform.python_version(),
-                "implementation": platform.python_implementation(),
-                "system": platform.system(),
-                "release": platform.release(),
-            },
             "error": str(e)
         }
 

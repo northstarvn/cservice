@@ -2,35 +2,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-
 class ChatMessageIn(BaseModel):
     message: str
 
 
-class Sentiment(BaseModel):
-    label: str
-    score: float
-    confidence: Optional[float] = None
-
-
-class ChatHistoryCreate(BaseModel):
-    message: str
-    response: str
-
-
-class ChatHistoryOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    user_id: int
-    message: str
-    response: str
-    timestamp: datetime
-
-
 class InteractionInsight(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     area: str
     priority: str
     score: float
@@ -39,6 +15,38 @@ class InteractionInsight(BaseModel):
     source: str
     recommendation: str
     next_step: str
+
+
+class TopicRankingItem(BaseModel):
+    topic: str
+    score: float
+    priority: str
+    impact: str
+    owner_hint: str
+    evidence: List[str]
+    evidence_summary: str
+    recommendation: str
+    next_step: str
+
+
+class TopicRankingReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    topics: List[TopicRankingItem]
+
+
+class TopicPolicyDecision(BaseModel):
+    topic: str
+    outcome: str
+    rationale: List[str]
+    rule_version: str
+    recommended_action: str
+
+
+class TopicPolicyDecisionReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    decisions: List[TopicPolicyDecision]
 
 
 class InteractionSummary(BaseModel):
@@ -59,122 +67,9 @@ class InteractionSummary(BaseModel):
     generated_at: datetime
 
 
-class SystemImprovementItem(BaseModel):
-    area: str
-    priority: str
-    impact: str
-    rationale: List[str]
-    recommendation: str
-    owner_hint: str
-
-
-class SystemImprovementPack(BaseModel):
-    user_id: int
-    generated_at: datetime
-    focus: str
-    items: List[SystemImprovementItem]
-    summary: InteractionSummary
-
-
-class ChatMessageOut(BaseModel):
-    text: str
-    sentiment: Optional[Sentiment] = None
-    suggestions: List[str] = Field(default_factory=list)
-    vector: List[float] = Field(default_factory=list)
-    insights: List[InteractionInsight] = Field(default_factory=list)
-    summary: Optional[InteractionSummary] = None
-    improvement_pack: Optional[SystemImprovementPack] = None
-
-
-class PolicyScoreBreakdown(BaseModel):
-    system_score: float
-    customer_score: float
-    access_score: float
-    interest_score: float
-    closeness_score: float
-    community_closeness_score: float
-    policy_tier: str
-    control_posture: str
-    access_band: str
-    summary: str
-
-
-class PolicyScoreReport(BaseModel):
-    generated_at: datetime
-    snapshot: PolicyScoreBreakdown
-    summary: str
-
-
-class PolicyTopicInsightItem(BaseModel):
-    topic: str
-    breadth: float
-    complexity: float
-    richness: str
-    depth: str
-    fallback: str
-    theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
-    sector_coverage: List[str] = Field(default_factory=list)
-    matched_keywords: List[str] = Field(default_factory=list)
-    confidence: float = 0.0
-
-
-class PolicyTopicAnalysisReport(BaseModel):
-    generated_at: datetime
-    user_id: int
-    current_topic: str
-    topic_context: str
-    topic_richness: str
-    topic_depth: str
-    topic_coverage: List[Dict[str, Any]] = Field(default_factory=list)
-    portfolio_coverage: float = 0.0
-    matched_themes: List[str] = Field(default_factory=list)
-    topic_signal_count: int = 0
-    items: List[PolicyTopicInsightItem]
-    summary: str
-
-
-class TopicCoverageThemeItem(BaseModel):
-    theme: str
-    coverage: float
-    topic_count: int
-
-
-class TopicCoverageReport(BaseModel):
-    generated_at: datetime
-    topic: Optional[str] = None
-    matched_topics: List[str] = Field(default_factory=list)
-    matched_topic_count: int = 0
-    keyword_matches: List[str] = Field(default_factory=list)
-    keyword_match_count: int = 0
-    coverage_ratio: float = 0.0
-    catalog_size: int = 0
-    top_recommendations: List[str] = Field(default_factory=list)
-    theme_coverage: List[TopicCoverageThemeItem] = Field(default_factory=list)
-    topic_focus: List[str] = Field(default_factory=list)
-    matched_theme_topics: List[str] = Field(default_factory=list)
-    summary: str = ""
-
-
-class TopicRecommendationItem(BaseModel):
-    topic: str
-    source: str
-    confidence: float
-    rationale: str
-
-
-class TopicRecommendationReport(BaseModel):
-    generated_at: datetime
-    topic: Optional[str] = None
-    primary_topic: Optional[str] = None
-    coverage_ratio: float = 0.0
-    match_count: int = 0
-    catalog_size: int = 0
-    matched_themes: List[str] = Field(default_factory=list)
-    theme_coverage: List[TopicCoverageThemeItem] = Field(default_factory=list)
-    topic_focus: List[str] = Field(default_factory=list)
-    recommendations: List[TopicRecommendationItem] = Field(default_factory=list)
-    summary: str = ""
-
+# ---------------------------------------------------------------------------
+# Signal synthesis / retention topic coverage
+# ---------------------------------------------------------------------------
 
 class TopicThemeCoverageItem(BaseModel):
     theme: str
@@ -248,6 +143,18 @@ class InteractionSignalSynthesis(BaseModel):
     topic_focus: List[str] = Field(default_factory=list)
 
 
+class SignalSynthesisBundle(BaseModel):
+    generated_at: datetime
+    summary: InteractionSummary
+    signal_synthesis: InteractionSignalSynthesis
+    topic_breakdown: TopicSignalBreakdown
+    sentiment_bridge: SentimentRetentionBridge
+    topic_focus: List[str] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
+    retention_risk: str
+    summary_text: str = ""
+
+
 class DissatisfactionTimelineItem(BaseModel):
     label: str
     value: str
@@ -258,6 +165,174 @@ class DissatisfactionTimeline(BaseModel):
     generated_at: datetime
     user_id: int
     items: List[DissatisfactionTimelineItem]
+
+
+class RetentionTopicSignalItem(BaseModel):
+    topic: str
+    matched_keywords: List[str] = Field(default_factory=list)
+    matched_themes: List[str] = Field(default_factory=list)
+    matched_sectors: List[str] = Field(default_factory=list)
+    coverage_score: float = 0.0
+
+
+class RetentionTopicSignalReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    topic_context: str
+    dominant_topic: Optional[str] = None
+    matched_topics: List[str] = Field(default_factory=list)
+    matched_keywords: List[str] = Field(default_factory=list)
+    matched_themes: List[str] = Field(default_factory=list)
+    matched_topic_details: List[Dict[str, Any]] = Field(default_factory=list)
+    matched_clusters: Dict[str, List[str]] = Field(default_factory=dict)
+    topic_catalog_size: int = 0
+    topic_portfolio_coverage: float = 0.0
+    topic_suggestions: List[str] = Field(default_factory=list)
+    topic_theme_overlap_score: int = 0
+    topic_focus: List[str] = Field(default_factory=list)
+    topic_signal_depth: str = ""
+    topic_signal_richness: float = 0.0
+    items: List[RetentionTopicSignalItem] = Field(default_factory=list)
+    summary: str = ""
+
+
+class RetentionTopicSignalDetail(BaseModel):
+    topic: str
+    topic_context: str
+    dominant_topic: Optional[str] = None
+    items: List[RetentionTopicSignalItem] = Field(default_factory=list)
+    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
+    matched_clusters: Dict[str, List[str]] = Field(default_factory=dict)
+    matched_topics: List[str] = Field(default_factory=list)
+    matched_keywords: List[str] = Field(default_factory=list)
+    matched_themes: List[str] = Field(default_factory=list)
+    topic_portfolio_coverage: float = 0.0
+    topic_signal_count: int = 0
+    topic_signal_depth: str = ""
+    topic_signal_summary: str = ""
+    summary: str = ""
+
+
+class RetentionCoverageItem(BaseModel):
+    label: str
+    count: int
+    ratio: float
+
+
+class RetentionCoverageReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    total_snapshots: int
+    items: List[RetentionCoverageItem]
+    topic_coverage_ratio: float = 0.0
+    summary: str = ""
+
+
+class RetentionOperationalItem(BaseModel):
+    name: str
+    status: str
+    detail: str
+    owner_hint: str
+
+
+class RetentionOperationalReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    items: List[RetentionOperationalItem]
+    summary: str
+
+
+# ---------------------------------------------------------------------------
+# Policy topic analysis + topic coverage
+# ---------------------------------------------------------------------------
+
+class PolicyScoreBreakdown(BaseModel):
+    system_score: float
+    customer_score: float
+    access_score: float
+    interest_score: float
+    closeness_score: float
+    community_closeness_score: float
+    policy_tier: str
+    control_posture: str
+    access_band: str
+    summary: str
+
+
+class PolicyScoreReport(BaseModel):
+    generated_at: datetime
+    snapshot: PolicyScoreBreakdown
+    summary: str
+
+
+class PolicyTopicInsightItem(BaseModel):
+    topic: str
+    breadth: float
+    complexity: float
+    richness: str
+    depth: str
+    fallback: str
+    theme_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    sector_coverage: List[str] = Field(default_factory=list)
+    matched_keywords: List[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class PolicyTopicAnalysisReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    current_topic: str
+    topic_context: str
+    topic_richness: str
+    topic_depth: str
+    topic_coverage: List[Dict[str, Any]] = Field(default_factory=list)
+    portfolio_coverage: float = 0.0
+    matched_themes: List[str] = Field(default_factory=list)
+    topic_signal_count: int = 0
+    items: List[PolicyTopicInsightItem]
+    summary: str
+
+
+class TopicCoverageThemeItem(BaseModel):
+    theme: str
+    coverage: float
+    topic_count: int
+
+
+class TopicCoverageReport(BaseModel):
+    generated_at: datetime
+    topic: Optional[str] = None
+    matched_topics: List[str] = Field(default_factory=list)
+    matched_topic_count: int = 0
+    keyword_matches: List[str] = Field(default_factory=list)
+    keyword_match_count: int = 0
+    coverage_ratio: float = 0.0
+    catalog_size: int = 0
+    top_recommendations: List[str] = Field(default_factory=list)
+    theme_coverage: List[TopicCoverageThemeItem] = Field(default_factory=list)
+    topic_focus: List[str] = Field(default_factory=list)
+    matched_theme_topics: List[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class SystemImprovementItem(BaseModel):
+    area: str
+    priority: str
+    impact: str
+    rationale: List[str]
+    recommendation: str
+    owner_hint: str
+
+
+class SystemImprovementPack(BaseModel):
+    user_id: int
+    generated_at: datetime
+    focus: str
+    items: List[SystemImprovementItem]
+    summary: InteractionSummary
 
 
 class WeightedFocusItem(BaseModel):
@@ -421,42 +496,21 @@ class RetentionSnapshotOperationItem(BaseModel):
 
 class RetentionSnapshotOperationsReport(BaseModel):
     generated_at: datetime
-    window_days: int = 0
-    measurement_window_days: int = 0
-    measurement_stale_after_days: int = 0
-    readiness_threshold: float = 0.0
-    total_snapshots: int = 0
-    stale_snapshots: int = 0
-    recent_snapshots: int = 0
+    window_days: int
+    stale_after_days: int
+    measurement_generated_at: datetime
+    measurement_window_days: int
+    measurement_stale_after_days: int
+    total_snapshots: int
+    stale_snapshots: int
+    recent_snapshots: int
+    stale_ratio: float
+    freshest_snapshot_at: Optional[datetime] = None
+    oldest_snapshot_at: Optional[datetime] = None
+    stale_data_flag: bool = False
+    insufficient_history_flag: bool = False
+    readiness_threshold: float = 0.25
     items: List[RetentionSnapshotOperationItem]
-    summary: str = ""
-
-    def model_post_init(self, __context: Any) -> None:
-        if self.window_days and not self.measurement_window_days:
-            object.__setattr__(self, "measurement_window_days", self.window_days)
-        elif self.measurement_window_days and not self.window_days:
-            object.__setattr__(self, "window_days", self.measurement_window_days)
-
-    @property
-    def measurement_window(self) -> int:
-        return self.measurement_window_days or self.window_days
-
-    @property
-    def effective_window_days(self) -> int:
-        return self.measurement_window_days or self.window_days
-
-    @property
-    def stale_ratio(self) -> float:
-        total = self.total_snapshots
-        return round(self.stale_snapshots / total, 2) if total else 0.0
-
-    @property
-    def stale_data_flag(self) -> bool:
-        return self.stale_ratio >= self.readiness_threshold
-
-    @property
-    def insufficient_history_flag(self) -> bool:
-        return self.total_snapshots == 0
 
 
 class RetentionSnapshotTrendReport(BaseModel):
@@ -465,60 +519,23 @@ class RetentionSnapshotTrendReport(BaseModel):
     trends: List[RetentionSnapshotTrendItem]
 
 
-class RetentionTopicSignalItem(BaseModel):
-    topic: str
-    matched_keywords: List[str]
-    matched_themes: List[str]
-    matched_sectors: List[str]
-    coverage_score: float
+class RetentionHealthTypeCount(BaseModel):
+    snapshot_type: str
+    count: int
 
 
-class RetentionTopicSignalReport(BaseModel):
+class RetentionHealthReport(BaseModel):
     generated_at: datetime
     user_id: int
     window_days: int
-    topic_context: str
-    dominant_topic: Optional[str] = None
-    items: List[RetentionTopicSignalItem]
-    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
-    matched_clusters: Dict[str, List[str]] = Field(default_factory=dict)
-    matched_topics: List[str] = Field(default_factory=list)
-    matched_keywords: List[str] = Field(default_factory=list)
-    matched_themes: List[str] = Field(default_factory=list)
-    topic_catalog_size: int = 0
-    topic_portfolio_coverage: float = 0.0
-    topic_suggestions: List[str] = Field(default_factory=list)
-    topic_signal_depth: str = ""
-    summary: str
-
-
-class RetentionTopicSignalDetail(BaseModel):
-    topic: str
-    topic_context: str
-    dominant_topic: Optional[str] = None
-    items: List[RetentionTopicSignalItem]
-    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
-    matched_clusters: Dict[str, List[str]] = Field(default_factory=dict)
-    matched_topics: List[str] = Field(default_factory=list)
-    matched_keywords: List[str] = Field(default_factory=list)
-    matched_themes: List[str] = Field(default_factory=list)
-    topic_portfolio_coverage: float = 0.0
-    topic_signal_count: int = 0
-    topic_signal_depth: str = ""
-    topic_signal_summary: str = ""
-    summary: str
-
-
-class SignalSynthesisBundle(BaseModel):
-    generated_at: datetime
-    summary: InteractionSummary
-    signal_synthesis: InteractionSignalSynthesis
-    topic_breakdown: TopicSignalBreakdown
-    sentiment_bridge: SentimentRetentionBridge
-    topic_focus: List[str] = Field(default_factory=list)
-    topic_theme_coverage: List[TopicThemeCoverageItem] = Field(default_factory=list)
-    retention_risk: str = ""
-    summary_text: str = ""
+    total_snapshots: int
+    average_loyalty_score: float
+    average_churn_risk_score: float
+    dominant_snapshot_type: Optional[str] = None
+    counts_by_type: List[RetentionHealthTypeCount] = Field(default_factory=list)
+    coverage: float = 0.0
+    snapshot_report: RetentionSnapshotReport
+    trend_report: RetentionSnapshotTrendReport
 
 
 class RetentionDashboard(BaseModel):
@@ -567,71 +584,6 @@ class RetentionMaintenancePreview(BaseModel):
     retained_snapshots: int
     stale_snapshots: int
     stale_by_type: List[RetentionMaintenancePreviewItem]
-
-
-class RetentionWorkspaceOverviewItem(BaseModel):
-    snapshot_type: str
-    count: int
-    avg_loyalty_score: float
-    avg_window_days: float
-
-
-class RetentionWorkspaceOverview(BaseModel):
-    generated_at: datetime
-    window_days: int
-    total_snapshot_types: int
-    total_snapshots: int
-    items: List[RetentionWorkspaceOverviewItem] = Field(default_factory=list)
-
-
-class RetentionHealthTypeCount(BaseModel):
-    snapshot_type: str
-    count: int
-
-
-class RetentionHealthReport(BaseModel):
-    generated_at: datetime
-    user_id: int
-    window_days: int
-    total_snapshots: int
-    average_loyalty_score: float
-    average_churn_risk_score: float
-    dominant_snapshot_type: Optional[str] = None
-    counts_by_type: List[RetentionHealthTypeCount] = Field(default_factory=list)
-    coverage: float = 0.0
-    snapshot_report: RetentionSnapshotReport
-    trend_report: RetentionSnapshotTrendReport
-
-
-class RetentionCoverageItem(BaseModel):
-    label: str
-    count: int
-    ratio: float
-
-
-class RetentionCoverageReport(BaseModel):
-    generated_at: datetime
-    user_id: int
-    window_days: int
-    total_snapshots: int
-    items: List[RetentionCoverageItem]
-    topic_coverage_ratio: float = 0.0
-    summary: str
-
-
-class RetentionOperationalItem(BaseModel):
-    name: str
-    status: str
-    detail: str
-    owner_hint: str
-
-
-class RetentionOperationalReport(BaseModel):
-    generated_at: datetime
-    user_id: int
-    window_days: int
-    items: List[RetentionOperationalItem]
-    summary: str
 
 
 class EcosystemSubserviceStatus(BaseModel):
@@ -717,7 +669,7 @@ class ActivityTimelineReport(BaseModel):
     user_id: int
     window_days: int
     generated_at: datetime
-    items: List[ActivityTimelineItem]
+    items: list[ActivityTimelineItem]
 
 
 class RankedUserItem(BaseModel):
@@ -733,7 +685,7 @@ class RankedUserReport(BaseModel):
     generated_at: datetime
     window_days: int
     limit: int
-    users: List[RankedUserItem]
+    users: list[RankedUserItem]
 
 
 class AdminRetentionTrendItem(BaseModel):
@@ -746,7 +698,7 @@ class AdminRetentionTrendItem(BaseModel):
 class AdminRetentionTrendReport(BaseModel):
     generated_at: datetime
     window_days: int
-    trends: List[AdminRetentionTrendItem]
+    trends: list[AdminRetentionTrendItem]
 
 
 class RetentionSnapshotAdminItem(BaseModel):
@@ -760,7 +712,7 @@ class RetentionSnapshotAdminReport(BaseModel):
     generated_at: datetime
     window_days: int
     total_snapshots: int
-    items: List[RetentionSnapshotAdminItem]
+    items: list[RetentionSnapshotAdminItem]
 
 
 class UserRetentionSnapshotHealth(BaseModel):
@@ -783,7 +735,7 @@ class RetentionSnapshotComparisonItem(BaseModel):
 class RetentionSnapshotComparisonReport(BaseModel):
     generated_at: datetime
     window_days: int
-    comparisons: List[RetentionSnapshotComparisonItem]
+    comparisons: list[RetentionSnapshotComparisonItem]
 
 
 class RetentionSnapshotMomentumItem(BaseModel):
@@ -795,7 +747,7 @@ class RetentionSnapshotMomentumItem(BaseModel):
 class RetentionSnapshotMomentumReport(BaseModel):
     generated_at: datetime
     window_days: int
-    items: List[RetentionSnapshotMomentumItem]
+    items: list[RetentionSnapshotMomentumItem]
 
 
 class RetentionSnapshotVolatilityItem(BaseModel):
@@ -807,7 +759,7 @@ class RetentionSnapshotVolatilityItem(BaseModel):
 class RetentionSnapshotVolatilityReport(BaseModel):
     generated_at: datetime
     window_days: int
-    items: List[RetentionSnapshotVolatilityItem]
+    items: list[RetentionSnapshotVolatilityItem]
 
 
 class RetentionSnapshotVolatilitySummary(BaseModel):
@@ -840,11 +792,10 @@ class RetentionSnapshotActionPlan(BaseModel):
 
 
 class RecoverySignal(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     area: str
     intensity: float
     evidence: List[str]
+    evidence_summary: str
     recommended_action: str
 
 
@@ -872,19 +823,6 @@ class RecoverySnapshotSummary(BaseModel):
     primary_risks: List[str]
     impacts: List[RecoverySnapshotImpact]
     action_plan: str
-
-
-class LoyaltyRecoveryReport(BaseModel):
-    generated_at: datetime
-    user_id: int
-    window_days: int
-    recovery_readiness: str
-    dissatisfaction_score: float
-    primary_risks: List[str]
-    recovery_signals: List[RecoverySignal] = Field(default_factory=list)
-    recommendation: str
-    action_plan: str
-    snapshot_summary: Optional[RecoverySnapshotSummary] = None
 
 
 class RetentionSnapshotAuditItem(BaseModel):
@@ -1036,6 +974,10 @@ class RetentionSnapshotOperationsAutomation(BaseModel):
     risk_level: str
     overview: str
 
+    @property
+    def automation_ready(self) -> str:
+        return self.automation
+
 
 class RetentionSnapshotOperationsExecutionState(BaseModel):
     generated_at: datetime
@@ -1065,3 +1007,95 @@ class RetentionSnapshotOperationsGoNoGo(BaseModel):
     stale_after_days: int
     decision: str
     overview: str
+
+
+class LoyaltyRecoveryReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    loyalty_score: float
+    churn_risk: str
+    recovery_readiness: str
+    dissatisfaction: DissatisfactionRecoveryReport
+    retention_recommendation: RetentionSnapshotRecommendation
+    action_plan: RetentionSnapshotActionPlan
+
+
+class RecoveryOutcomeItem(BaseModel):
+    id: int
+    recovery_readiness: str
+    dissatisfaction_score: float
+    acknowledged: bool
+    acknowledged_at: Optional[datetime]
+    source: str
+    follow_up_count: int = 0
+    complaint_recurrence_count: int = 0
+    time_to_acknowledge_minutes: Optional[float] = None
+
+
+class RecoveryOutcomeReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    summary: InteractionSummary
+    dissatisfaction: DissatisfactionRecoveryReport
+    retention_recommendation: RetentionSnapshotRecommendation
+    action_plan: RetentionSnapshotActionPlan
+    recovery_outcome: RecoveryOutcomeItem
+    churn_risk: str
+    recovery_attempts: int
+    recovery_acknowledged: bool
+    complaint_recurrence_count: int
+    time_to_acknowledge_minutes: Optional[float] = None
+
+
+class RecoveryOutcomeAggregateItem(BaseModel):
+    recovery_readiness: str
+    attempts: int
+    acknowledged: int
+
+
+class RecoveryOutcomeAggregateReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    total_attempts: int
+    total_acknowledged: int
+    total_complaint_recurrences: int
+    items: list[RecoveryOutcomeAggregateItem]
+
+
+class Section11ExpansionSummary(BaseModel):
+    generated_at: datetime
+    window_days: int
+    dissatisfaction_recovery: DissatisfactionRecoveryReport
+    loyalty_recovery: LoyaltyRecoveryReport
+    recovery_snapshot: RecoverySnapshotSummary
+
+class Sentiment(BaseModel):
+    label: str
+    score: float
+
+class ChatMessageOut(BaseModel):
+    text: str
+    sentiment: Optional[Sentiment]
+    suggestions: Optional[List[str]]
+    vector: Optional[List[float]]
+    insights: Optional[List[InteractionInsight]] = None
+    summary: Optional[InteractionSummary] = None
+    improvement_pack: Optional[SystemImprovementPack] = None
+
+class ChatHistoryCreate(BaseModel):
+    user_id: int
+    message: str
+    response: str
+
+class ChatHistoryOut(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    message: str
+    response: str
+    timestamp: str
+
+
+class ChatHistorySummary(BaseModel):
+    user_id: Optional[int] = None
+    total_messages: int
+    total_responses: int

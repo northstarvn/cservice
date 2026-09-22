@@ -1,5 +1,6 @@
 import asyncio
 import os
+import pytest
 import asyncpg
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
@@ -8,6 +9,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+@pytest.mark.asyncio
 async def test_direct_asyncpg():
     """Test asyncpg directly using .env DATABASE_URL"""
     try:
@@ -33,6 +35,7 @@ async def test_direct_asyncpg():
         print(f"✗ Direct asyncpg failed: {e}")
         return False
 
+@pytest.mark.asyncio
 async def test_sqlalchemy_engine():
     """Test SQLAlchemy with asyncpg using .env DATABASE_URL"""
     try:
@@ -58,6 +61,7 @@ async def test_sqlalchemy_engine():
         print(f"Error type: {type(e).__name__}")
         return False
 
+@pytest.mark.asyncio
 async def test_env_loading():
     """Test if .env file is loaded correctly"""
     try:

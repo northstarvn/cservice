@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
@@ -12,16 +12,20 @@ from app.schemas.chat import (
     RetentionMaintenancePreviewItem,
     RetentionOperationalItem,
     RetentionOperationalReport,
+    RetentionSnapshotAdminItem,
+    RetentionSnapshotAdminReport,
     RetentionSnapshotDelta,
     RetentionSnapshotItem,
     RetentionSnapshotReport,
     RetentionSnapshotTrendItem,
     RetentionSnapshotTrendReport,
     RetentionDashboard,
+    UserRetentionSnapshotHealth,
 )
 from app.services.chat_analytics import (
     analyze_sentiment,
     build_churn_prediction,
+    build_retention_dashboard_topic_signal_detail,
     build_retention_snapshot_operations_report,
     build_summary,
     load_user_interaction_window,
@@ -57,8 +61,6 @@ def _retention_topic_context_from_summary(summary_text: str) -> list[str]:
         "service appointment preparation": ["prepare", "prep", "ready", "expect"],
         "same-day rescheduling and urgent changes": ["same day", "urgent", "today", "asap"],
         "no-show prevention and follow-up": ["no show", "missed", "remind", "follow up"],
-        "routing and service assignment": ["route", "assign", "room", "match"],
-        "service status and progress updates": ["progress", "status", "update", "where"],
         "handoff readiness and escalation context": ["handoff", "context", "escalation", "agent"],
         "service eligibility and requirements": ["eligible", "requirement", "qualify", "criteria"],
         "address and location details": ["address", "location", "site", "direction"],
@@ -71,7 +73,6 @@ def _retention_topic_context_from_summary(summary_text: str) -> list[str]:
         "service preferences and customization": ["preference", "custom", "tailor", "recurring"],
         "accessibility and assistance needs": ["accessibility", "assistance", "accommodation", "support"],
         "policy explanation and entitlement review": ["policy", "entitlement", "rule", "explain"],
-        "issue reproduction and troubleshooting": ["reproduce", "troubleshoot", "steps", "diagnose"],
         "billing disputes and charge review": ["dispute", "charge", "billing", "review"],
         "service follow-up and resolution tracking": ["follow-up", "resolution", "callback", "closed"],
         "customer feedback and survey response": ["survey", "feedback", "rate", "review"],
@@ -121,21 +122,12 @@ def _retention_topic_context_from_summary(summary_text: str) -> list[str]:
         "customer preparation checklist and preflight guidance": ["checklist", "preflight", "prepare", "before"],
         "service callback timing and response expectations": ["callback", "response", "expectation", "timing"],
         "service acknowledgement and receipt confirmation": ["acknowledge", "receipt", "confirm", "seen"],
-        "customer feedback and survey response": ["survey", "feedback", "rate", "review"],
-        "operational readiness and staffing coverage": ["staffing", "coverage", "readiness", "shift"],
-        "service history and recurring issues": ["history", "repeat", "recurring", "issue"],
-        "customer preferences and saved context": ["preferences", "saved", "context", "repeat"],
-        "service transcripts and conversation summaries": ["transcript", "summary", "conversation", "notes"],
-        "omnichannel conversation continuity": ["channel", "continuity", "chat", "email"],
-        "data privacy and information handling": ["privacy", "data", "information", "personal"],
-        "customer intent detection and request framing": ["intent", "purpose", "request", "frame"],
         "service area coverage and eligibility checks": ["coverage", "area", "eligible", "service area"],
         "service education and guided resolution": ["education", "guided", "resolution", "support"],
-        "service area coverage and eligibility checks": ["coverage", "area", "eligible", "service area"],
-        "customer confidence and reassurance messaging": ["confidence", "reassurance", "trust", "comfort"],
+        "customer intent detection and request framing": ["intent", "purpose", "request", "frame"],
     }
     matched = [topic for topic, keywords in topic_hints.items() if any(keyword in normalized for keyword in keywords)]
-    return matched
+    return list(dict.fromkeys(matched))
 
 
 def _retention_topic_clusters(topics: list[str]) -> dict[str, list[str]]:
@@ -161,10 +153,11 @@ def _retention_topic_clusters(topics: list[str]) -> dict[str, list[str]]:
 
 def build_retention_topic_signal_report(summary_text: str, user_id: int, window_days: int) -> dict[str, object]:
     matched_topics = _retention_topic_context_from_summary(summary_text)
-    topic_portfolio = build_topic_portfolio_report(type("RetentionTopicSelection", (), {"topic": summary_text})())
-    topic_intelligence = build_topic_intelligence_report(type("RetentionTopicSelection", (), {"topic": summary_text})())
+    topic_selection = type("RetentionTopicSelection", (), {"topic": summary_text})()
+    topic_portfolio = build_topic_portfolio_report(topic_selection)
+    topic_intelligence = build_topic_intelligence_report(topic_selection)
     topic_suggestions = build_topic_suggestion_report(summary_text, limit=5)
-    topic_theme_coverage = build_topic_theme_coverage(type("RetentionTopicSelection", (), {"topic": summary_text})())
+    topic_theme_coverage = build_topic_theme_coverage(topic_selection)
     matched_keywords = list(topic_intelligence.matched_keywords)
     matched_themes = [item.get("theme", getattr(item, "theme", "")) for item in topic_theme_coverage if item.get("matched_count", getattr(item, "matched_count", 0))]
     theme_overlap_scores = [item.get("overlap_score", getattr(item, "overlap_score", 0)) for item in topic_theme_coverage if item.get("matched_count", getattr(item, "matched_count", 0))]
@@ -173,10 +166,11 @@ def build_retention_topic_signal_report(summary_text: str, user_id: int, window_
     matched_topic_details = []
     items = []
     for topic in matched_topics[:8]:
-        topic_portfolio = build_topic_portfolio_report(type("RetentionTopicSelection", (), {"topic": topic})())
+        topic_item_selection = type("RetentionTopicSelection", (), {"topic": topic})()
+        topic_item_portfolio = build_topic_portfolio_report(topic_item_selection)
         topic_theme_matches = [
             theme.get("theme", getattr(theme, "theme", ""))
-            for theme in topic_portfolio["theme_coverage"]
+            for theme in topic_item_portfolio["theme_coverage"]
             if theme.get("coverage", getattr(theme, "coverage", 0.0)) >= 0.0
         ]
         topic_sectors = [
@@ -184,18 +178,18 @@ def build_retention_topic_signal_report(summary_text: str, user_id: int, window_
             for sector in TOPIC_SECTORS
             if topic in sector["topics"]
         ]
-        matched_topic_details.append({"topic": topic, "themes": topic_theme_matches, "coverage_ratio": topic_portfolio["coverage_ratio"]})
+        matched_topic_details.append({"topic": topic, "themes": topic_theme_matches, "coverage_ratio": topic_item_portfolio["coverage_ratio"]})
         items.append(
             {
                 "topic": topic,
                 "matched_keywords": [keyword for keyword in matched_keywords if keyword in topic.lower() or keyword in (summary_text or "").lower()],
                 "matched_themes": topic_theme_matches,
-                "matched_sectors": topic_sectors or (["retention_operations"] if topic_portfolio["matched_topics"] else []),
+                "matched_sectors": topic_sectors or (["retention_operations"] if topic_item_portfolio["matched_topics"] else []),
                 "cluster_matches": [cluster for cluster, cluster_topics in topic_clusters.items() if topic in cluster_topics],
                 "coverage_score": round(
                     min(
                         1.0,
-                        topic_portfolio["coverage_ratio"]
+                        topic_item_portfolio["coverage_ratio"]
                         + (len(matched_keywords) * 0.05)
                         + (len(matched_themes) * 0.03),
                     ),
@@ -212,7 +206,8 @@ def build_retention_topic_signal_report(summary_text: str, user_id: int, window_
         )
     )[:8]
     topic_focus = list(dict.fromkeys(expanded_focus + matched_topics[:3] + matched_keywords[:3]))[:10]
-    richness_score = round(min(100.0, len(matched_topics) * 6.5 + len(matched_themes) * 8.0 + len(matched_keywords) * 2.5 + len([topics for topics in topic_clusters.values() if topics]) * 5.0), 2)
+    active_clusters = [topics for topics in topic_clusters.values() if topics]
+    richness_score = round(min(100.0, len(matched_topics) * 6.5 + len(matched_themes) * 8.0 + len(matched_keywords) * 2.5 + len(active_clusters) * 5.0), 2)
 
     return {
         "generated_at": datetime.now(timezone.utc),
@@ -230,10 +225,10 @@ def build_retention_topic_signal_report(summary_text: str, user_id: int, window_
         "topic_suggestions": [item.topic for item in topic_suggestions.suggested_topics],
         "topic_theme_overlap_score": sum(theme_overlap_scores),
         "topic_focus": topic_focus,
-        "topic_signal_depth": f"topics={len(matched_topics)}, themes={len(matched_themes)}, keywords={len(matched_keywords)}, clusters={len([topics for topics in topic_clusters.values() if topics])}",
+        "topic_signal_depth": f"topics={len(matched_topics)}, themes={len(matched_themes)}, keywords={len(matched_keywords)}, clusters={len(active_clusters)}",
         "topic_signal_richness": richness_score,
         "items": items,
-        "summary": f"Topic context '{summary_text}' matched {len(matched_topics)} retention-relevant topics across {len(matched_themes)} themes with {len(matched_keywords)} keywords and {len([topics for topics in topic_clusters.values() if topics])} clusters. Dominant topic: {matched_topics[0] if matched_topics else 'none'}. Focus topics: {len(topic_focus)}. Signal richness: {richness_score:.2f}. Theme overlap score: {sum(theme_overlap_scores)}. The signal layer now spans privacy, continuity, routing, trust, discovery, retention, and operational-readiness topics.",
+        "summary": f"Topic context '{summary_text}' matched {len(matched_topics)} retention-relevant topics across {len(matched_themes)} themes with {len(matched_keywords)} keywords and {len(active_clusters)} clusters. Dominant topic: {matched_topics[0] if matched_topics else 'none'}. Focus topics: {len(topic_focus)}. Signal richness: {richness_score:.2f}. Theme overlap score: {sum(theme_overlap_scores)}. The signal layer now spans privacy, continuity, routing, trust, discovery, retention, and operational-readiness topics.",
     }
 
 
@@ -258,6 +253,31 @@ async def prune_retention_snapshots(db: AsyncSession, user_id: int, window_days:
         await db.delete(snapshot)
     if len(snapshots) > keep:
         await db.commit()
+
+
+async def prune_and_report_retention_snapshots(
+    db: AsyncSession,
+    user_id: int,
+    window_days: int,
+    keep: int = 20,
+) -> dict[str, int | datetime]:
+    snapshots = await _load_retention_snapshots(db, user_id, window_days)
+    removed = 0
+
+    for snapshot in snapshots[keep:]:
+        await db.delete(snapshot)
+        removed += 1
+
+    if removed:
+        await db.commit()
+
+    return {
+        "user_id": user_id,
+        "window_days": window_days,
+        "removed_snapshots": removed,
+        "kept_snapshots": min(len(snapshots), keep),
+        "generated_at": datetime.now(timezone.utc),
+    }
 
 
 async def count_retention_snapshots(db: AsyncSession, user_id: int, window_days: int) -> int:
@@ -340,7 +360,7 @@ async def build_retention_snapshot_summary(db: AsyncSession, user_id: int, windo
             for snapshot_type, count in sorted(counts_by_type.items(), key=lambda item: item[0])
         ],
         dominant_snapshot_type=dominant_snapshot_type,
-        coverage=0.0,
+        coverage=round(len(counts_by_type) / max(1, len(snapshots)), 2),
         snapshot_report=snapshot_report,
         trend_report=trend_report,
     )
@@ -370,10 +390,10 @@ async def build_retention_snapshot_report(db: AsyncSession, user_id: int, window
 
 async def build_retention_snapshot_delta(db: AsyncSession, user_id: int, window_days: int) -> RetentionSnapshotDelta:
     snapshots = await _load_retention_snapshots(db, user_id, window_days)
-    current_snapshot = snapshots[0] if snapshots else None
-    previous_snapshot = snapshots[1] if len(snapshots) > 1 else None
+    current = snapshots[0] if snapshots else None
+    previous = snapshots[1] if len(snapshots) > 1 else None
 
-    if current_snapshot is None:
+    if not current:
         return RetentionSnapshotDelta(
             user_id=user_id,
             window_days=window_days,
@@ -389,25 +409,18 @@ async def build_retention_snapshot_delta(db: AsyncSession, user_id: int, window_
             generated_at=datetime.now(timezone.utc),
         )
 
-    churn_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-    loyalty_delta = current_snapshot.loyalty_score - (previous_snapshot.loyalty_score if previous_snapshot else current_snapshot.loyalty_score)
-    current_churn_rank = churn_rank.get(current_snapshot.churn_risk, 0)
-    previous_churn_rank = churn_rank.get(previous_snapshot.churn_risk, 0) if previous_snapshot else current_churn_rank
-    current_stage = current_snapshot.lifecycle_stage or "unknown"
-    previous_stage = previous_snapshot.lifecycle_stage if previous_snapshot else current_stage
-
     return RetentionSnapshotDelta(
         user_id=user_id,
         window_days=window_days,
-        previous_snapshot_id=previous_snapshot.id if previous_snapshot else None,
-        current_snapshot_id=current_snapshot.id,
-        loyalty_score_delta=round(loyalty_delta, 2),
-        churn_risk_delta=str(current_churn_rank - previous_churn_rank),
-        lifecycle_stage_delta=(f"{previous_stage} -> {current_stage}" if previous_stage != current_stage else "none"),
-        churn_risk_changed=current_churn_rank != previous_churn_rank,
-        lifecycle_stage_changed=previous_stage != current_stage,
-        previous_created_at=previous_snapshot.created_at if previous_snapshot else None,
-        current_created_at=current_snapshot.created_at,
+        previous_snapshot_id=previous.id if previous else None,
+        current_snapshot_id=current.id,
+        loyalty_score_delta=round(current.loyalty_score - (previous.loyalty_score if previous else current.loyalty_score), 2),
+        churn_risk_delta=f"{previous.churn_risk if previous else current.churn_risk}->{current.churn_risk}",
+        lifecycle_stage_delta=f"{previous.lifecycle_stage if previous else current.lifecycle_stage}->{current.lifecycle_stage}",
+        churn_risk_changed=bool(previous and previous.churn_risk != current.churn_risk),
+        lifecycle_stage_changed=bool(previous and previous.lifecycle_stage != current.lifecycle_stage),
+        previous_created_at=previous.created_at if previous else None,
+        current_created_at=current.created_at,
         generated_at=datetime.now(timezone.utc),
     )
 
@@ -415,24 +428,95 @@ async def build_retention_snapshot_delta(db: AsyncSession, user_id: int, window_
 async def build_retention_snapshot_trends(db: AsyncSession, user_id: int, window_days: int) -> RetentionSnapshotTrendReport:
     snapshots = await _load_retention_snapshots(db, user_id, window_days)
     churn_rank = {"low": 0.0, "medium": 1.0, "high": 2.0, "critical": 3.0}
+
     grouped: dict[str, list[models.RetentionSnapshot]] = {}
     for snapshot in snapshots:
         grouped.setdefault(snapshot.snapshot_type, []).append(snapshot)
 
-    trends = [
-        RetentionSnapshotTrendItem(
-            snapshot_type=snapshot_type,
-            count=len(items),
-            avg_loyalty_score=round(sum(item.loyalty_score for item in items) / max(len(items), 1), 2),
-            avg_churn_risk_score=round(sum(churn_rank.get(item.churn_risk, 0.0) for item in items) / max(len(items), 1), 2),
-            latest_created_at=max((item.created_at for item in items), default=None),
+    trend_items = []
+    for snapshot_type, items in sorted(grouped.items()):
+        trend_items.append(
+            RetentionSnapshotTrendItem(
+                snapshot_type=snapshot_type,
+                count=len(items),
+                avg_loyalty_score=round(sum(item.loyalty_score for item in items) / max(len(items), 1), 2),
+                avg_churn_risk_score=round(sum(churn_rank.get(item.churn_risk, 0.0) for item in items) / max(len(items), 1), 2),
+                latest_created_at=max((item.created_at for item in items), default=None),
+            )
         )
-        for snapshot_type, items in sorted(grouped.items())
-    ]
+
     return RetentionSnapshotTrendReport(
         generated_at=datetime.now(timezone.utc),
         window_days=window_days,
-        trends=trends,
+        trends=trend_items,
+    )
+
+
+async def build_retention_snapshot_admin_report(db: AsyncSession, window_days: int) -> RetentionSnapshotAdminReport:
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=window_days)
+
+    total_snapshots = int(
+        (await db.execute(
+            select(func.count(models.RetentionSnapshot.id)).where(models.RetentionSnapshot.created_at >= cutoff)
+        )).scalar() or 0
+    )
+
+    grouped_query = (
+        select(
+            models.RetentionSnapshot.snapshot_type,
+            func.count(models.RetentionSnapshot.id),
+            func.avg(models.RetentionSnapshot.loyalty_score),
+            func.max(models.RetentionSnapshot.created_at),
+        )
+        .where(models.RetentionSnapshot.created_at >= cutoff)
+        .group_by(models.RetentionSnapshot.snapshot_type)
+        .order_by(desc(func.count(models.RetentionSnapshot.id)))
+    )
+    grouped_result = await db.execute(grouped_query)
+
+    items = [
+        RetentionSnapshotAdminItem(
+            snapshot_type=str(snapshot_type),
+            count=int(count_value or 0),
+            avg_loyalty_score=round(float(avg_loyalty or 0.0), 2),
+            latest_created_at=latest_created_at,
+        )
+        for snapshot_type, count_value, avg_loyalty, latest_created_at in grouped_result.all()
+    ]
+
+    return RetentionSnapshotAdminReport(
+        generated_at=now,
+        window_days=window_days,
+        total_snapshots=total_snapshots,
+        items=items,
+    )
+
+
+async def build_user_retention_snapshot_health(db: AsyncSession, user_id: int, window_days: int) -> UserRetentionSnapshotHealth:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    query = (
+        select(models.RetentionSnapshot)
+        .where(models.RetentionSnapshot.user_id == user_id)
+        .where(models.RetentionSnapshot.created_at >= cutoff)
+        .order_by(desc(models.RetentionSnapshot.created_at))
+    )
+    result = await db.execute(query)
+    snapshots = result.scalars().all()
+
+    snapshot_count = len(snapshots)
+    avg_loyalty_score = round(sum(snapshot.loyalty_score for snapshot in snapshots) / max(snapshot_count, 1), 2)
+
+    latest = snapshots[0] if snapshots else None
+
+    return UserRetentionSnapshotHealth(
+        user_id=user_id,
+        window_days=window_days,
+        snapshot_count=snapshot_count,
+        latest_snapshot_type=latest.snapshot_type if latest else None,
+        latest_lifecycle_stage=latest.lifecycle_stage if latest else None,
+        avg_loyalty_score=avg_loyalty_score,
+        generated_at=datetime.now(timezone.utc),
     )
 
 
@@ -449,6 +533,7 @@ async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days:
     if not summary_text and summary.top_issues:
         summary_text = ", ".join(summary.top_issues)
     topic_signal_report = build_retention_topic_signal_report(summary_text, user_id, window_days)
+    topic_signal_detail = build_retention_dashboard_topic_signal_detail(summary, latest_sentiment)
 
     return RetentionDashboard(
         generated_at=datetime.now(timezone.utc),
@@ -460,6 +545,8 @@ async def build_retention_dashboard(db: AsyncSession, user_id: int, window_days:
         snapshot_trends=snapshot_trends,
         snapshot_operations_report=snapshot_operations_report,
         topic_signal_report=topic_signal_report,
+        topic_signal_detail=topic_signal_detail,
+        topic_theme_coverage=topic_signal_detail.topic_theme_coverage,
         trend_coverage=round(len(snapshot_trends.trends) / max(len(snapshot_report.snapshots), 1), 2),
         delta_coverage=1.0 if snapshot_report.snapshots else 0.0,
     )

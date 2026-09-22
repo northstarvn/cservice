@@ -10,10 +10,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.main import app
 from app import models, deps
-from app.schemas.chat import ChatHistoryOut, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionDashboard, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
+from app.schemas.chat import ChatHistoryOut, ChatHistorySummary, UserActivityReport, AdminActivityReport, ActivityTimelineReport, RankedUserReport, AdminRetentionTrendReport, RetentionCohortDrilldownReport, RetentionCohortReport, RetentionSnapshotAdminReport, UserRetentionSnapshotHealth, RetentionSnapshotComparisonReport, RetentionSnapshotMomentumReport, RetentionSnapshotVolatilityReport, RetentionSnapshotVolatilitySummary, RetentionSnapshotRiskProfile, RetentionSnapshotRecommendation, RetentionSnapshotActionPlan, RetentionSnapshotAuditReport, RetentionSnapshotAuditExport, RetentionSnapshotTypeBreakdownReport, RetentionSnapshotStalenessReport, RetentionSnapshotStalenessTrendReport, RetentionSnapshotHealthScore, RetentionSnapshotHealthSummary, RetentionSnapshotHealthRisk, RetentionSnapshotHealthRecommendation, RetentionDashboard, RetentionSnapshotOperationsReport, RetentionSnapshotOperationsOverview, RetentionSnapshotOperationsStatus, RetentionSnapshotOperationsCompliance, RetentionSnapshotOperationsPosture, RetentionSnapshotOperationsAutomation, RetentionSnapshotOperationsExecutionState, RetentionSnapshotOperationsLaunchReadiness, RetentionSnapshotOperationsGoNoGo, InteractionSummary, MonetizationCohortReport, WeightedSystemMonitoringReport
 from app.routers.bookings import get_booking_history, get_booking_analytics_summary
 from app.routers.bookings import get_booking_assignment_history, get_booking_audit_summary, export_booking_data
-from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_report, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
+from app.routers.chat import get_user_activity_report, get_admin_activity_report, get_activity_timeline, get_ranked_users_report, get_admin_retention_trend_report, get_retention_cohort_drilldown, get_retention_cohorts, get_retention_snapshot_admin_report, get_user_retention_snapshot_health, get_retention_snapshot_comparison_report, get_retention_snapshot_momentum_report, get_retention_snapshot_volatility_report, get_retention_snapshot_volatility_summary, get_retention_snapshot_risk_profile, get_retention_snapshot_recommendation, get_retention_snapshot_action_plan, get_retention_snapshot_audit_report, get_retention_snapshot_audit_export, get_retention_snapshot_type_breakdown, get_retention_snapshot_staleness_report, get_retention_snapshot_staleness_trend, get_retention_snapshot_health_score, get_retention_snapshot_health_summary, get_retention_snapshot_health_risk, get_retention_snapshot_health_recommendation, get_retention_snapshot_operations_report, get_retention_snapshot_operations_overview, get_retention_snapshot_operations_status, get_retention_snapshot_operations_compliance, get_retention_snapshot_operations_posture, get_retention_snapshot_operations_automation, get_retention_snapshot_operations_execution_state, get_retention_snapshot_operations_launch_readiness, get_retention_snapshot_operations_go_no_go, get_monetization_cohorts
 from app.routers.chat import get_retention_dashboard
 
 
@@ -158,6 +158,10 @@ class FakeUser:
     updated_at: datetime = datetime.now(timezone.utc)
 
 
+class TrustedPostureUser(FakeUser):
+    policy_score = type("FakePolicyScore", (), {"control_posture": "high_trust"})()
+
+
 class FakeHealthSession:
     async def execute(self, query):
         class _Result:
@@ -193,8 +197,7 @@ class FakeHistorySession:
                             "note": "confirmed",
                             "created_at": datetime.now(timezone.utc),
                         },
-                    )()
-                    ,
+                    )(),
                     type(
                         "BookingEventObj",
                         (),
@@ -208,7 +211,7 @@ class FakeHistorySession:
                             "note": "assignment created",
                             "created_at": datetime.now(timezone.utc),
                         },
-                    )()
+                    )(),
                 ]
 
             def scalar_one_or_none(self_inner):
@@ -536,7 +539,7 @@ class FakeRetentionOperationsReportSession:
             _Row(datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)),
             _Row(datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)),
             _Row(datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)),
-            _Row(datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc)),
+            _Row(datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)),
             _Row(datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)),
         ])
 
@@ -701,15 +704,69 @@ async def test_booking_history_returns_report_shape():
 
     assert report.booking_id == 10
     assert report.user_id == 1
-    assert report.event_count == 2
+    assert report.event_count == 1
     assert report.items[0].event_type == "confirmed"
-    assert report.items[1].is_assignment_event is True
+    assert report.items[0].is_assignment_event is False
+
+
+@pytest.mark.asyncio
+async def test_booking_history_shows_assignment_markers_for_trusted_users():
+    db = FakeHistorySession()
+    report = await get_booking_history(booking_id=10, current_user=TrustedPostureUser(), db=db)
+
+    assert report.booking_id == 10
+    assert report.user_id == 1
+    assert report.assignment_events == 1
+    assert report.event_count == 2
+    event_types = [item.event_type for item in report.items]
+    assert "confirmed" in event_types
+    assert "assignment_created" in event_types
+    assignment_items = [item for item in report.items if item.is_assignment_event]
+    assert len(assignment_items) == 1
+    assert assignment_items[0].event_type == "assignment_created"
 
 
 @pytest.mark.asyncio
 async def test_booking_assignment_history_returns_assignment_only_events():
-    db = FakeHistorySession()
-    report = await get_booking_assignment_history(booking_id=10, current_user=FakeUser(), db=db)
+    class _AssignmentOnlySession:
+        async def execute(self, query):
+            class _Result:
+                def scalars(self_inner):
+                    return self_inner
+
+                def all(self_inner):
+                    return [
+                        type(
+                            "BookingEventObj",
+                            (),
+                            {
+                                "id": 2,
+                                "booking_id": 10,
+                                "user_id": 1,
+                                "event_type": "assignment_created",
+                                "from_status": None,
+                                "to_status": None,
+                                "note": "assignment created",
+                                "created_at": datetime.now(timezone.utc),
+                            },
+                        )()
+                    ]
+
+                def scalar_one_or_none(self_inner):
+                    return type(
+                        "BookingObj",
+                        (),
+                        {
+                            "id": 10,
+                            "user_id": 1,
+                            "status": models.BookingStatus.confirmed,
+                        },
+                    )()
+
+            return _Result()
+
+    db = _AssignmentOnlySession()
+    report = await get_booking_assignment_history(booking_id=10, current_user=TrustedPostureUser(), db=db)
 
     assert report.booking_id == 10
     assert report.user_id == 1
@@ -734,49 +791,70 @@ async def test_admin_analytics_summary_returns_counts():
 @pytest.mark.asyncio
 async def test_booking_audit_summary_counts_assignment_events():
     class _AuditResult:
-        def scalars(self_inner):
-            return self_inner
+        def __init__(self, rows=None, booking=None):
+            self._rows = rows or []
+            self._booking = booking
 
-        def all(self_inner):
-            return [
-                type(
-                    "BookingEventObj",
-                    (),
-                    {
-                        "id": 1,
-                        "booking_id": 10,
-                        "user_id": 1,
-                        "event_type": "created",
-                        "from_status": None,
-                        "to_status": "pending",
-                        "note": "created",
-                        "created_at": datetime.now(timezone.utc),
-                    },
-                )(),
-                type(
-                    "BookingEventObj",
-                    (),
-                    {
-                        "id": 2,
-                        "booking_id": 10,
-                        "user_id": 1,
-                        "event_type": "assignment_created",
-                        "from_status": None,
-                        "to_status": None,
-                        "note": "assignment",
-                        "created_at": datetime.now(timezone.utc),
-                    },
-                )(),
-            ]
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def scalar_one_or_none(self):
+            return self._booking
 
     class _AuditSession:
         async def execute(self, query):
-            return _AuditResult()
+            query_text = str(query)
+            if "booking_event" in query_text:
+                return _AuditResult(rows=[
+                    type(
+                        "BookingEventObj",
+                        (),
+                        {
+                            "id": 1,
+                            "booking_id": 10,
+                            "user_id": 1,
+                            "event_type": "created",
+                            "from_status": None,
+                            "to_status": "pending",
+                            "note": "created",
+                            "created_at": datetime.now(timezone.utc),
+                        },
+                    )(),
+                    type(
+                        "BookingEventObj",
+                        (),
+                        {
+                            "id": 2,
+                            "booking_id": 10,
+                            "user_id": 1,
+                            "event_type": "assignment_created",
+                            "from_status": None,
+                            "to_status": None,
+                            "note": "assignment",
+                            "created_at": datetime.now(timezone.utc),
+                        },
+                    )(),
+                ])
+            return _AuditResult(
+                booking=type(
+                    "BookingObj",
+                    (),
+                    {
+                        "id": 10,
+                        "user_id": 1,
+                        "status": models.BookingStatus.pending,
+                    },
+                )()
+            )
 
     summary = await get_booking_audit_summary(booking_id=10, current_user=FakeUser(), db=_AuditSession())
 
     assert summary.total_events == 2
     assert summary.assignment_events == 1
+    assert summary.event_type_counts["assignment_created"] == 1
 
 
 @pytest.mark.asyncio
@@ -798,7 +876,17 @@ async def test_booking_export_includes_assignment_event_total():
         async def execute(self, query):
             self.calls += 1
             if self.calls == 1:
-                return _ExportResult([type("BookingObj", (), {"id": 1, "user_id": 1, "status": models.BookingStatus.pending, "service_type": models.ServiceType.consultation, "title": "T", "details": "D", "scheduled_date": datetime.now(timezone.utc), "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)})()])
+                return _ExportResult([type("BookingObj", (), {
+                    "id": 1,
+                    "user_id": 1,
+                    "service_type": models.ServiceType.consultation,
+                    "title": "T",
+                    "details": "D",
+                    "scheduled_date": datetime.now(timezone.utc),
+                    "status": models.BookingStatus.pending,
+                    "created_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                })()])
             return _ExportResult([
                 type(
                     "BookingEventObj",
@@ -816,7 +904,7 @@ async def test_booking_export_includes_assignment_event_total():
                 )()
             ])
 
-    report = await export_booking_data(current_user=FakeUser(is_admin=True), db=_ExportSession())
+    report = await export_booking_data(current_user=TrustedPostureUser(), db=_ExportSession())
 
     assert report.total_bookings == 1
     assert report.total_events == 1
@@ -865,6 +953,18 @@ async def test_monetization_cohorts_endpoint_returns_report():
     assert isinstance(report, MonetizationCohortReport)
     assert report.window_days == 30
     assert report.cohorts
+
+
+@pytest.mark.asyncio
+async def test_retention_cohorts_endpoint_returns_report():
+    db = FakeMonetizationCohortsSession()
+    report = await get_retention_cohorts(window_days=30, db=db)
+
+    assert isinstance(report, RetentionCohortReport)
+    assert report.window_days == 30
+    assert report.cohorts
+    assert report.cohorts[0].cohort_rule
+    assert report.cohorts[0].avg_monetization_readiness >= 0
 
 
 def test_meta_features_lists_chat_history_summary():
@@ -1455,9 +1555,12 @@ async def test_retention_dashboard_embeds_snapshot_operations_report_with_measur
 
     assert isinstance(dashboard, RetentionDashboard)
     assert dashboard.snapshot_operations_report is not None
-    assert dashboard.snapshot_operations_report.items
-    assert dashboard.snapshot_operations_report.summary
-    assert dashboard.snapshot_operations_report.effective_window_days >= 1
+    assert dashboard.snapshot_operations_report.measurement_window_days == 30
+    assert dashboard.snapshot_operations_report.measurement_stale_after_days == 30
+    assert dashboard.snapshot_operations_report.readiness_threshold == 0.25
+    assert dashboard.topic_signal_detail is not None
+    assert dashboard.topic_signal_detail.topic_context
+    assert dashboard.topic_theme_coverage is not None
 
 
 def test_retention_maintenance_report_endpoint_exposes_summary_contract():
