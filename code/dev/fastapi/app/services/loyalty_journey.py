@@ -580,6 +580,41 @@ def build_journey_context(
     )
 
 
+def resolve_top_journey_family(
+    summary: InteractionSummary,
+    churn_prediction: ChurnPrediction,
+    chat_rows: list[models.ChatHistory],
+    bookings: list[models.Booking],
+    sentiment: Optional[Sentiment],
+    *,
+    total_chat_count: int = 0,
+    total_booking_count: int = 0,
+    latest_chat_at: Optional[datetime] = None,
+    latest_booking_at: Optional[datetime] = None,
+) -> str:
+    """Return the top-priority journey family for a user, or "none".
+
+    Lightweight version of `build_loyalty_journey_plan` that only resolves the
+    dominant family — used by monitoring surfaces that need one label per user
+    (e.g. the activity-tree grouping axis).
+    """
+    context = build_journey_context(
+        summary,
+        churn_prediction,
+        chat_rows,
+        bookings,
+        sentiment,
+        total_chat_count=total_chat_count,
+        total_booking_count=total_booking_count,
+        latest_chat_at=latest_chat_at,
+        latest_booking_at=latest_booking_at,
+    )
+    matched = match_loyalty_scenarios(context)
+    if not matched:
+        return "none"
+    return str(matched[0]["family"])
+
+
 # ---------------------------------------------------------------------------
 # Plan / report builders
 # ---------------------------------------------------------------------------
@@ -645,7 +680,7 @@ def build_loyalty_journey_plan(
     )
 
 
-async def _load_history_totals(db: AsyncSession, user_id: int) -> dict[str, object]:
+async def load_history_totals(db: AsyncSession, user_id: int) -> dict[str, object]:
     """Total chat/booking counts and latest activity timestamps across all time."""
     chat_count_result = await db.execute(
         select(func.count(models.ChatHistory.id)).where(models.ChatHistory.user_id == user_id)
@@ -665,6 +700,10 @@ async def _load_history_totals(db: AsyncSession, user_id: int) -> dict[str, obje
         "latest_chat_at": latest_chat_result.scalar(),
         "latest_booking_at": latest_booking_result.scalar(),
     }
+
+
+async def _load_history_totals(db: AsyncSession, user_id: int) -> dict[str, object]:
+    return await load_history_totals(db, user_id)
 
 
 async def build_loyalty_journey_plan_for_user(

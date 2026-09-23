@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func, desc, case
@@ -72,6 +73,7 @@ from app.schemas.chat import (
     WeightedFocusItem,
     LoyaltyJourneyPlan,
     LoyaltyJourneyAdminReport,
+    ActivityTreeReport,
 )
 from app.services.chat_analytics import (
     analyze_sentiment,
@@ -105,6 +107,10 @@ from app.services.retention import (
 from app.services.loyalty_journey import (
     build_loyalty_journey_admin_report,
     build_loyalty_journey_plan_for_user,
+)
+from app.services.activity_tree import (
+    build_activity_tree,
+    build_self_activity_tree,
 )
 from app.services.retention_snapshots import (
     _build_retention_snapshot_action_plan,
@@ -1760,3 +1766,60 @@ async def get_loyalty_journey_admin(
     current_user: models.User = Depends(deps.get_current_admin_user),
 ):
     return await build_loyalty_journey_admin_report(db, window_days, limit)
+
+
+@router.get("/chat/activity-tree", response_model=ActivityTreeReport)
+async def get_activity_tree_self(
+    window_days: int = Query(default=30, ge=7, le=365),
+    rank_by: str = Query(default="recency", pattern="^(recency|score)$"),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    limit: int = Query(default=10, ge=1, le=50),
+    kind: Optional[str] = Query(default=None, pattern="^(chat|booking)$"),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await build_self_activity_tree(
+        db, current_user.id, window_days, rank_by=rank_by, order=order, limit=limit, kind=kind
+    )
+
+
+@router.get("/chat/admin/activity-tree", response_model=ActivityTreeReport)
+async def get_activity_tree_admin(
+    window_days: int = Query(default=30, ge=7, le=365),
+    group_by: str = Query(
+        default="lifecycle_stage",
+        pattern="^(lifecycle_stage|value_tier|customer_classification|churn_risk|journey_family)$",
+    ),
+    rank_by: str = Query(
+        default="loyalty_score",
+        pattern="^(loyalty_score|monetization_readiness|signal_strength|churn_risk_score|activity_count)$",
+    ),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    limit: int = Query(default=5, ge=1, le=50),
+    min_loyalty: Optional[float] = Query(default=None, ge=0, le=100),
+    max_loyalty: Optional[float] = Query(default=None, ge=0, le=100),
+    churn_risk: Optional[str] = Query(default=None, pattern="^(low|medium|high)$"),
+    sentiment: Optional[str] = Query(default=None, pattern="^(positive|negative|neutral|none)$"),
+    anomalies_only: bool = Query(default=False),
+    with_activities: bool = Query(default=False),
+    activity_kind: Optional[str] = Query(default=None, pattern="^(chat|booking)$"),
+    q: Optional[str] = Query(default=None, max_length=120),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_activity_tree(
+        db,
+        window_days,
+        group_by=group_by,
+        rank_by=rank_by,
+        order=order,
+        limit=limit,
+        min_loyalty=min_loyalty,
+        max_loyalty=max_loyalty,
+        churn_risk=churn_risk,
+        sentiment=sentiment,
+        q=q,
+        anomalies_only=anomalies_only,
+        with_activities=with_activities,
+        activity_kind=activity_kind,
+    )

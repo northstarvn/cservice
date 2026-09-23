@@ -1152,3 +1152,62 @@ class LoyaltyJourneyAdminReport(BaseModel):
     coverage_by_family: Dict[str, int] = Field(default_factory=dict)
     top_family: Optional[str] = None
     users: List[LoyaltyJourneyAdminItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Activity-tree monitoring (tree-structured customer activity organization)
+# ---------------------------------------------------------------------------
+
+
+class ActivityTreeAnomalyItem(BaseModel):
+    anomaly: str
+    label: str
+    severity: str
+    description: str = ""
+    evidence: str = ""
+    metric_value: float = 0.0
+    rule: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ActivityTreeActivityItem(BaseModel):
+    kind: str
+    label: str
+    detail: str = ""
+    value: float = 0.0
+    timestamp: Optional[datetime] = None
+    reference: Optional[Any] = None
+    flagged: bool = False
+    flag_reason: str = ""
+
+
+class ActivityTreeNode(BaseModel):
+    node_id: str
+    label: str
+    kind: str
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    child_count: int = 0
+    anomaly_count: int = 0
+    anomalies: List[ActivityTreeAnomalyItem] = Field(default_factory=list)
+    children: List["ActivityTreeNode"] = Field(default_factory=list)
+    activity_items: List[ActivityTreeActivityItem] = Field(default_factory=list)
+
+
+ActivityTreeNode.model_rebuild()
+
+
+class ActivityTreeReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    scope: str
+    group_by: str
+    rank_by: str
+    order: str
+    total_users: int
+    total_nodes: int
+    group_count: int
+    anomaly_count: int
+    top_group: Optional[str] = None
+    filtered: Dict[str, Any] = Field(default_factory=dict)
+    root: ActivityTreeNode
+    summary: str = ""
+    highlights: List[Dict[str, Any]] = Field(default_factory=list)

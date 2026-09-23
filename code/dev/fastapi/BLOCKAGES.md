@@ -30,7 +30,7 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   `users._current_control_posture` deps alias.
 - Added `tests/test_consolidation_regressions.py` (13 tests).
 
-### Dynamic rule engines (uncommitted until this batch)
+### Dynamic rule engines (committed `4f6332e`)
 - `AREA_SCORING_RULES` config table + config-driven `score_area`,
   `score_all_areas`, `build_area_scoring_catalog`, `build_area_keyword_catalog`;
   optional `chat_limit`/`booking_limit` on `load_user_interaction_window`.
@@ -56,6 +56,30 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   `/meta/features` documents both journey routes; `/meta/ecosystem` lists the
   self route under chat_intelligence.
 - Added `tests/test_loyalty_journey_expansion.py` (19 tests).
+
+### Activity-tree monitoring (new: `services/activity_tree.py`)
+- Monitoring expansion: customer activities organized as query-time tree
+  structures — group by configurable axis (lifecycle_stage, value_tier,
+  customer_classification, churn_risk, journey_family), rank members by
+  configurable metric (loyalty_score, monetization_readiness, signal_strength,
+  churn_risk_score, activity_count) in asc/desc order, smart-filter
+  (loyalty range, churn bucket, sentiment, free-text `q`, anomalies_only),
+  and highlight anomalies.
+- Anomaly highlighting has two layers: absolute rules
+  (`ACTIVITY_TREE_ANOMALY_RULES`: churn_spike, loyalty_drop, negative_sentiment,
+  cancellation_burst, signal_spike, dormancy) plus group-relative deviation
+  rules (`ACTIVITY_TREE_RELATIVE_ANOMALY_RULES`: loyalty_gap, churn_deviation);
+  leaf activities are flagged too (negative-chat keywords, cancelled bookings).
+  All rules are config tables — adding an axis/rank/rule is config-only.
+- `load_history_totals` made public (was `_load_history_totals`) and
+  `resolve_top_journey_family` added to `loyalty_journey.py` for reuse.
+- Routes: `GET /chat/activity-tree` (self tree, grouped by activity kind) and
+  `GET /chat/admin/activity-tree` (cross-user grouped tree).
+- `main.py`: `/meta/scoring-catalog` exposes `activity_monitoring` catalog;
+  route validation for group/rank/filter params lives in the router
+  (`Query(pattern=...)` → 422). `/meta/features` + a new `activity_monitoring`
+  subservice in `/meta/ecosystem` document the surface.
+- Added `tests/test_activity_tree_expansion.py` (29 tests).
 
 ## Open blockages
 - None.

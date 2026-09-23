@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import Base, engine, get_db
 from app.i18n import locale_payload
 from app.routers import bookings, chat, topics, users
-from app.services import chat_analytics, loyalty_journey, policy_scoring
+from app.services import chat_analytics, loyalty_journey, policy_scoring, activity_tree
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -185,6 +185,11 @@ async def app_ecosystem():
                 "purpose": "topic catalog search, ranked suggestions, workspace portfolio, and cross-service topic intelligence",
                 "status": "ready",
             },
+            "activity_monitoring": {
+                "routes": ["/chat/activity-tree", "/chat/admin/activity-tree"],
+                "purpose": "tree-structured customer activity monitoring with configurable grouping, ranking, smart filtering, and anomaly highlighting",
+                "status": "ready",
+            },
         },
         "capabilities": capabilities,
     }
@@ -209,6 +214,8 @@ async def app_feature_summary():
             "retention_maintenance": "/retention/maintenance",
             "loyalty_journey": "/chat/loyalty-journey",
             "loyalty_admin_journey": "/chat/admin/loyalty-journey",
+            "activity_tree": "/chat/activity-tree",
+            "activity_tree_admin": "/chat/admin/activity-tree",
         },
     }
 
@@ -232,6 +239,7 @@ async def scoring_catalog():
         "area_keywords": chat_analytics.build_area_keyword_catalog(),
         "policy_tiers": policy_scoring.build_policy_tier_catalog(),
         "loyalty_scenarios": loyalty_journey.build_loyalty_scenario_catalog(),
+        "activity_monitoring": activity_tree.build_activity_tree_catalog(),
     }
 
 @app.get("/health")
