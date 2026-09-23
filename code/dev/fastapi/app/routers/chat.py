@@ -70,6 +70,8 @@ from app.schemas.chat import (
     MonetizationCohortReport,
     WeightedSystemMonitoringReport,
     WeightedFocusItem,
+    LoyaltyJourneyPlan,
+    LoyaltyJourneyAdminReport,
 )
 from app.services.chat_analytics import (
     analyze_sentiment,
@@ -99,6 +101,10 @@ from app.services.retention import (
     build_user_retention_snapshot_health,
     prune_and_report_retention_snapshots,
     prune_retention_snapshots,
+)
+from app.services.loyalty_journey import (
+    build_loyalty_journey_admin_report,
+    build_loyalty_journey_plan_for_user,
 )
 from app.services.retention_snapshots import (
     _build_retention_snapshot_action_plan,
@@ -1735,3 +1741,22 @@ async def get_improvement_pack(
     bookings = booking_result.scalars().all()
     latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
     return _build_system_improvement_pack(current_user.id, chat_rows, bookings, latest_sentiment)
+
+
+@router.get("/chat/loyalty-journey", response_model=LoyaltyJourneyPlan)
+async def get_loyalty_journey(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await build_loyalty_journey_plan_for_user(db, current_user.id, window_days)
+
+
+@router.get("/chat/admin/loyalty-journey", response_model=LoyaltyJourneyAdminReport)
+async def get_loyalty_journey_admin(
+    window_days: int = Query(default=30, ge=7, le=365),
+    limit: int = Query(default=20, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_loyalty_journey_admin_report(db, window_days, limit)

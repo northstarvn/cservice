@@ -1099,3 +1099,56 @@ class ChatHistorySummary(BaseModel):
     user_id: Optional[int] = None
     total_messages: int
     total_responses: int
+
+
+# ---------------------------------------------------------------------------
+# Loyalty journey (new -> loyal next-best-action engine)
+# ---------------------------------------------------------------------------
+
+class LoyaltyJourneyScenarioItem(BaseModel):
+    scenario: str
+    family: str
+    goal: str
+    priority: str
+    owner_hint: str
+    actions: List[str]
+    kpis: List[str] = Field(default_factory=list)
+    matched_conditions: Dict[str, Any] = Field(default_factory=dict)
+    evidence: List[str] = Field(default_factory=list)
+
+
+class LoyaltyJourneyPlan(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    lifecycle_stage: str
+    churn_risk: str
+    loyalty_score: float
+    monetization_readiness: float
+    matched_scenario_count: int
+    scenario_families: List[str] = Field(default_factory=list)
+    next_best_actions: List[str] = Field(default_factory=list)
+    scenario_items: List[LoyaltyJourneyScenarioItem] = Field(default_factory=list)
+    summary_text: str = ""
+
+
+class LoyaltyJourneyAdminItem(BaseModel):
+    user_id: int
+    username: str
+    lifecycle_stage: str
+    churn_risk: str
+    matched_scenario_count: int
+    scenario_families: List[str] = Field(default_factory=list)
+    top_action: str
+    priority_rank: int
+
+
+class LoyaltyJourneyAdminReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    total_users: int
+    users_with_scenarios: int
+    total_matched: int
+    coverage_by_family: Dict[str, int] = Field(default_factory=dict)
+    top_family: Optional[str] = None
+    users: List[LoyaltyJourneyAdminItem] = Field(default_factory=list)
