@@ -93,6 +93,119 @@ PREDEFINED_POLICY_AREAS = [
     "follow_up",
 ]
 
+# Data-driven scoring rules for interaction policy areas. `score_area` is a thin
+# engine over this table, so future policy areas can be added (or tuned) without
+# touching the scoring code. Rule kinds:
+#   - "message_keyword": scan each message for `keywords`; weight applies to
+#     older messages, `recent_weight` to messages inside `messages[:3]`.
+#   - "term_table": count the configured `terms` that appear in any message,
+#     multiply by `weight`, and cap at `cap`.
+# Optional rule extensions:
+#   - "booking_boost": adds a fixed amount per matching booking status (capped).
+#   - "repeated_message_boost": adds a fixed amount per repeated message (capped).
+AREA_SCORING_RULES: dict[str, dict[str, object]] = {
+    "response_speed": {
+        "kind": "message_keyword",
+        "keywords": ("slow", "delay", "wait"),
+        "weight": 0.9,
+        "recent_weight": 1.2,
+    },
+    "clarity": {
+        "kind": "message_keyword",
+        "keywords": ("confusing", "unclear", "hard"),
+        "weight": 0.8,
+        "recent_weight": 1.1,
+    },
+    "reliability": {
+        "kind": "message_keyword",
+        "keywords": ("bug", "error", "issue"),
+        "weight": 1.0,
+        "recent_weight": 1.3,
+    },
+    "booking_flow": {
+        "kind": "message_keyword",
+        "keywords": ("cancel", "book", "schedule"),
+        "weight": 0.8,
+        "recent_weight": 1.0,
+        "booking_boost": {
+            "statuses": ("pending", "cancelled"),
+            "per_booking": 0.6,
+            "cap": 2.4,
+        },
+    },
+    "support": {
+        "kind": "message_keyword",
+        "keywords": ("help", "support"),
+        "weight": 0.7,
+        "recent_weight": 0.9,
+    },
+    "pricing": {
+        "kind": "message_keyword",
+        "keywords": ("price", "expensive"),
+        "weight": 0.7,
+        "recent_weight": 0.9,
+    },
+    "retention": {
+        "kind": "message_keyword",
+        "keywords": RETENTION_KEYWORD_TERMS,
+        "weight": 0.8,
+        "recent_weight": 1.0,
+        "repeated_message_boost": {
+            "per_repeat": 0.5,
+            "cap": 2.0,
+        },
+    },
+    "sentiment_recovery": {
+        "kind": "term_table",
+        "terms": ("angry", "frustrated", "upset", "disappointed", "bad"),
+        "weight": 0.8,
+        "cap": 2.4,
+        "evidence": "negative sentiment language detected in recent messages",
+    },
+    "onboarding": {
+        "kind": "term_table",
+        "terms": ("how do i", "new here", "getting started", "first time", "setup"),
+        "weight": 0.7,
+        "cap": 2.1,
+        "evidence": "onboarding guidance requests detected",
+    },
+    "notification_quality": {
+        "kind": "term_table",
+        "terms": ("notify", "notification", "alert", "remind", "reminder"),
+        "weight": 0.6,
+        "cap": 1.8,
+        "evidence": "notification and reminder language detected",
+    },
+    "self_service": {
+        "kind": "term_table",
+        "terms": ("faq", "self service", "self-service", "how to", "help center"),
+        "weight": 0.6,
+        "cap": 1.8,
+        "evidence": "self-service questions detected",
+    },
+    "handoff": {
+        "kind": "term_table",
+        "terms": ("agent", "transfer", "human", "someone", "escalate"),
+        "weight": 0.6,
+        "cap": 1.8,
+        "evidence": "handoff and escalation language detected",
+    },
+    "trust": {
+        "kind": "term_table",
+        "terms": ("trust", "refund", "guarantee", "secure", "safe"),
+        "weight": 0.5,
+        "cap": 1.5,
+        "evidence": "trust-related concerns detected",
+    },
+    "follow_up": {
+        "kind": "term_table",
+        "terms": ("follow up", "follow-up", "still waiting", "again", "remind"),
+        "weight": 0.7,
+        "cap": 2.1,
+        "evidence": "follow-up language detected",
+    },
+}
+
 POLICY_CONFIGS = {
     "response_speed": {
         "recommendation": "Reduce wait times and make response status visible to users.",
@@ -202,78 +315,105 @@ def normalize_text(text: str) -> str:
 def score_area(messages: list[str], bookings: list[models.Booking], area: str) -> tuple[float, list[str]]:
     evidence: list[str] = []
     score = 0.0
-    recent_messages = messages[:3]
-    for message in messages:
-        normalized = normalize_text(message)
-        if area == "response_speed" and any(word in normalized for word in ["slow", "delay", "wait"]):
-            score += 1.2 if message in recent_messages else 0.9
-            evidence.append(message)
-        elif area == "clarity" and any(word in normalized for word in ["confusing", "unclear", "hard"]):
-            score += 1.1 if message in recent_messages else 0.8
-            evidence.append(message)
-        elif area == "reliability" and any(word in normalized for word in ["bug", "error", "issue"]):
-            score += 1.3 if message in recent_messages else 1.0
-            evidence.append(message)
-        elif area == "booking_flow" and any(word in normalized for word in ["cancel", "book", "schedule"]):
-            score += 1.0 if message in recent_messages else 0.8
-            evidence.append(message)
-        elif area == "support" and any(word in normalized for word in ["help", "support"]):
-            score += 0.9 if message in recent_messages else 0.7
-            evidence.append(message)
-        elif area == "pricing" and any(word in normalized for word in ["price", "expensive"]):
-            score += 0.9 if message in recent_messages else 0.7
-            evidence.append(message)
-        elif area == "retention" and any(word in normalized for word in RETENTION_KEYWORD_TERMS):
-            score += 1.0 if message in recent_messages else 0.8
-            evidence.append(message)
+    rule = AREA_SCORING_RULES.get(area)
+    if not rule:
+        return score, evidence
 
-    if area == "booking_flow":
-        cancelled_or_pending = [b for b in bookings if str(getattr(b.status, "value", b.status)) in {"pending", "cancelled"}]
-        score += min(len(cancelled_or_pending) * 0.6, 2.4)
+    recent_messages = messages[:3]
+    recent_weight = rule.get("recent_weight")
+    weight = rule.get("weight")
+
+    if rule.get("kind") == "message_keyword":
+        keywords = rule.get("keywords", ())
+        for message in messages:
+            normalized = normalize_text(message)
+            if any(word in normalized for word in keywords):
+                score += float(recent_weight if message in recent_messages else weight)
+                evidence.append(message)
+
+    booking_boost = rule.get("booking_boost")
+    if booking_boost:
+        statuses = booking_boost.get("statuses", ())
+        cancelled_or_pending = [
+            b for b in bookings
+            if str(getattr(b.status, "value", b.status)) in statuses
+        ]
+        score += min(len(cancelled_or_pending) * float(booking_boost.get("per_booking", 0.0)), float(booking_boost.get("cap", 0.0)))
         if cancelled_or_pending:
             evidence.append(f"{len(cancelled_or_pending)} bookings are pending/cancelled")
-    if area == "retention" and messages:
+
+    repeated_boost = rule.get("repeated_message_boost")
+    if repeated_boost and messages:
         repeated = max(0, len(messages) - len(set(messages)))
-        score += min(repeated * 0.5, 2.0)
+        score += min(repeated * float(repeated_boost.get("per_repeat", 0.0)), float(repeated_boost.get("cap", 0.0)))
         if repeated:
             evidence.append(f"{repeated} repeated messages suggest unresolved needs")
-    if area == "sentiment_recovery" and messages:
-        negative_terms = [word for word in ["angry", "frustrated", "upset", "disappointed", "bad"] if any(word in normalize_text(message) for message in messages)]
-        score += min(len(negative_terms) * 0.8, 2.4)
-        if negative_terms:
-            evidence.append("negative sentiment language detected in recent messages")
-    if area == "onboarding" and messages:
-        onboarding_terms = [word for word in ["how do i", "new here", "getting started", "first time", "setup"] if any(word in normalize_text(message) for message in messages)]
-        score += min(len(onboarding_terms) * 0.7, 2.1)
-        if onboarding_terms:
-            evidence.append("onboarding guidance requests detected")
-    if area == "notification_quality" and messages:
-        notification_terms = [word for word in ["notify", "notification", "alert", "remind", "reminder"] if any(word in normalize_text(message) for message in messages)]
-        score += min(len(notification_terms) * 0.6, 1.8)
-        if notification_terms:
-            evidence.append("notification and reminder language detected")
-    if area == "self_service" and messages:
-        self_service_terms = [word for word in ["faq", "self service", "self-service", "how to", "help center"] if any(word in normalize_text(message) for message in messages)]
-        score += min(len(self_service_terms) * 0.6, 1.8)
-        if self_service_terms:
-            evidence.append("self-service questions detected")
-    if area == "handoff" and messages:
-        handoff_terms = [word for word in ["agent", "transfer", "human", "someone", "escalate"] if any(word in normalize_text(message) for message in messages)]
-        score += min(len(handoff_terms) * 0.6, 1.8)
-        if handoff_terms:
-            evidence.append("handoff and escalation language detected")
-    if area == "trust" and messages:
-        trust_terms = [word for word in ["trust", "refund", "guarantee", "secure", "safe"] if any(word in normalize_text(message) for message in messages)]
-        score += min(len(trust_terms) * 0.5, 1.5)
-        if trust_terms:
-            evidence.append("trust-related concerns detected")
-    if area == "follow_up" and messages:
-        follow_up_terms = [word for word in ["follow up", "follow-up", "still waiting", "again", "remind"] if any(word in normalize_text(message) for message in messages)]
-        score += min(len(follow_up_terms) * 0.7, 2.1)
-        if follow_up_terms:
-            evidence.append("follow-up language detected")
+
+    if rule.get("kind") == "term_table" and messages:
+        terms = [
+            word for word in rule.get("terms", ())
+            if any(word in normalize_text(message) for message in messages)
+        ]
+        score += min(len(terms) * float(weight), float(rule.get("cap", 0.0)))
+        if terms:
+            evidence.append(str(rule.get("evidence", "relevant language detected")))
 
     return score, evidence
+
+
+def score_all_areas(messages: list[str], bookings: list[models.Booking]) -> dict[str, tuple[float, list[str]]]:
+    """Score every configured area in one pass, keyed by area name.
+
+    Future consumers (routing hooks, dashboards, dynamic policy engines) can iterate
+    this map instead of calling `score_area` per area.
+    """
+    return {area: score_area(messages, bookings, area) for area in AREA_SCORING_RULES}
+
+
+def build_area_scoring_catalog() -> list[dict[str, object]]:
+    """Return the active area-scoring rules as a JSON-friendly catalog.
+
+    Exposed publicly so operators and future admin surfaces can discover which
+    policy areas are scored, with what keywords, weights, and caps — and can
+    validate that new areas added to the rule table are picked up automatically.
+    """
+    catalog = []
+    for area, rule in sorted(AREA_SCORING_RULES.items()):
+        entry: dict[str, object] = {
+            "area": area,
+            "kind": rule.get("kind"),
+            "keywords": list(rule.get("keywords", ())) or list(rule.get("terms", ())),
+            "weight": rule.get("weight"),
+        }
+        if rule.get("recent_weight") is not None:
+            entry["recent_weight"] = rule.get("recent_weight")
+        if rule.get("cap") is not None:
+            entry["cap"] = rule.get("cap")
+        if rule.get("evidence"):
+            entry["evidence_label"] = rule.get("evidence")
+        if rule.get("booking_boost"):
+            entry["booking_boost"] = dict(rule["booking_boost"])
+        if rule.get("repeated_message_boost"):
+            entry["repeated_message_boost"] = dict(rule["repeated_message_boost"])
+        catalog.append(entry)
+    return catalog
+
+
+def build_area_keyword_catalog() -> dict[str, list[str]]:
+    """Map every scoring keyword back to the areas it drives.
+
+    Merges the rule-table keywords with the legacy `RETENTION_KEYWORDS` map so a
+    single dynamic keyword -> area index is available for routing and discovery.
+    """
+    mapping: dict[str, list[str]] = {}
+    for area, rule in AREA_SCORING_RULES.items():
+        for keyword in rule.get("keywords", ()) or rule.get("terms", ()):
+            mapping.setdefault(keyword, []).append(area)
+    for keyword, area in RETENTION_KEYWORDS.items():
+        areas = mapping.setdefault(keyword, [])
+        if area not in areas:
+            areas.append(area)
+    return mapping
 
 
 def _evidence_summary(evidence: list[str]) -> str:
@@ -449,7 +589,18 @@ def build_interaction_insights(messages: list[str], bookings: list[models.Bookin
     return insights
 
 
-async def load_user_interaction_window(db: AsyncSession, user_id: int, window_days: int = 30):
+async def load_user_interaction_window(
+    db: AsyncSession,
+    user_id: int,
+    window_days: int = 30,
+    chat_limit: Optional[int] = None,
+    booking_limit: Optional[int] = None,
+):
+    """Load the user's chat and booking rows inside the window.
+
+    `chat_limit` / `booking_limit` optionally cap how many rows are returned
+    (newest first) so callers can bound payload sizes without changing defaults.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     chat_query = (
         select(models.ChatHistory)
@@ -463,6 +614,10 @@ async def load_user_interaction_window(db: AsyncSession, user_id: int, window_da
         .where(models.Booking.created_at >= cutoff)
         .order_by(desc(models.Booking.created_at))
     )
+    if chat_limit is not None:
+        chat_query = chat_query.limit(max(0, int(chat_limit)))
+    if booking_limit is not None:
+        booking_query = booking_query.limit(max(0, int(booking_limit)))
     chat_result = await db.execute(chat_query)
     booking_result = await db.execute(booking_query)
     return chat_result.scalars().all(), booking_result.scalars().all()

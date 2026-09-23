@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import Base, engine, get_db
 from app.i18n import locale_payload
 from app.routers import bookings, chat, topics, users
+from app.services import chat_analytics, policy_scoring
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -198,6 +199,7 @@ async def app_feature_summary():
             "health": "/health",
             "metadata": "/meta",
             "ecosystem": "/meta/ecosystem",
+            "scoring_catalog": "/meta/scoring-catalog",
             "booking_analytics": "/bookings/analytics/summary",
             "booking_events": "/bookings/analytics/events",
             "booking_export": "/bookings/analytics/export",
@@ -205,6 +207,26 @@ async def app_feature_summary():
             "retention_dashboard": "/chat/retention-dashboard",
             "retention_maintenance": "/retention/maintenance",
         },
+    }
+
+
+@app.get("/meta/scoring-catalog")
+async def scoring_catalog():
+    """Expose the live, data-driven rule engines behind interaction scoring.
+
+    Future services can discover which policy areas are scored (keywords, weights,
+    caps), which keywords map to which areas, and the active policy tier / posture
+    / access-band thresholds — all driven by config tables instead of hardcoded
+    branches.
+    """
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "area_scoring": chat_analytics.build_area_scoring_catalog(),
+        "area_keywords": chat_analytics.build_area_keyword_catalog(),
+        "policy_tiers": policy_scoring.build_policy_tier_catalog(),
     }
 
 @app.get("/health")

@@ -23,6 +23,54 @@ from app.services.topics import (
 ACCESS_TIER_THRESHOLD = 70.0
 INTERNAL_ACCESS_TIER_THRESHOLD = 85.0
 
+# Data-driven policy tier / control posture / access band rules. The resolvers
+# below (`resolve_policy_tier`, `resolve_control_posture`, `resolve_access_band`)
+# are thin engines over these tables, so tiers, thresholds, and bands can be
+# adjusted or extended without touching decision code.
+POLICY_TIER_RANK: dict[str, int] = {
+    "restricted": 0,
+    "standard": 1,
+    "customer-premium": 2,
+    "system-premium": 3,
+}
+
+POLICY_TIER_RULES: list[dict[str, object]] = [
+    {
+        "tier": "system-premium",
+        "access_score_min": INTERNAL_ACCESS_TIER_THRESHOLD,
+        "system_score_min": INTERNAL_ACCESS_TIER_THRESHOLD,
+    },
+    {
+        "tier": "customer-premium",
+        "access_score_min": ACCESS_TIER_THRESHOLD,
+        "system_score_min": 0.0,
+    },
+    {
+        "tier": "standard",
+        "access_score_min": 40.0,
+        "system_score_min": 0.0,
+    },
+]
+
+CONTROL_POSTURE_TIER_MAP: dict[str, str] = {
+    "system-premium": "high_trust",
+    "customer-premium": "customer_trusted",
+}
+
+CONTROL_POSTURE_RULES: list[dict[str, object]] = [
+    {
+        "posture": "observed",
+        "access_score_min": 55.0,
+        "system_score_min": 55.0,
+    },
+]
+
+ACCESS_BAND_RULES: list[dict[str, object]] = [
+    {"band": "elite", "access_score_min": 90.0},
+    {"band": "strong", "access_score_min": 75.0},
+    {"band": "moderate", "access_score_min": 55.0},
+]
+
 
 @dataclass(frozen=True)
 class PolicyScoreSnapshot:
@@ -143,24 +191,54 @@ def _topic_signals(topic_text: str) -> dict[str, object]:
     }
 
 
-def _policy_tier(access_score: float, system_score: float) -> str:
-    if access_score >= INTERNAL_ACCESS_TIER_THRESHOLD and system_score >= INTERNAL_ACCESS_TIER_THRESHOLD:
-        return "system-premium"
-    if access_score >= ACCESS_TIER_THRESHOLD:
-        return "customer-premium"
-    if access_score >= 40:
-        return "standard"
+def resolve_policy_tier(access_score: float, system_score: float) -> str:
+    """First matching tier rule wins (rules are ordered highest -> lowest)."""
+    for rule in POLICY_TIER_RULES:
+        if access_score >= float(rule["access_score_min"]) and system_score >= float(rule["system_score_min"]):
+            return str(rule["tier"])
     return "restricted"
 
 
-def _control_posture(policy_tier: str, access_score: float, system_score: float) -> str:
-    if policy_tier == "system-premium":
-        return "high_trust"
-    if policy_tier == "customer-premium":
-        return "customer_trusted"
-    if access_score >= 55 and system_score >= 55:
-        return "observed"
+def resolve_control_posture(policy_tier: str, access_score: float, system_score: float) -> str:
+    if policy_tier in CONTROL_POSTURE_TIER_MAP:
+        return CONTROL_POSTURE_TIER_MAP[policy_tier]
+    for rule in CONTROL_POSTURE_RULES:
+        if access_score >= float(rule["access_score_min"]) and system_score >= float(rule["system_score_min"]):
+            return str(rule["posture"])
     return "constrained"
+
+
+def resolve_access_band(access_score: float) -> str:
+    for rule in ACCESS_BAND_RULES:
+        if access_score >= float(rule["access_score_min"]):
+            return str(rule["band"])
+    return "limited"
+
+
+def build_policy_tier_catalog() -> dict[str, object]:
+    """Return the active tier, posture, and band rules as a JSON-friendly catalog.
+
+    Future admin surfaces can inspect which thresholds are live without importing
+    internals, and can validate that new tiers added to the rule tables are picked
+    up automatically by the resolvers.
+    """
+    return {
+        "tier_rank": dict(POLICY_TIER_RANK),
+        "tier_rules": [dict(rule) for rule in POLICY_TIER_RULES],
+        "control_posture_tier_map": dict(CONTROL_POSTURE_TIER_MAP),
+        "control_posture_rules": [dict(rule) for rule in CONTROL_POSTURE_RULES],
+        "access_band_rules": [dict(rule) for rule in ACCESS_BAND_RULES],
+        "access_tier_threshold": ACCESS_TIER_THRESHOLD,
+        "internal_access_tier_threshold": INTERNAL_ACCESS_TIER_THRESHOLD,
+    }
+
+
+def _policy_tier(access_score: float, system_score: float) -> str:
+    return resolve_policy_tier(access_score, system_score)
+
+
+def _control_posture(policy_tier: str, access_score: float, system_score: float) -> str:
+    return resolve_control_posture(policy_tier, access_score, system_score)
 
 
 def _posture_adjusted_access_score(access_score: float, control_posture: str) -> float:
@@ -417,13 +495,7 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
 
 
 def build_policy_access_band(access_score: float) -> str:
-    if access_score >= 90:
-        return "elite"
-    if access_score >= 75:
-        return "strong"
-    if access_score >= 55:
-        return "moderate"
-    return "limited"
+    return resolve_access_band(access_score)
 
 
 def build_policy_score_breakdown(snapshot: PolicyScoreSnapshot) -> chat_schemas.PolicyScoreBreakdown:
@@ -605,5 +677,4 @@ async def upsert_customer_policy_score(db: AsyncSession, user: models.User) -> m
 
 
 def can_access_functionality(policy_score: models.CustomerPolicyScore, required_tier: str = "standard") -> bool:
-    tiers = {"restricted": 0, "standard": 1, "customer-premium": 2, "system-premium": 3}
-    return tiers.get(policy_score.policy_tier, 0) >= tiers.get(required_tier, 1)
+    return POLICY_TIER_RANK.get(policy_score.policy_tier, 0) >= POLICY_TIER_RANK.get(required_tier, 1)
