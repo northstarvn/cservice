@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import Base, engine, get_db
 from app.i18n import locale_payload
 from app.routers import bookings, chat, topics, users
-from app.services import chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy
+from app.services import chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -199,6 +199,29 @@ async def app_ecosystem():
                 "purpose": "communicate with users by precedence-ordered criteria: admin select, policy defined, culture, user profile (incl. history stats), and session mood",
                 "status": "ready",
             },
+            "arrears_payments": {
+                "routes": [
+                    "/chat/payments/arrears/quote",
+                    "/chat/payments/arrears",
+                    "/chat/admin/payments/arrears",
+                    "/chat/admin/payments/arrears/{entry_id}/settle",
+                    "/chat/admin/payments/arrears/{entry_id}/waive-interest",
+                ],
+                "purpose": "pay in arrears with interest applied by policy-selected terms (premium gets the best rates, high-risk gets short capped deferrals)",
+                "status": "ready",
+            },
+            "points_exchange": {
+                "routes": [
+                    "/chat/points/exchange/rates",
+                    "/chat/points/wallet",
+                    "/chat/points/transactions",
+                    "/chat/points/exchange/quote",
+                    "/chat/points/exchange",
+                    "/chat/admin/points/exchange",
+                ],
+                "purpose": "convert/exchange back and forth between certain types of points and money/currencies with config-driven rates, fees, and daily caps",
+                "status": "ready",
+            },
         },
         "capabilities": capabilities,
     }
@@ -228,6 +251,15 @@ async def app_feature_summary():
             "communication_strategy": "/chat/communication-strategy",
             "communication_strategy_admin": "/chat/admin/communication-strategy",
             "communication_overrides": "/chat/admin/communication-overrides",
+            "arrears_quote": "/chat/payments/arrears/quote",
+            "arrears_self": "/chat/payments/arrears",
+            "arrears_admin": "/chat/admin/payments/arrears",
+            "points_rates": "/chat/points/exchange/rates",
+            "points_wallet": "/chat/points/wallet",
+            "points_transactions": "/chat/points/transactions",
+            "points_quote": "/chat/points/exchange/quote",
+            "points_exchange": "/chat/points/exchange",
+            "points_admin_exchange": "/chat/admin/points/exchange",
         },
     }
 
@@ -253,6 +285,8 @@ async def scoring_catalog():
         "loyalty_scenarios": loyalty_journey.build_loyalty_scenario_catalog(),
         "activity_monitoring": activity_tree.build_activity_tree_catalog(),
         "communication_strategy": communication_strategy.build_communication_strategy_catalog(),
+        "arrears_payments": arrears_payments.build_arrears_catalog(),
+        "points_exchange": points_exchange.build_points_exchange_catalog(),
     }
 
 @app.get("/health")

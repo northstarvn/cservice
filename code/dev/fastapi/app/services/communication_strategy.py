@@ -1046,7 +1046,7 @@ async def list_communication_admin_overrides(
 # ---------------------------------------------------------------------------
 
 
-async def _load_user_strategy_inputs(
+async def load_user_strategy_context(
     db: AsyncSession, user_id: int, window_days: int
 ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     chat_rows, bookings = await load_user_interaction_window(
@@ -1146,7 +1146,7 @@ async def resolve_communication_strategy_for_user(
     locale: str = "global",
     user_name: str = "",
 ) -> CommunicationStrategyResult:
-    context, mood = await _load_user_strategy_inputs(db, user_id, window_days)
+    context, mood = await load_user_strategy_context(db, user_id, window_days)
     context["locale"] = locale or "global"
     override = await load_admin_override(db, user_id)
     payload = resolve_communication_strategy(
@@ -1178,7 +1178,7 @@ async def build_communication_strategy_admin_report(
 
     items: list[CommunicationAdminStrategyItem] = []
     for user_id, username in users:
-        context, mood = await _load_user_strategy_inputs(db, user_id, window_days)
+        context, mood = await load_user_strategy_context(db, user_id, window_days)
         context["locale"] = locale or "global"
         override = await load_admin_override(db, user_id)
         payload = resolve_communication_strategy(

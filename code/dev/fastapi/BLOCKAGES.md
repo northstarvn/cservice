@@ -110,5 +110,66 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   session-mood detection treats that as neutral and is keyword-cue driven.
 - Added `tests/test_communication_strategy_expansion.py` (28 tests).
 
+### Arrears payments with policy-selected interest (new: `services/arrears_payments.py`)
+- Capability: users may **pay in arrears** (defer a payment); interest terms
+  are **policy-selected**, not flat. `ARREARS_INTEREST_POLICIES` is a config
+  table of `when`-DSL policies — new customer growth deferral (9% / 30-day
+  grace), VIP premium deferral (6% / 45-day grace), high-risk secured deferral
+  (24% daily-compounded / 7-day grace, hard cap), large project installment
+  (service_type + principal-gated), trust-repair deferral (journey-family
+  gated), standard deferral, and a permissive universal fallback so every user
+  has baseline terms. Adding a policy is config-only.
+- Interest accrues only after the grace period, is computed on demand
+  (`compute_arrears_interest`: simple or daily-compounding, capped at a
+  percentage of principal), and the matched policy's terms are **snapshotted**
+  onto the row at open time so later catalog edits never rewrite open
+  agreements.
+- New table `arrears_entries` (`ArrearsEntry` model); statuses open/settled/
+  waived; settle charges accrued interest (principal-only after a waiver);
+  waive forgives accrued interest and yields to a principal-only settlement.
+- Routes: `GET/POST /chat/payments/arrears` (self list + open),
+  `GET /chat/payments/arrears/quote` (no-write quote),
+  `GET /chat/admin/payments/arrears` (rollup: principal/interest at risk,
+  overdue count, policy coverage),
+  `POST /chat/admin/payments/arrears/{entry_id}/settle`,
+  `POST /chat/admin/payments/arrears/{entry_id}/waive-interest`.
+- `main.py`: `/meta/scoring-catalog` exposes `arrears_payments` catalog;
+  `/meta/features` + new `arrears_payments` subservice in `/meta/ecosystem`.
+- Note: the journey engine scores an empty history as `value_tier: premium` /
+  `journey_family: onboarding`, so quote/open requests on a bare (no-history)
+  profile match the VIP policy and the premium exchange rule below. This is
+  inherited engine behavior (kept as-is).
+- Added `tests/test_arrears_payments_expansion.py` (33 tests).
+
+### Points <-> money/currency exchange (new: `services/points_exchange.py`)
+- Capability: convert/exchange **back and forth** between *certain types* of
+  points and money/currencies. `POINTS_EXCHANGE_RULES` is a config table: each
+  rule binds a (point_type, currency) pair and declares which directions are
+  allowed (`redeem` = points -> money, `purchase` = money -> points), the rate
+  (points per currency unit), fee %, minimums, daily caps, and `when`-DSL
+  eligibility. Examples: loyalty points redeem+purchase in USD/EUR (premium
+  users get 90 pts/$ vs 100 pts/$ standard), activity points gated to
+  non-new stages, cashback points redeem-only with no fee, referral points
+  cannot be purchased at all. Adding a rate/currency/rule is config-only.
+- Pure core `quote_points_exchange`/`select_exchange_rule` calculate
+  gross/net/fee and enforce minimums and daily caps both ways; execution
+  debits/credits a per-type wallet and writes a full ledger row
+  (`points_wallets` + `points_transactions` tables, `PointsWallet` /
+  `PointsTransaction` models; unique user/point_type on wallets).
+- Routes: `GET /chat/points/exchange/rates` (rate card),
+  `GET /chat/points/wallet` (balances incl. zero-filled convertible types),
+  `GET /chat/points/transactions` (ledger),
+  `POST /chat/points/exchange/quote` (no-write quote),
+  `POST /chat/points/exchange` (execute, both directions; 422 on
+  ineligibility/insufficient balance/daily-cap breach),
+  `GET /chat/admin/points/exchange` (cross-user rollup, top user, by-kind and
+  by-point-type coverage).
+- `main.py`: `/meta/scoring-catalog` exposes `points_exchange` catalog;
+  `/meta/features` + new `points_exchange` subservice in `/meta/ecosystem`.
+- Note: `_load_user_strategy_inputs` in `communication_strategy.py` was made
+  public as `load_user_strategy_context` (same signature) so the payment
+  engines share the user-metrics loader; both keep-as-is names untouched.
+- Added `tests/test_points_exchange_expansion.py` (30 tests).
+
 ## Open blockages
 - None.

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, ForeignKey, Enum as SAEnum, Boolean, func, CheckConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, ForeignKey, Enum as SAEnum, Boolean, func, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import relationship
 import enum
 from app.db import Base  # Import Base from db.py instead of creating new one
@@ -168,6 +168,74 @@ class UserCommunicationOverride(Base, TimestampMixin):
     profile_id = Column(String(50), nullable=False, index=True)
     set_by_admin_id = Column(Integer, nullable=False, default=0)
     note = Column(Text, nullable=False, default="")
+
+
+class ArrearsEntry(Base, TimestampMixin):
+    """A deferred payment (pay-in-arrears) with policy-selected interest terms.
+
+    The interest policy is chosen at open time by the config-driven
+    `ARREARS_INTEREST_POLICIES` engine and snapshotted onto the row so later
+    admin changes to the catalog never rewrite already-open agreements.
+    """
+    __tablename__ = "arrears_entries"
+    __table_args__ = (
+        CheckConstraint("principal >= 0", name="ck_arrears_entries_principal_non_negative"),
+        CheckConstraint("annual_rate >= 0", name="ck_arrears_entries_annual_rate_non_negative"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    booking_id = Column(Integer, nullable=True, index=True)
+    reference = Column(String(120), nullable=False, default="")
+    service_type = Column(String(50), nullable=False, default="consultation", index=True)
+    principal = Column(Float, nullable=False, default=0.0)
+    currency = Column(String(8), nullable=False, default="USD")
+    policy_id = Column(String(50), nullable=False, index=True)
+    annual_rate = Column(Float, nullable=False, default=0.0)
+    grace_days = Column(Integer, nullable=False, default=0)
+    compounding = Column(String(20), nullable=False, default="simple")
+    interest_cap_pct = Column(Float, nullable=False, default=100.0)
+    defer_days = Column(Integer, nullable=False, default=30)
+    interest_accrued = Column(Float, nullable=False, default=0.0)
+    status = Column(String(20), nullable=False, default="open", index=True)
+    opened_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    due_at = Column(DateTime(timezone=True), nullable=True)
+    settled_at = Column(DateTime(timezone=True), nullable=True)
+    settled_interest = Column(Float, nullable=False, default=0.0)
+    total_settled = Column(Float, nullable=False, default=0.0)
+    interest_waived = Column(Boolean, nullable=False, default=False)
+    waived_interest = Column(Float, nullable=False, default=0.0)
+    note = Column(Text, nullable=False, default="")
+
+
+class PointsWallet(Base, TimestampMixin):
+    """Per-user balance for a single point type (one row per user/type)."""
+    __tablename__ = "points_wallets"
+    __table_args__ = (
+        CheckConstraint("balance >= 0", name="ck_points_wallets_balance_non_negative"),
+        UniqueConstraint("user_id", "point_type", name="uq_points_wallets_user_type"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    point_type = Column(String(50), nullable=False, index=True)
+    balance = Column(Float, nullable=False, default=0.0)
+
+
+class PointsTransaction(Base, TimestampMixin):
+    """Ledger row for every points movement (earn, redeem, purchase, adjust)."""
+    __tablename__ = "points_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    point_type = Column(String(50), nullable=False, index=True)
+    kind = Column(String(30), nullable=False, index=True)
+    points_delta = Column(Float, nullable=False, default=0.0)
+    currency = Column(String(8), nullable=False, default="USD")
+    currency_amount = Column(Float, nullable=False, default=0.0)
+    rate = Column(Float, nullable=False, default=0.0)
+    fee = Column(Float, nullable=False, default=0.0)
+    reference = Column(String(120), nullable=False, default="")
 
 
 class User(Base, TimestampMixin):

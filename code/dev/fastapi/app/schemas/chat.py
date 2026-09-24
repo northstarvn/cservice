@@ -1298,3 +1298,226 @@ class CommunicationAdminStrategyReport(BaseModel):
     coverage_by_layer: Dict[str, int] = Field(default_factory=dict)
     top_layer: Optional[str] = None
     users: List[CommunicationAdminStrategyItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Arrears payments (pay later, policy-selected interest)
+# ---------------------------------------------------------------------------
+
+
+class ArrearsQuote(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    principal: float
+    currency: str
+    service_type: str
+    defer_days: int
+    eligible: bool
+    reason: str = ""
+    policy: Optional[Dict[str, Any]] = None
+    interest: float = 0.0
+    total_due: float = 0.0
+    days_after_grace: int = 0
+    matched_conditions: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ArrearsOpenRequest(BaseModel):
+    principal: float = Field(gt=0)
+    defer_days: int = Field(default=30, ge=1, le=365)
+    service_type: str = "consultation"
+    booking_id: Optional[int] = None
+    reference: str = ""
+    currency: str = "USD"
+    note: str = ""
+
+
+class ArrearsEntryOut(BaseModel):
+    id: int
+    user_id: int
+    username: str = ""
+    booking_id: Optional[int] = None
+    reference: str = ""
+    service_type: str
+    principal: float
+    currency: str
+    policy_id: str
+    annual_rate: float
+    grace_days: int
+    compounding: str
+    interest_cap_pct: float
+    defer_days: int
+    status: str
+    opened_at: Optional[datetime] = None
+    due_at: Optional[datetime] = None
+    days_elapsed: int = 0
+    past_due: bool = False
+    interest_accrued: float = 0.0
+    free_of_interest: bool = False
+    total_due: float = 0.0
+    settled_at: Optional[datetime] = None
+    settled_interest: float = 0.0
+    total_settled: float = 0.0
+    interest_waived: bool = False
+    waived_interest: float = 0.0
+    note: str = ""
+
+
+class ArrearsListReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    total: int
+    open_total_principal: float = 0.0
+    open_total_interest: float = 0.0
+    entries: List[ArrearsEntryOut] = Field(default_factory=list)
+
+
+class ArrearsAdminReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    limit: int
+    total_entries: int
+    total_open: int = 0
+    total_settled: int = 0
+    total_waived: int = 0
+    principal_at_risk: float = 0.0
+    interest_at_risk: float = 0.0
+    overdue_count: int = 0
+    coverage_by_policy: Dict[str, int] = Field(default_factory=dict)
+    top_policy: Optional[str] = None
+    entries: List[ArrearsEntryOut] = Field(default_factory=list)
+
+
+class ArrearsSettleResult(BaseModel):
+    generated_at: datetime
+    entry: ArrearsEntryOut
+    interest_charged: float = 0.0
+    principal: float = 0.0
+    total_paid: float = 0.0
+
+
+class ArrearsWaiveResult(BaseModel):
+    generated_at: datetime
+    entry: ArrearsEntryOut
+    waived_interest: float = 0.0
+    principal: float = 0.0
+    total_owed: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Points <-> money/currency exchange
+# ---------------------------------------------------------------------------
+
+
+class PointsExchangeRates(BaseModel):
+    generated_at: datetime
+    catalog_version: str
+    currencies: List[str] = Field(default_factory=list)
+    point_types: List[Dict[str, Any]] = Field(default_factory=list)
+    rules: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class PointsWalletItem(BaseModel):
+    point_type: str
+    balance: float = 0.0
+    redeem_enabled: bool = False
+    purchase_enabled: bool = False
+    updated_at: Optional[datetime] = None
+
+
+class PointsWalletReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    total_balance: float = 0.0
+    redeemable_balance: float = 0.0
+    convertible_types: int = 0
+    wallets: List[PointsWalletItem] = Field(default_factory=list)
+
+
+class PointsTransactionOut(BaseModel):
+    id: int
+    user_id: int
+    username: str = ""
+    point_type: str
+    kind: str
+    points_delta: float
+    currency: str
+    currency_amount: float
+    rate: float
+    fee: float
+    reference: str = ""
+    created_at: Optional[datetime] = None
+
+
+class PointsTransactionsReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    total: int
+    transactions: List[PointsTransactionOut] = Field(default_factory=list)
+
+
+class PointsExchangeQuoteRequest(BaseModel):
+    point_type: str = Field(min_length=2, max_length=50)
+    direction: str = Field(pattern="^(redeem|purchase)$")
+    amount: float = Field(gt=0)
+    currency: str = "USD"
+
+
+class PointsExchangeQuote(BaseModel):
+    generated_at: datetime
+    user_id: int
+    point_type: str
+    direction: str
+    currency: str
+    eligible: bool
+    reason: str = ""
+    rule: Optional[Dict[str, Any]] = None
+    input_amount: float = 0.0
+    input_unit: str = ""
+    output_amount: float = 0.0
+    output_unit: str = ""
+    fee: float = 0.0
+    points_per_unit: float = 0.0
+    daily_used_money: float = 0.0
+    daily_max_money: float = 0.0
+    exceeds_daily_cap: bool = False
+    matched_conditions: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PointsExchangeRequest(BaseModel):
+    point_type: str = Field(min_length=2, max_length=50)
+    direction: str = Field(pattern="^(redeem|purchase)$")
+    amount: float = Field(gt=0)
+    currency: str = "USD"
+    reference: str = ""
+
+
+class PointsExchangeResult(BaseModel):
+    generated_at: datetime
+    user_id: int
+    point_type: str
+    direction: str
+    currency: str
+    transaction_id: int = 0
+    kind: str
+    points_delta: float
+    currency_amount: float
+    gross_output: float = 0.0
+    fee: float = 0.0
+    rate: float = 0.0
+    new_balance: float = 0.0
+    reference: str = ""
+
+
+class PointsAdminReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    limit: int
+    total_transactions: int
+    total_redeemed_points: float = 0.0
+    total_purchased_points: float = 0.0
+    total_money_moved: float = 0.0
+    top_user: Optional[str] = None
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    by_point_type: Dict[str, int] = Field(default_factory=dict)
+    transactions: List[PointsTransactionOut] = Field(default_factory=list)

@@ -79,6 +79,21 @@ from app.schemas.chat import (
     CommunicationAdminOverrideItem,
     CommunicationOverrideReport,
     CommunicationAdminStrategyReport,
+    ArrearsEntryOut,
+    ArrearsOpenRequest,
+    ArrearsQuote,
+    ArrearsListReport,
+    ArrearsAdminReport,
+    ArrearsSettleResult,
+    ArrearsWaiveResult,
+    PointsExchangeRates,
+    PointsExchangeQuoteRequest,
+    PointsExchangeQuote,
+    PointsExchangeRequest,
+    PointsExchangeResult,
+    PointsWalletReport,
+    PointsTransactionsReport,
+    PointsAdminReport,
 )
 from app.services.chat_analytics import (
     analyze_sentiment,
@@ -123,6 +138,22 @@ from app.services.communication_strategy import (
     list_communication_admin_overrides,
     resolve_communication_strategy_for_user,
     set_communication_admin_override,
+)
+from app.services.arrears_payments import (
+    build_arrears_admin_report,
+    list_user_arrears,
+    open_arrears_payment,
+    quote_arrears_for_user,
+    settle_arrears_entry,
+    waive_arrears_interest,
+)
+from app.services.points_exchange import (
+    build_points_exchange_admin_report,
+    build_points_exchange_rates,
+    execute_points_exchange_for_user,
+    list_user_point_transactions,
+    list_user_wallets,
+    quote_points_exchange_for_user,
 )
 from app.services.retention_snapshots import (
     _build_retention_snapshot_action_plan,
@@ -1906,3 +1937,178 @@ async def delete_communication_override_admin(
             detail="No communication override exists for this user",
         )
     return await list_communication_admin_overrides(db, 50)
+
+
+# ---------------------------------------------------------------------------
+# Arrears payments (pay in arrears, policy-selected interest)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/chat/payments/arrears/quote", response_model=ArrearsQuote)
+async def quote_arrears_self(
+    principal: float = Query(gt=0),
+    defer_days: int = Query(default=30, ge=1, le=365),
+    service_type: str = Query(default="consultation", max_length=50),
+    currency: str = Query(default="USD", max_length=8),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await quote_arrears_for_user(
+        db,
+        current_user.id,
+        principal,
+        defer_days,
+        service_type=service_type,
+        currency=currency,
+    )
+
+
+@router.get("/chat/payments/arrears", response_model=ArrearsListReport)
+async def list_user_arrears_self(
+    status: Optional[str] = Query(default=None, pattern="^(open|settled|waived)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await list_user_arrears(db, current_user.id, status_filter=status, limit=limit)
+
+
+@router.post("/chat/payments/arrears", response_model=ArrearsEntryOut)
+async def open_arrears_self(
+    payload: ArrearsOpenRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        return await open_arrears_payment(
+            db,
+            current_user.id,
+            payload.principal,
+            payload.defer_days,
+            service_type=payload.service_type,
+            booking_id=payload.booking_id,
+            reference=payload.reference,
+            currency=payload.currency,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+@router.get("/chat/admin/payments/arrears", response_model=ArrearsAdminReport)
+async def arrears_admin_report(
+    status: Optional[str] = Query(default=None, pattern="^(open|settled|waived)$"),
+    window_days: int = Query(default=30, ge=7, le=365),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_arrears_admin_report(
+        db, status_filter=status, window_days=window_days, limit=limit
+    )
+
+
+@router.post("/chat/admin/payments/arrears/{entry_id}/settle", response_model=ArrearsSettleResult)
+async def settle_arrears_admin(
+    entry_id: int,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    try:
+        result = await settle_arrears_entry(db, entry_id, settled_by=current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arrears entry not found")
+    return result
+
+
+@router.post("/chat/admin/payments/arrears/{entry_id}/waive-interest", response_model=ArrearsWaiveResult)
+async def waive_arrears_admin(
+    entry_id: int,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    try:
+        result = await waive_arrears_interest(db, entry_id, waived_by=current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arrears entry not found")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Points <-> money/currency exchange
+# ---------------------------------------------------------------------------
+
+
+@router.get("/chat/points/exchange/rates", response_model=PointsExchangeRates)
+async def points_exchange_rates_self(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return build_points_exchange_rates()
+
+
+@router.get("/chat/points/wallet", response_model=PointsWalletReport)
+async def points_wallet_self(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await list_user_wallets(db, current_user.id)
+
+
+@router.get("/chat/points/transactions", response_model=PointsTransactionsReport)
+async def points_transactions_self(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await list_user_point_transactions(db, current_user.id, limit=limit)
+
+
+@router.post("/chat/points/exchange/quote", response_model=PointsExchangeQuote)
+async def points_exchange_quote_self(
+    payload: PointsExchangeQuoteRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await quote_points_exchange_for_user(
+        db,
+        current_user.id,
+        payload.point_type,
+        payload.direction,
+        payload.amount,
+        payload.currency,
+    )
+
+
+@router.post("/chat/points/exchange", response_model=PointsExchangeResult)
+async def points_exchange_execute_self(
+    payload: PointsExchangeRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        return await execute_points_exchange_for_user(
+            db,
+            current_user.id,
+            payload.point_type,
+            payload.direction,
+            payload.amount,
+            payload.currency,
+            reference=payload.reference,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+@router.get("/chat/admin/points/exchange", response_model=PointsAdminReport)
+async def points_exchange_admin_report(
+    window_days: int = Query(default=30, ge=7, le=365),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_points_exchange_admin_report(db, window_days=window_days, limit=limit)
