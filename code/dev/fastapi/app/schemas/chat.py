@@ -1211,3 +1211,90 @@ class ActivityTreeReport(BaseModel):
     root: ActivityTreeNode
     summary: str = ""
     highlights: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Communication-strategy resolution (how to talk to a user)
+# ---------------------------------------------------------------------------
+
+
+class CommunicationLayerDecision(BaseModel):
+    layer: str
+    precedence: int
+    matched: bool
+    reason: str = ""
+
+
+class CommunicationStrategyParams(BaseModel):
+    tone: str
+    channel: str
+    formality: str
+    framing: str
+    greeting_style: str
+    reply_urgency: str
+
+
+class CommunicationStrategyResult(BaseModel):
+    generated_at: datetime
+    user_id: int
+    user_name: str = ""
+    window_days: int
+    resolved_layer: str
+    precedence: int
+    layer_label: str = ""
+    profile_id: str
+    locale: str
+    params: CommunicationStrategyParams
+    mood: Optional[Dict[str, Any]] = None
+    guidance: List[str] = Field(default_factory=list)
+    matched_rule: Optional[Dict[str, Any]] = None
+    decision_trail: List[CommunicationLayerDecision] = Field(default_factory=list)
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CommunicationOverrideCreate(BaseModel):
+    user_id: int
+    profile_id: str
+    note: str = ""
+
+
+class CommunicationAdminOverrideItem(BaseModel):
+    user_id: int
+    username: str = ""
+    profile_id: str
+    profile_label: str = ""
+    note: str = ""
+    set_by_admin_id: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class CommunicationOverrideReport(BaseModel):
+    generated_at: datetime
+    total: int
+    overrides: List[CommunicationAdminOverrideItem] = Field(default_factory=list)
+
+
+class CommunicationAdminStrategyItem(BaseModel):
+    user_id: int
+    username: str = ""
+    resolved_layer: str
+    profile_id: str
+    tone: str
+    channel: str
+    reply_urgency: str = "normal"
+    loyalty_score: float = 0.0
+    journey_family: str = ""
+    mood_label: str = ""
+    precedence: int = 0
+
+
+class CommunicationAdminStrategyReport(BaseModel):
+    generated_at: datetime
+    window_days: int
+    limit: int
+    total_users: int
+    total_matched: int
+    coverage_by_layer: Dict[str, int] = Field(default_factory=dict)
+    top_layer: Optional[str] = None
+    users: List[CommunicationAdminStrategyItem] = Field(default_factory=list)

@@ -74,6 +74,11 @@ from app.schemas.chat import (
     LoyaltyJourneyPlan,
     LoyaltyJourneyAdminReport,
     ActivityTreeReport,
+    CommunicationStrategyResult,
+    CommunicationOverrideCreate,
+    CommunicationAdminOverrideItem,
+    CommunicationOverrideReport,
+    CommunicationAdminStrategyReport,
 )
 from app.services.chat_analytics import (
     analyze_sentiment,
@@ -111,6 +116,13 @@ from app.services.loyalty_journey import (
 from app.services.activity_tree import (
     build_activity_tree,
     build_self_activity_tree,
+)
+from app.services.communication_strategy import (
+    build_communication_strategy_admin_report,
+    delete_communication_admin_override,
+    list_communication_admin_overrides,
+    resolve_communication_strategy_for_user,
+    set_communication_admin_override,
 )
 from app.services.retention_snapshots import (
     _build_retention_snapshot_action_plan,
@@ -1823,3 +1835,74 @@ async def get_activity_tree_admin(
         with_activities=with_activities,
         activity_kind=activity_kind,
     )
+
+
+@router.get("/chat/communication-strategy", response_model=CommunicationStrategyResult)
+async def get_communication_strategy_self(
+    window_days: int = Query(default=30, ge=7, le=365),
+    locale: Optional[str] = Query(default="global", max_length=16),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    return await resolve_communication_strategy_for_user(
+        db,
+        current_user.id,
+        window_days,
+        locale=locale,
+        user_name=getattr(current_user, "username", ""),
+    )
+
+
+@router.get("/chat/admin/communication-strategy", response_model=CommunicationAdminStrategyReport)
+async def get_communication_strategy_admin(
+    window_days: int = Query(default=30, ge=7, le=365),
+    limit: int = Query(default=20, ge=1, le=200),
+    locale: Optional[str] = Query(default="global", max_length=16),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await build_communication_strategy_admin_report(
+        db, window_days, limit, locale=locale
+    )
+
+
+@router.get("/chat/admin/communication-overrides", response_model=CommunicationOverrideReport)
+async def list_communication_overrides_admin(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    return await list_communication_admin_overrides(db, limit)
+
+
+@router.post("/chat/admin/communication-overrides", response_model=CommunicationAdminOverrideItem)
+async def set_communication_override_admin(
+    payload: CommunicationOverrideCreate,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    try:
+        return await set_communication_admin_override(
+            db,
+            payload.user_id,
+            payload.profile_id,
+            getattr(current_user, "id", 0),
+            payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+@router.delete("/chat/admin/communication-overrides/{user_id}", response_model=CommunicationOverrideReport)
+async def delete_communication_override_admin(
+    user_id: int,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    removed = await delete_communication_admin_override(db, user_id)
+    if not removed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No communication override exists for this user",
+        )
+    return await list_communication_admin_overrides(db, 50)

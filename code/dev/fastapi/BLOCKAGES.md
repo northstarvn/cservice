@@ -81,5 +81,34 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   subservice in `/meta/ecosystem` document the surface.
 - Added `tests/test_activity_tree_expansion.py` (29 tests).
 
+### Communication-strategy resolution (new: `services/communication_strategy.py`)
+- Capability to communicate with users based on many criteria **in precedence
+  order**: 1) admin select, 2) policy defined, 3) culture, 4) user profile
+  (incl. collected history stats), 5) user mood present in the session,
+  6) default fallback. Every resolution returns the full decision trail so the
+  chosen tone/channel/framing is explainable.
+- Config tables (adding a profile/rule/culture/mood/cue is config-only):
+  `COMMUNICATION_OVERRIDE_CATALOG` (admin-selectable profiles),
+  `COMMUNICATION_POLICY_RULES` (`when`-DSL over the user context incl.
+  numeric ops and top-issue lists), `COMMUNICATION_CULTURE_RULES`
+  (locale-keyed, `global` fallback excluded from matching),
+  `COMMUNICATION_PROFILE_RULES` (stage/tier/churn/family/readiness),
+  `COMMUNICATION_MOOD_RULES` + `COMMUNICATION_MOOD_CUES` (keyword-cue session
+  mood detection layered on sentiment).
+- New table `communication_overrides` (`UserCommunicationOverride` model) so an
+  admin selection persists per user (unique user_id).
+- Routes: `GET /chat/communication-strategy` (self),
+  `GET /chat/admin/communication-strategy` (per-user rollup + layer coverage),
+  `GET /chat/admin/communication-overrides`,
+  `POST /chat/admin/communication-overrides`,
+  `DELETE /chat/admin/communication-overrides/{user_id}`.
+- `main.py`: `/meta/scoring-catalog` exposes `communication_strategy` catalog
+  (precedence, override catalog, policy/culture/profile/mood rules, mood cues);
+  `/meta/features` + new `communication_strategy` subservice in
+  `/meta/ecosystem` document the surface.
+- Note: `analyze_sentiment` calls Hugging Face and returns `None` on failure;
+  session-mood detection treats that as neutral and is keyword-cue driven.
+- Added `tests/test_communication_strategy_expansion.py` (28 tests).
+
 ## Open blockages
 - None.

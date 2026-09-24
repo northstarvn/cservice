@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import Base, engine, get_db
 from app.i18n import locale_payload
 from app.routers import bookings, chat, topics, users
-from app.services import chat_analytics, loyalty_journey, policy_scoring, activity_tree
+from app.services import chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -190,6 +190,15 @@ async def app_ecosystem():
                 "purpose": "tree-structured customer activity monitoring with configurable grouping, ranking, smart filtering, and anomaly highlighting",
                 "status": "ready",
             },
+            "communication_strategy": {
+                "routes": [
+                    "/chat/communication-strategy",
+                    "/chat/admin/communication-strategy",
+                    "/chat/admin/communication-overrides",
+                ],
+                "purpose": "communicate with users by precedence-ordered criteria: admin select, policy defined, culture, user profile (incl. history stats), and session mood",
+                "status": "ready",
+            },
         },
         "capabilities": capabilities,
     }
@@ -216,6 +225,9 @@ async def app_feature_summary():
             "loyalty_admin_journey": "/chat/admin/loyalty-journey",
             "activity_tree": "/chat/activity-tree",
             "activity_tree_admin": "/chat/admin/activity-tree",
+            "communication_strategy": "/chat/communication-strategy",
+            "communication_strategy_admin": "/chat/admin/communication-strategy",
+            "communication_overrides": "/chat/admin/communication-overrides",
         },
     }
 
@@ -240,6 +252,7 @@ async def scoring_catalog():
         "policy_tiers": policy_scoring.build_policy_tier_catalog(),
         "loyalty_scenarios": loyalty_journey.build_loyalty_scenario_catalog(),
         "activity_monitoring": activity_tree.build_activity_tree_catalog(),
+        "communication_strategy": communication_strategy.build_communication_strategy_catalog(),
     }
 
 @app.get("/health")

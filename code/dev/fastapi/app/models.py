@@ -155,6 +155,21 @@ class ServiceType(enum.Enum):
     meeting = "meeting"
     project = "project"
 
+class UserCommunicationOverride(Base, TimestampMixin):
+    """Admin-selected communication profile for a user.
+
+    Highest-precedence criterion in the communication-strategy resolver
+    (admin_select layer). At most one row per user (unique user_id).
+    """
+    __tablename__ = "communication_overrides"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    profile_id = Column(String(50), nullable=False, index=True)
+    set_by_admin_id = Column(Integer, nullable=False, default=0)
+    note = Column(Text, nullable=False, default="")
+
+
 class User(Base, TimestampMixin):
     __tablename__ = "users"
     
