@@ -5,9 +5,7 @@ from sqlalchemy.future import select
 from app.db import get_db
 from app import models, security
 from app.services.policy_scoring import can_access_functionality, upsert_customer_policy_score
-import jwt
 
-# Security scheme
 security_scheme = HTTPBearer()
 
 
@@ -20,34 +18,53 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     db: AsyncSession = Depends(get_db)
 ) -> models.User:
-    """Get current authenticated user from JWT token"""
+    """Get current authenticated user from JWT token."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            security.SECRET_KEY,
-            algorithms=[security.ALGORITHM]
-        )
-    except Exception:
+        payload = security.decode_access_token(credentials.credentials)
+    except ValueError:
         raise credentials_exception
 
     username = payload.get("sub")
     if not username:
         raise credentials_exception
-    
+
     # Get user from database
     query = select(models.User).where(models.User.username == username)
     result = await db.execute(query)
     user = result.scalar_one_or_none()
-    
+
     if user is None:
         raise credentials_exception
     return user
+
+
+async def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> models.User | None:
+    """Resolve the current user, or return None when unauthenticated.
+
+    Used by surfaces that are richer when the caller is known but must stay
+    publicly reachable otherwise (metadata and lightweight probe routes).
+    """
+    if credentials is None:
+        return None
+    try:
+        payload = security.decode_access_token(credentials.credentials)
+    except ValueError:
+        return None
+    username = payload.get("sub")
+    if not username:
+        return None
+    query = select(models.User).where(models.User.username == username)
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
 
 
 async def get_current_admin_user(current_user: models.User = Depends(get_current_user)) -> models.User:

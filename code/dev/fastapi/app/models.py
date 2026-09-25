@@ -2,19 +2,15 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, Float, ForeignKe
 from sqlalchemy.orm import relationship
 import enum
 from app.db import Base  # Import Base from db.py instead of creating new one
-
-
-class TimestampMixin:
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
-
-    def touch(self):
-        self.updated_at = func.now()
+from app.model_bases import (  # isolated polymorphic base models
+    AccessSecurityEvent,
+    AuthenticationSecurityEvent,
+    PartitionedMixin,
+    RiskSecurityEvent,
+    SecurityEvent,
+    TenantScopedMixin,
+    TimestampMixin,
+)
 
 
 
@@ -154,6 +150,32 @@ class ServiceType(enum.Enum):
     delivery = "delivery"
     meeting = "meeting"
     project = "project"
+
+class AuditLogEntry(Base, TimestampMixin):
+    """Immutable trail of operator and system actions.
+
+    Mirrors the explainability guardrails: every important decision (override,
+    assignment, policy change, settlement) can be recorded here so the backend
+    can later answer *who did what, on which entity, and why*.
+    """
+    __tablename__ = "audit_log_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('info','warning','critical')",
+            name="ck_audit_log_entries_severity_valid",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    action = Column(String(80), nullable=False, index=True)
+    entity_type = Column(String(50), nullable=False, default="system", index=True)
+    entity_id = Column(String(120), nullable=False, default="", index=True)
+    summary = Column(Text, nullable=False, default="")
+    detail_json = Column(Text, nullable=False, default="{}")
+    severity = Column(String(20), nullable=False, default="info", index=True)
+    source = Column(String(50), nullable=False, default="api", index=True)
+
 
 class UserCommunicationOverride(Base, TimestampMixin):
     """Admin-selected communication profile for a user.

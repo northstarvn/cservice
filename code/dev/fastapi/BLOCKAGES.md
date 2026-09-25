@@ -171,5 +171,85 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   engines share the user-metrics loader; both keep-as-is names untouched.
 - Added `tests/test_points_exchange_expansion.py` (30 tests).
 
+### Small-component expansion (infra + audit trail)
+- `security.py` (25 -> 121 LOC): access vs refresh token types (`typ` claim),
+  `decode_access_token` (used by `deps.py`), configurable password-strength
+  policy with `password_policy_payload`; `create_access_token` behavior for
+  existing callers is unchanged (adds `typ=access` claim only).
+- `db.py` (35 -> 103 LOC): env-tunable pool settings (`DB_POOL_SIZE`,
+  `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_ECHO`), non-raising
+  `ping_database`, `retry_async` for idempotent recovery paths; `engine`,
+  `Base`, `SessionLocal`, `get_db`, `test_connection` untouched.
+- `i18n.py` (42 -> 152 LOC): French locale added (requirements mandate
+  en/es/fr), `MESSAGE_CATALOG` with per-locale templates, `translate()` with
+  English fallback, `build_i18n_catalog()`; `resolve_locale`/`locale_payload`
+  contracts unchanged.
+- `deps.py` (78 -> 95 LOC): decode now delegates to
+  `security.decode_access_token`; new `get_current_user_optional` dependency.
+- New audit-trail domain (smallest public surface was `routers/audit.py`):
+  - `models.AuditLogEntry` (persisted, severity constrained to
+    info/warning/critical).
+  - `services/audit_log.py` (185 LOC): `AUDIT_ACTION_CATALOG` config table,
+    `record_audit_log_entry`, `list_audit_log_entries`, `count_audit_log_entries`,
+    `build_audit_log_summary`, `build_audit_log_catalog`.
+  - Routes: `POST /audit/log` (201), `GET /audit/logs` (filterable),
+    `GET /audit/logs/summary`, `GET /audit/trail-catalog`.
+  - `main.py`: `audit_trail` + `localization` subservices in `/meta/ecosystem`,
+    new endpoint keys in `/meta/features`, `audit_log`/`i18n`/`password_policy`
+    catalogs in `/meta/scoring-catalog`, and `GET /meta/i18n`.
+- New code map artifact: `CODE_MAP.newick` (strict single-line Newick tree of
+  the whole backend) + `CODE_MAP.md` (governance, reading rules, revision log).
+- Added `tests/test_security_infra_expansion.py` (13 tests) and
+  `tests/test_audit_log_expansion.py` (14 tests); suite 351 -> 378 passing.
+
+### Backend evolution stages 1A/1B/1C (multi-tenancy, zero-trust, event pipeline)
+- New infra modules (app/ root, all opt-in — single-tenant defaults untouched):
+  - Stage 1A: `tenant_router.py` (`TenantRouter`: runtime register/deregister,
+    DSN template/declarations, `get_tenant_session`/`get_tenant_db`/
+    `get_request_tenant_id`, catalog) + `partition_manager.py`
+    (`PARTITION_POLICIES` config, ensure/archive/drop-expired,
+    `run_partition_cycle_forever` worker behind `CSERVICE_PARTITION_WORKER`).
+  - Stage 1B: `hsm_signer.py` (`HsmSigner` protocol; `hmac` default backend,
+    `ed25519`/`mock` via `HSM_BACKEND`; sign/verify, signature envelopes,
+    catalog), `biometric_vault.py` (salted-digest vault, similarity-matched
+    validation, `_digest_similarity` matching bug fixed),
+    `risk_evaluator.py` (`RISK_RULES` config, levels, adaptive weights with
+    `reset_weight_state()`), `cell_matrix.py` (`CELL_MATRIX` config, role
+    groups, cell access evaluation).
+  - Stage 1C: `protobuf_transaction_spec.py` (self-contained protobuf wire
+    encoder — varint + length-delimited, deterministic field order, **no
+    protoc/generated code**; SHA-256 `prev_hash` frame chain; optional
+    file-backed append-only log via `TRANSACTION_LOG_PATH`) +
+    `high_throughput_pipeline.py` (bounded queue, workers, submit/batch/
+    drain/dead-letter/stats, protobuf-sink flush; autostart behind
+    `CSERVICE_PIPELINE_AUTOSTART`).
+- `model_bases.py`: isolated polymorphic bases (`TimestampMixin`,
+  `TenantScopedMixin`, `PartitionedMixin`) + single-table-inheritance
+  `SecurityEvent` family; `models.py` derives from it and re-exports
+  `TimestampMixin` (flat `models.py` untouched otherwise — no alembic risk).
+- New audit endpoints in `routers/audit.py`: `POST /audit/pipeline/event`
+  (202, async — accepted events stay queued until workers/`drain()`/`stop()`
+  flush them to the transaction log), `GET /audit/pipeline/stats`,
+  `GET /audit/transactions`, `GET /audit/transactions/spec`; 5 new schemas
+  in `schemas/audit.py`.
+- New meta endpoints `/meta/tenants`, `/meta/partitions`, `/meta/zero-trust`;
+  `main.py` adds `tenant_routing`, `partition_management`, `zero_trust`,
+  `high_velocity_audit` subservices + features/scoring-catalog keys; lifespan
+  wires partition worker + pipeline + `tenant_router.registry.dispose_all`
+  (all env-gated, default off).
+- **Code map now in-repo**: `scripts/build_code_map.py` is the builder
+  (nested tuples → serialize → parse-validate; prints `leaves=N
+  internal_nodes=M`); map regenerated to 230 leaves / 44 internal nodes
+  (was 174/32), revision bumped to `r2` with new infra groups
+  `multi_tenant` / `zero_trust` / `event_pipeline` and models group
+  `model_bases`.
+- **Pipeline semantics**: event ingestion is a queued accept (202), not a
+  synchronous write — durability happens when workers run or on
+  `drain()`/`stop()`.
+- Tests: `tests/test_tenant_router_expansion.py` (14),
+  `tests/test_zero_trust_expansion.py` (17),
+  `tests/test_high_velocity_audit_expansion.py` (18) — suite 378 → 427
+  passing.
+
 ## Open blockages
 - None.
