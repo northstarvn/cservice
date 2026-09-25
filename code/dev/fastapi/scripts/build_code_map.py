@@ -42,7 +42,7 @@ TREE = _node(
             "main",
             "startup_lifespan", "cors", "exception_handler", "meta", "health",
             "runtime", "scoring_catalog", "i18n_endpoint", "features", "ecosystem",
-            "tenants", "partitions", "zero_trust",
+            "tenants", "partitions", "zero_trust", "decisions",
         ),
         _node(
             "db",
@@ -85,6 +85,17 @@ TREE = _node(
                   "workers", "batch", "submit", "drain", "dead_letter", "stats", "catalog"),
             _node("protobuf_transaction_spec",
                   "wire_format", "transaction", "hash_chain", "append_only_log", "spec_catalog"),
+        ),
+        _node(  # Phase 1: decision quality & consistency
+            "decision_intelligence",
+            _node("model_versioning",
+                  "registry", "snapshots", "canary", "shadow_scoring", "promote", "catalog"),
+            _node("simulation_engine",
+                  "what_if", "risk_scenarios", "retention_scenarios", "reports", "catalog"),
+            _node("explainability",
+                  "decision_trace", "trace_store", "explain", "factor_trail", "catalog"),
+            _node("optimistic_locking",
+                  "version_guard", "compare_and_swap", "stale_conflict", "conflict_policy"),
         ),
     ),
     _node(  # models -----------------------------------------------------------

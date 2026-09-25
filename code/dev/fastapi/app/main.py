@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 import platform
 
 import uvicorn
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,11 +23,15 @@ from app import security
 from app import (
     biometric_vault,
     cell_matrix,
+    explainability,
     high_throughput_pipeline,
     hsm_signer,
+    model_versioning,
+    optimistic_locking,
     partition_manager,
     protobuf_transaction_spec,
     risk_evaluator,
+    simulation_engine,
     tenant_router,
 )
 
@@ -45,6 +50,50 @@ APP_CORS_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+
+
+# --- Decision-intelligence tooling contracts (Phase 1) -----------------------
+
+
+class DecisionSimulateRequest(BaseModel):
+    """What-if simulation payload: pick a kind, pass kind-specific overrides."""
+
+    kind: str = Field(..., pattern="^(risk|retention)$")
+    context: dict = Field(default_factory=dict, description="risk kind: request context to re-score")
+    weight_overrides: dict[str, float] | None = Field(
+        default=None, description="risk kind: rule_id -> replacement weight on the variant table"
+    )
+    disabled_rules: list[str] | None = Field(
+        default=None, description="risk kind: rule_ids removed from the variant table"
+    )
+    level_max_overrides: dict[str, int] | None = Field(
+        default=None, description="risk kind: level -> new max score (threshold retune)"
+    )
+    retention_overrides: dict[str, int] | None = Field(
+        default=None, description="retention kind: policy_id -> days for the variant run"
+    )
+    active_partitions: list[dict] | None = Field(
+        default=None, description="retention kind: partition records to replay (defaults to live active set)"
+    )
+    moment: str | None = Field(
+        default=None, description="retention kind: ISO-8601 moment; defaults to now"
+    )
+    label: str = Field(default="what-if", max_length=120)
+
+
+class CanaryRunRequest(BaseModel):
+    """Shadow-mode canary run: serve from active, score with the candidate."""
+
+    model_name: str = Field(..., min_length=1, max_length=80)
+    context: dict = Field(default_factory=dict)
+    entity_ref: str = Field(default="", max_length=200)
+
+
+class CanaryPromoteRequest(BaseModel):
+    """Explicit canary promotion (optimistic: stale expected_version -> 409)."""
+
+    model_name: str = Field(..., min_length=1, max_length=80)
+    expected_version: int | None = Field(default=None)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -326,6 +375,19 @@ async def app_ecosystem():
                 "status": "ready",
                 "autostart": high_throughput_pipeline.PIPELINE_AUTOSTART,
             },
+            "decision_intelligence": {
+                "routes": [
+                    "/meta/decisions",
+                    "/meta/decisions/simulate",
+                    "/meta/decisions/canary/run",
+                    "/meta/decisions/canary/promote",
+                    "/meta/decisions/explanations",
+                    "/meta/decisions/explanations/{decision_id}",
+                ],
+                "purpose": "decision quality & consistency: formal model versioning with shadow-mode canary, what-if simulation, explainability traces, optimistic concurrency",
+                "status": "ready",
+                "canary_auto_promote": model_versioning.CANARY_AUTOPROMOTE,
+            },
         },
         "capabilities": capabilities,
     }
@@ -379,6 +441,12 @@ async def app_feature_summary():
             "pipeline_stats": "/audit/pipeline/stats",
             "transactions": "/audit/transactions",
             "transactions_spec": "/audit/transactions/spec",
+            "decisions": "/meta/decisions",
+            "decision_simulate": "/meta/decisions/simulate",
+            "decision_canary_run": "/meta/decisions/canary/run",
+            "decision_canary_promote": "/meta/decisions/canary/promote",
+            "explanations": "/meta/decisions/explanations",
+            "explanation_detail": "/meta/decisions/explanations/{decision_id}",
         },
     }
 
@@ -422,6 +490,12 @@ async def scoring_catalog():
             "pipeline": high_throughput_pipeline.build_pipeline_catalog(),
             "protobuf_transaction_spec": protobuf_transaction_spec.build_transaction_spec_catalog(),
         },
+        "decision_intelligence": {
+            "model_versioning": model_versioning.build_model_versioning_catalog(),
+            "simulation": simulation_engine.build_simulation_engine_catalog(),
+            "explainability": explainability.build_explainability_catalog(),
+            "optimistic_locking": optimistic_locking.build_optimistic_locking_catalog(),
+        },
     }
 
 
@@ -439,6 +513,131 @@ async def i18n_catalog(locale: str | None = None):
         "catalog": i18n.build_i18n_catalog(),
         "resolution": i18n.locale_payload(locale),
     }
+
+# --- Phase 1: decision quality & consistency surfaces ------------------------
+
+
+@app.get("/meta/decisions")
+async def decisions_metadata():
+    """Expose the decision-intelligence subsystem: model versioning + canary,
+    what-if simulation, explainability traces, and optimistic concurrency."""
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model_versioning": model_versioning.build_model_versioning_catalog(),
+        "simulation": simulation_engine.build_simulation_engine_catalog(),
+        "explainability": explainability.build_explainability_catalog(),
+        "optimistic_locking": optimistic_locking.build_optimistic_locking_catalog(),
+    }
+
+
+@app.post("/meta/decisions/simulate")
+async def simulate_decision(payload: DecisionSimulateRequest):
+    """Run a what-if simulation (risk rule changes / retention policy changes).
+
+    Pure simulation — live config, weight state, and partitions are never
+    mutated. Returns baseline vs variant with delta and affected rows.
+    """
+    moment = (
+        datetime.fromisoformat(payload.moment)
+        if payload.moment is not None
+        else None
+    )
+    try:
+        return simulation_engine.run_simulation(
+            payload.kind,
+            label=payload.label or "what-if",
+            context=payload.context,
+            weight_overrides=payload.weight_overrides,
+            disabled_rules=payload.disabled_rules,
+            level_max_overrides=payload.level_max_overrides,
+            retention_overrides=payload.retention_overrides,
+            active_partitions=payload.active_partitions,
+            moment=moment,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+
+@app.post("/meta/decisions/canary/run")
+async def run_canary_shadow(payload: CanaryRunRequest):
+    """Shadow-mode scoring: serve from the active model, score with the canary.
+
+    Served decisions never come from the candidate; the run records a canary
+    trace and updates divergence/confidence for the model.
+    """
+    try:
+        result = model_versioning.get_default_runner().shadow_score(
+            payload.model_name, payload.context, entity_ref=payload.entity_ref
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    if result.get("canary_version") is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=result.get("reason", "no canary candidate"),
+        )
+    return result
+
+
+@app.post("/meta/decisions/canary/promote")
+async def promote_canary(payload: CanaryPromoteRequest):
+    """Promote the canary candidate to active (optimistic-lock guarded).
+
+    Pass the ``guard_version`` you observed; a stale write returns 409 instead
+    of silently clobbering a concurrent promotion.
+    """
+    try:
+        return model_versioning.get_default_registry().promote(
+            payload.model_name,
+            expected_version=payload.expected_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except optimistic_locking.StaleVersionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+
+
+@app.get("/meta/decisions/explanations")
+async def list_explanations(
+    entity_ref: str | None = Query(default=None, max_length=200),
+    decision_type: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    """List decision traces, newest first, filterable by entity/type."""
+    store = explainability.get_default_trace_store()
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "total": store.stats()["total"],
+        "limit": limit,
+        "traces": store.list(
+            entity_ref=entity_ref,
+            decision_type=decision_type,
+            limit=limit,
+        ),
+    }
+
+
+@app.get("/meta/decisions/explanations/{decision_id}")
+async def explanation_detail(decision_id: str):
+    """Full factor-trail explanation for one recorded decision."""
+    store = explainability.get_default_trace_store()
+    try:
+        return store.explain(decision_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
 
 @app.get("/meta/tenants")
 async def tenants_metadata():

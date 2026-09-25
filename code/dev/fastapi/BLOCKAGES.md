@@ -251,5 +251,46 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   `tests/test_high_velocity_audit_expansion.py` (18) — suite 378 → 427
   passing.
 
+### Phase 1 — Decision quality & consistency (S-02 / S-03 / C-05 / M-03)
+- New infra modules (app/ root, pure computation — no workers, no DB, no
+  single-tenant behavior change; surfaces are opt-in meta tooling):
+  - S-03 `model_versioning.py`: `ModelVersionRegistry` (named models with
+    immutable version snapshots; default registry pre-seeded with `risk_rules`
+    from the effective risk table and `partition_policies`) + `CanaryRunner`
+    shadow-mode scoring — served decisions always come from the active model,
+    the candidate scores in shadow, divergence/confidence accumulate; promote
+    and rollback are optimistic-lock guarded; auto-promotion behind
+    `CSERVICE_CANARY_AUTOPROMOTE` (default off) requiring
+    confidence ≥ 0.9 over ≥ 3 runs.
+  - S-02 `simulation_engine.py`: pure what-if engines —
+    `simulate_risk_whatif` (weight overrides / disabled rules / level-threshold
+    retune applied to a copy of the rule table, never live weight state) and
+    `simulate_retention_whatif` (replays drop/keep decisions under modified
+    retention windows, no DDL); `run_simulation` dispatch records a trace.
+  - C-05 `explainability.py`: `DecisionTrace` (inputs, factor trail with
+    weights, threshold, model version, outcome) + bounded `DecisionTraceStore`
+    (default capacity 1000, oldest evicted), `explain(decision_id)`, filterable
+    listing, and a risk-result -> trace converter.
+  - M-03 `optimistic_locking.py`: `VersionedRecord` compare-and-swap guard +
+    `StaleVersionError` (carries expected/current versions); used by model
+    promotion/rollback; mapped to HTTP 409 on the promote endpoint.
+- Additive `risk_evaluator` surfaces (folded under the existing `evaluate`
+  leaf, live scoring untouched): `score_with_config` (pure config-parameterized
+  scoring used by canary + simulation) and `effective_risk_rules` (config +
+  learned weights snapshot).
+- New meta endpoints: `GET /meta/decisions`, `POST /meta/decisions/simulate`
+  (risk|retention), `POST /meta/decisions/canary/run` (shadow score),
+  `POST /meta/decisions/canary/promote` (stale `expected_version` -> 409),
+  `GET /meta/decisions/explanations[_/{decision_id}]` (404 when unknown).
+- `main.py`: `decision_intelligence` subservice in `/meta/ecosystem` (+
+  `canary_auto_promote`), six new features keys, and a
+  `decision_intelligence` scoring-catalog key with all four catalogs.
+- Code map: new `decision_intelligence` infra group (`model_versioning`,
+  `simulation_engine`, `explainability`, `optimistic_locking`) + `decisions`
+  leaf on `main`; regenerated to 251 leaves / 49 internal nodes (was 230/44),
+  revision bumped to `r3`.
+- Tests: `tests/test_decision_quality_expansion.py` (28) — suite 427 → 455
+  passing.
+
 ## Open blockages
 - None.

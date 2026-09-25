@@ -7,7 +7,7 @@ keep it in sync as the backend evolves.
 
 ## Revision Control
 
-- Revision ID: `r2`
+- Revision ID: `r3`
 - Scope: backend logic only (`fastapi/app/**`); frontend and requirement
   artifacts are out of scope, matching `ARCHITECTURE_CONCEPT_MAP.md`
 - Purpose: a machine-readable, diff-friendly map that mirrors module
@@ -28,7 +28,7 @@ Leaves are business surfaces; internal node labels name layers (root:
 
 | Layer | What its leaves mean |
 |---|---|
-| `infra` | startup/metadata (`main`), database plumbing (`db`), auth primitives (`security`), auth dependencies (`auth_deps`), localization, multi-tenant routing + partition lifecycle (`multi_tenant`), zero-trust crypto (`zero_trust`), event pipeline (`event_pipeline`) |
+| `infra` | startup/metadata (`main`), database plumbing (`db`), auth primitives (`security`), auth dependencies (`auth_deps`), localization, multi-tenant routing + partition lifecycle (`multi_tenant`), zero-trust crypto (`zero_trust`), event pipeline (`event_pipeline`), decision intelligence (`decision_intelligence`) |
 | `models` | isolated polymorphic base models (`model_bases`) plus persisted domain entities (identity, booking lifecycle, chat signals, retention, policy, topics, communication, payments, points, audit trail, security events) |
 | `routers` | public API domains and their grouped surfaces (`users`, `bookings`, `chat`, `topics`, `audit`) |
 | `services` | the rule engines — own the business logic (scoring, retention, loyalty, activity trees, communication strategy, payments, points, audit trail) |
@@ -46,13 +46,13 @@ Rules of thumb:
 
 ## Current Map — `CODE_MAP.newick`
 
-Tree size: **230 leaves / 44 internal nodes** (validated, see maintenance
+Tree size: **251 leaves / 49 internal nodes** (validated, see maintenance
 rule 4). Rendered multi-line for readability; the single-line Newick file is
 the source of truth.
 
 ```
 (((startup_lifespan,cors,exception_handler,meta,health,runtime,scoring_catalog,i18n_endpoint,
-    features,ecosystem,tenants,partitions,zero_trust)main,
+    features,ecosystem,tenants,partitions,zero_trust,decisions)main,
   (engine,pool_config,session,ping,retry)db,
   (verify_password,hash_password,access_token,refresh_token,decode_token,password_policy)security,
   (current_user,optional_user,admin_user,policy_or_admin,policy_score,control_posture)auth_deps,
@@ -64,7 +64,11 @@ the source of truth.
    (risk_levels,risk_rules,evaluate,adaptive_weights,catalog)risk_evaluator,
    (access_levels,cell_matrix,evaluate,resolve_roles,catalog)cell_matrix)zero_trust,
   ((workers,batch,submit,drain,dead_letter,stats,catalog)high_throughput_pipeline,
-   (wire_format,transaction,hash_chain,append_only_log,spec_catalog)protobuf_transaction_spec)event_pipeline)infra,
+   (wire_format,transaction,hash_chain,append_only_log,spec_catalog)protobuf_transaction_spec)event_pipeline,
+  ((registry,snapshots,canary,shadow_scoring,promote,catalog)model_versioning,
+   (what_if,risk_scenarios,retention_scenarios,reports,catalog)simulation_engine,
+   (decision_trace,trace_store,explain,factor_trail,catalog)explainability,
+   (version_guard,compare_and_swap,stale_conflict,conflict_policy)optimistic_locking)decision_intelligence)infra,
  ((timestamp,tenant_scoped,partitioned,security_event)model_bases,user,booking,booking_event,
   booking_assignment,chat_history,interaction_signal,retention_snapshot,recovery_outcome,
   customer_policy_score,topic_selection,communication_override,arrears_entry,points_wallet,
@@ -116,6 +120,43 @@ the source of truth.
    domain). Leaf-level additions are recorded in the log without a bump.
 
 ## Revision Log
+
+### r3 (2026-09-25)
+
+Phase 1 — decision quality & consistency (S-02 simulation, S-03 model
+versioning + canary, C-05 explainability, M-03 optimistic concurrency). Tree
+grew 230/44 → **251 leaves / 49 internal nodes**; no prior leaf was lost.
+
+- **New infra group** `decision_intelligence` (all under `infra`):
+  - `model_versioning.py` — immutable model version registry (`risk_rules` +
+    `partition_policies` pre-seeded from live config) and `CanaryRunner`
+    shadow-mode scoring: served decisions come from the active model, the
+    candidate scores in shadow, divergence/confidence accumulate; promotion is
+    optimistic-lock guarded; auto-promotion behind `CSERVICE_CANARY_AUTOPROMOTE`
+    (default off).
+  - `simulation_engine.py` — pure what-if engines: `simulate_risk_whatif`
+    (weight overrides / disabled rules / level retune on a copy of the rule
+    table) and `simulate_retention_whatif` (replay drop/keep decisions under
+    modified retention, no DDL); `run_simulation` records an explainability
+    trace.
+  - `explainability.py` — `DecisionTrace` + bounded `DecisionTraceStore`
+    (factor trail, thresholds, model version, outcome), filterable listing,
+    `explain(decision_id)`, risk-result conversion.
+  - `optimistic_locking.py` — `VersionedRecord` CAS guard + `StaleVersionError`
+    (expected/current versions), used by model promotion/rollback.
+  - `main` gained the `decisions` leaf: `/meta/decisions`,
+    `POST /meta/decisions/simulate`, `POST /meta/decisions/canary/run`,
+    `POST /meta/decisions/canary/promote` (409 on stale version),
+    `GET /meta/decisions/explanations[_/{decision_id}]`.
+- **Meta wiring**: `decision_intelligence` subservice in `/meta/ecosystem`;
+  six new features keys; `decision_intelligence` scoring-catalog key with all
+  four catalogs.
+- **Additive risk-evaluator surfaces** (folded under the existing `evaluate`
+  leaf): `score_with_config` (pure config-parameterized scoring) and
+  `effective_risk_rules` (config + learned weights snapshot) — live scoring
+  behavior untouched.
+- **Tests**: `tests/test_decision_quality_expansion.py` — suite grew
+  427 → 455 passing.
 
 ### r2 (2026-09-25)
 

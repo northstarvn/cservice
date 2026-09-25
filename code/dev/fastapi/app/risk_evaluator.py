@@ -177,6 +177,58 @@ def level_for_score(score: int) -> str:
     return RISK_LEVELS[-1]["level"]
 
 
+def effective_risk_rules() -> list[dict[str, Any]]:
+    """The ``RISK_RULES`` table with the current learned weights applied.
+
+    This is the *effective* rule table (config + learned drift) — the canonical
+    snapshot used to seed model registries, canary candidates, and simulations.
+    Additive: does not mutate live weight state.
+    """
+    return [
+        {**rule, "weight": _WEIGHT_STATE[rule["rule_id"]]}
+        for rule in RISK_RULES
+    ]
+
+
+def score_with_config(
+    rules: list[dict[str, Any]],
+    context: dict[str, Any],
+    levels: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Pure, config-parameterized scoring — the basis for canary shadow runs and
+    what-if simulation.
+
+    Takes an arbitrary rules table (each entry mirrors ``RISK_RULES``:
+    ``rule_id`` / ``weight`` / ``match`` / optional ``reason``) and returns the
+    same shape as ``evaluate_risk`` — score, level, factor trail — without
+    touching the live ``_WEIGHT_STATE``. ``levels`` defaults to ``RISK_LEVELS``.
+    """
+    factors = []
+    for rule in rules:
+        present = _matches(rule, context)
+        factors.append(
+            {
+                "rule_id": rule["rule_id"],
+                "weight": float(rule.get("weight", 0)),
+                "present": present,
+                "reason": rule.get("reason", ""),
+            }
+        )
+    score = min(100, round(sum(f["weight"] for f in factors if f["present"])))
+    buckets = levels if levels is not None else RISK_LEVELS
+    level = buckets[-1]["level"] if buckets else RISK_LEVELS[-1]["level"]
+    for bucket in buckets:
+        if score <= bucket["max"]:
+            level = bucket["level"]
+            break
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "score": score,
+        "level": level,
+        "factors": factors,
+    }
+
+
 def evaluate_risk(context: dict[str, Any]) -> dict[str, Any]:
     """Score a request context and return the risk decision + factor trail."""
     factors = []
