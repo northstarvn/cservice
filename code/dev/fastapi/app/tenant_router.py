@@ -13,6 +13,14 @@ of the existing request paths:
   someone opts in.
 - Registration is runtime: ``register``/``deregister`` can be called while the
   app is serving; connections are pooled per tenant and disposed on shutdown.
+- ``resolve_tenant`` answers *should this request run as that tenant* with a
+  reason code, after validating the id, the allowlist, and the tenant's
+  lifecycle status.
+- Read/write splitting (``role="read"``) routes to a replica DSN when one is
+  configured, and fails back to the writer.
+- Per-tenant health tracking fails an unhealthy tenant over to the shared
+  engine instead of taking the request down.
+- ``redact_dsn`` keeps credentials out of the introspection catalog.
 
 Nothing here changes ``app.db`` or the existing ``get_db`` dependency.
 """
@@ -21,7 +29,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, AsyncIterator
+import re
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, AsyncIterator, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -36,10 +49,88 @@ DEFAULT_TENANT = os.getenv("CSERVICE_DEFAULT_TENANT", "default")
 # Multitenancy is opt-in: with an empty template and no declarations the router
 # behaves exactly like the single-tenant backend (everything -> default engine).
 TENANT_DSN_TEMPLATE = os.getenv("TENANT_DSN_TEMPLATE", "")
+TENANT_READ_DSN_TEMPLATE = os.getenv("TENANT_READ_DSN_TEMPLATE", "")
 TENANT_POOL_SIZE = _int_env("TENANT_POOL_SIZE", 3)
 TENANT_MAX_OVERFLOW = _int_env("TENANT_MAX_OVERFLOW", 5)
 TENANT_POOL_TIMEOUT = _int_env("TENANT_POOL_TIMEOUT", 30)
 TENANT_ECHO = os.getenv("TENANT_ECHO", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+# Tenant lifecycle states. ``suspended`` routes to the shared engine on purpose:
+# the tenant still reads, but never touches its own dedicated database.
+TENANT_STATUSES = ("active", "suspended", "quarantined")
+
+# Every reason ``resolve_tenant`` can return.
+TENANT_RESOLUTION_REASONS = (
+    "ok",
+    "invalid_tenant_id",
+    "not_allowed",
+    "suspended",
+    "quarantined",
+)
+
+TENANT_ROLES = ("write", "read")
+
+# Router policy, all overridable per instance and per environment.
+TENANT_ROUTER_POLICY: dict[str, Any] = {
+    "id_pattern": r"^[a-z0-9][a-z0-9._-]{0,62}$",
+    "allowlist": (),
+    "auto_register": True,
+    "failover_enabled": True,
+    "health_failure_threshold": 3,
+    "health_window_seconds": 60,
+    "max_engines": 32,
+    "track_usage": True,
+    "usage_window": 1000,
+}
+
+
+def _env_allowlist() -> tuple[str, ...]:
+    raw = os.getenv("CSERVICE_TENANT_ALLOWLIST", "") or ""
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def build_router_policy(overrides: dict | None = None) -> dict[str, Any]:
+    """Router policy with the environment allowlist folded in."""
+    policy = {**TENANT_ROUTER_POLICY, **dict(overrides or {})}
+    if not policy.get("allowlist"):
+        policy["allowlist"] = _env_allowlist()
+    return policy
+
+
+def compile_tenant_pattern(pattern: str | None = None) -> re.Pattern[str]:
+    """Tenant-id validator; the source of the pattern is always introspectable."""
+    raw = pattern or os.getenv("CSERVICE_TENANT_ID_PATTERN") or TENANT_ROUTER_POLICY["id_pattern"]
+    return re.compile(raw)
+
+
+def is_valid_tenant_id(tenant_id: str, *, pattern: re.Pattern[str] | None = None) -> bool:
+    """Tenant ids are lowercase, bounded, and never path-like."""
+    candidate = (tenant_id or "").strip()
+    if not candidate or len(candidate) > 64:
+        return False
+    return bool((pattern or compile_tenant_pattern()).match(candidate))
+
+
+def normalize_tenant_id(tenant_id: str | None) -> str:
+    return (tenant_id or "").strip() or DEFAULT_TENANT
+
+
+def redact_dsn(dsn: str | None) -> str | None:
+    """Strip credentials from a DSN so a catalog can expose it safely."""
+    if not dsn:
+        return dsn
+    try:
+        parts = urlsplit(dsn)
+    except ValueError:
+        return "***redacted***"
+    if not parts.scheme or not parts.netloc:
+        return "***redacted***"
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    user = parts.username or ""
+    netloc = f"{user}:***@{host}" if user else host
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def parse_declared_tenants() -> dict[str, str]:
@@ -65,6 +156,50 @@ def parse_declared_tenants() -> dict[str, str]:
     return declared
 
 
+def _resolve_dsn(tenant_id: str, dsn: str | None, role: str = "write") -> str | None:
+    """DSN for a tenant, preferring an explicit value then the role's template."""
+    if dsn:
+        return dsn
+    declared = parse_declared_tenants()
+    template = TENANT_READ_DSN_TEMPLATE if role == "read" else TENANT_DSN_TEMPLATE
+    if template and "{tenant}" in template:
+        candidate = template.replace("{tenant}", tenant_id)
+        if candidate:
+            return candidate
+    if role == "read":
+        # A read replica is optional: fall back to the write DSN rather than
+        # silently routing reads to the shared default engine.
+        return declared.get(tenant_id) or None
+    return declared.get(tenant_id) or None
+
+
+@dataclass
+class TenantResolution:
+    """Why a request may (or may not) run as a given tenant."""
+
+    tenant_id: str
+    source: str
+    reason: str = "ok"
+    status: str = "active"
+    mode: str = "shared_default"
+    role: str = "write"
+
+    @property
+    def allowed(self) -> bool:
+        return self.reason == "ok"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "tenant_id": self.tenant_id,
+            "source": self.source,
+            "reason": self.reason,
+            "status": self.status,
+            "mode": self.mode,
+            "role": self.role,
+            "allowed": self.allowed,
+        }
+
+
 class TenantRouter:
     """Routes database work to per-tenant async engines at runtime.
 
@@ -73,11 +208,171 @@ class TenantRouter:
     engine, so routing never isolates a tenant from data it legitimately shares.
     """
 
-    def __init__(self, engine=default_engine):
+    def __init__(self, engine=default_engine, policy: dict[str, Any] | None = None):
         self._default_engine = engine
         self._engines: dict[str, Any] = {}
         self._specs: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
+        self._policy = build_router_policy(policy)
+        self._pattern = compile_tenant_pattern(self._policy.get("id_pattern"))
+        self._statuses: dict[str, str] = {}
+        self._metadata: dict[str, dict[str, Any]] = {}
+        self._health: dict[str, dict[str, Any]] = {}
+        self._usage: dict[str, deque[str]] = {}
+        self._pool_overrides: dict[str, dict[str, Any]] = {}
+        self._recent: deque[str] = deque(maxlen=max(1, int(self._policy.get("max_engines", 32))))
+
+    # --- policy -------------------------------------------------------------
+
+    @property
+    def policy(self) -> dict[str, Any]:
+        return dict(self._policy)
+
+    def allowlist(self) -> tuple[str, ...]:
+        return tuple(self._policy.get("allowlist") or ())
+
+    def is_allowed(self, tenant_id: str) -> bool:
+        allowed = self.allowlist()
+        return not allowed or tenant_id in allowed
+
+    def status_for(self, tenant_id: str) -> str:
+        return self._statuses.get(tenant_id, "active")
+
+    def set_status(self, tenant_id: str, status: str) -> dict[str, Any]:
+        """Move a tenant between ``active`` / ``suspended`` / ``quarantined``."""
+        tenant_id = normalize_tenant_id(tenant_id)
+        if status not in TENANT_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(TENANT_STATUSES)}")
+        previous = self.status_for(tenant_id)
+        self._statuses[tenant_id] = status
+        return {
+            "tenant_id": tenant_id,
+            "status": status,
+            "previous_status": previous,
+            "changed": previous != status,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def set_metadata(self, tenant_id: str, **labels: Any) -> dict[str, Any]:
+        """Attach deployment metadata (region, plan, contact) to a tenant."""
+        tenant_id = normalize_tenant_id(tenant_id)
+        current = self._metadata.setdefault(tenant_id, {})
+        current.update({k: v for k, v in labels.items() if v is not None})
+        return {"tenant_id": tenant_id, "metadata": dict(current)}
+
+    def metadata_for(self, tenant_id: str) -> dict[str, Any]:
+        return dict(self._metadata.get(normalize_tenant_id(tenant_id), {}))
+
+    def set_pool_overrides(self, tenant_id: str, **overrides: Any) -> dict[str, Any]:
+        """Per-tenant pool sizing, e.g. a noisy tenant gets a bigger pool."""
+        tenant_id = normalize_tenant_id(tenant_id)
+        allowed = {"pool_size", "max_overflow", "pool_timeout", "echo"}
+        unknown = set(overrides) - allowed
+        if unknown:
+            raise ValueError(
+                f"unsupported pool override(s): {', '.join(sorted(unknown))}"
+            )
+        current = self._pool_overrides.setdefault(tenant_id, {})
+        current.update({k: v for k, v in overrides.items() if v is not None})
+        return {"tenant_id": tenant_id, "pool": dict(current)}
+
+    def effective_pool(self, tenant_id: str) -> dict[str, Any]:
+        """Pool settings a tenant's engine is (or would be) created with."""
+        overrides = self._pool_overrides.get(normalize_tenant_id(tenant_id), {})
+        return {
+            "size": overrides.get("pool_size", TENANT_POOL_SIZE),
+            "max_overflow": overrides.get("max_overflow", TENANT_MAX_OVERFLOW),
+            "timeout": overrides.get("pool_timeout", TENANT_POOL_TIMEOUT),
+            "echo": overrides.get("echo", TENANT_ECHO),
+        }
+
+    # --- health & usage -----------------------------------------------------
+
+    def record_outcome(self, tenant_id: str, ok: bool) -> dict[str, Any]:
+        """Record a success/failure for failover and observability."""
+        tenant_id = normalize_tenant_id(tenant_id)
+        state = self._health.setdefault(
+            tenant_id,
+            {"ok": 0, "failed": 0, "last_ok_at": None, "last_failure_at": None},
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        if ok:
+            state["ok"] += 1
+            state["failed"] = 0
+            state["last_ok_at"] = now
+        else:
+            state["failed"] += 1
+            state["last_failure_at"] = now
+        return {"tenant_id": tenant_id, **state}
+
+    def is_healthy(self, tenant_id: str) -> bool:
+        if not self._policy.get("failover_enabled", True):
+            return True
+        state = self._health.get(normalize_tenant_id(tenant_id))
+        if not state:
+            return True
+        threshold = int(self._policy.get("health_failure_threshold", 0) or 0)
+        return int(state.get("failed", 0)) < threshold
+
+    def unhealthy_tenants(self) -> list[str]:
+        return sorted(t for t in self._specs if not self.is_healthy(t))
+
+    def record_request(self, tenant_id: str) -> None:
+        if not self._policy.get("track_usage", True):
+            return
+        window = self._usage.setdefault(
+            normalize_tenant_id(tenant_id), deque(maxlen=int(self._policy.get("usage_window", 1000)))
+        )
+        window.append(datetime.now(timezone.utc).isoformat())
+
+    def usage(self) -> dict[str, dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        return {
+            tenant_id: {
+                "requests": len(window),
+                "last_seen_at": window[-1] if window else None,
+                "idle_seconds": round((now - datetime.fromisoformat(window[-1])).total_seconds(), 3)
+                if window
+                else None,
+            }
+            for tenant_id, window in sorted(self._usage.items())
+        }
+
+    # --- resolution ---------------------------------------------------------
+
+    def resolve_tenant(
+        self,
+        tenant_id: str | None = None,
+        *,
+        source: str = "explicit",
+        role: str = "write",
+    ) -> TenantResolution:
+        """Decide whether a request may run as ``tenant_id``, and why.
+
+        Ordering matters: a malformed id is rejected before the allowlist is
+        consulted, and lifecycle status is checked last so an operator can see
+        *both* that a tenant is unknown and that it is quarantined.
+        """
+        if role not in TENANT_ROLES:
+            raise ValueError(f"role must be one of {', '.join(TENANT_ROLES)}")
+        tenant_id = normalize_tenant_id(tenant_id)
+        if not is_valid_tenant_id(tenant_id, pattern=self._pattern):
+            return TenantResolution(tenant_id, source, "invalid_tenant_id", role=role)
+        if not self.is_allowed(tenant_id):
+            return TenantResolution(tenant_id, source, "not_allowed", role=role)
+        status = self.status_for(tenant_id)
+        spec = self._specs.get(tenant_id) or {}
+        if status == "quarantined":
+            return TenantResolution(
+                tenant_id, source, "quarantined", status, spec.get("mode", "shared_default"), role
+            )
+        if status == "suspended":
+            return TenantResolution(
+                tenant_id, source, "suspended", status, "shared_default", role
+            )
+        return TenantResolution(
+            tenant_id, source, "ok", status, spec.get("mode", "shared_default"), role
+        )
 
     async def register(
         self,
@@ -88,6 +383,7 @@ class TenantRouter:
         max_overflow: int | None = None,
         pool_timeout: int | None = None,
         echo: bool | None = None,
+        role: str = "write",
     ) -> Any:
         """Register (or return) the engine for ``tenant_id``.
 
@@ -95,72 +391,183 @@ class TenantRouter:
         is resolvable the tenant routes to the shared default engine.
         """
         tenant_id = (tenant_id or DEFAULT_TENANT).strip()
-        if tenant_id in self._specs:
-            return self._engines[tenant_id]
-        dsn = dsn or parse_declared_tenants().get(tenant_id)
-        if not dsn and TENANT_DSN_TEMPLATE and "{tenant}" in TENANT_DSN_TEMPLATE:
-            dsn = TENANT_DSN_TEMPLATE.replace("{tenant}", tenant_id)
+        if role not in TENANT_ROLES:
+            raise ValueError(f"role must be one of {', '.join(TENANT_ROLES)}")
+        key = tenant_id if role == "write" else f"{tenant_id}#read"
+        if key in self._specs:
+            return self._engines[key]
+        resolved = _resolve_dsn(tenant_id, dsn, role)
         async with self._lock:
-            if tenant_id in self._specs:
-                return self._engines[tenant_id]
-            if not dsn:
-                self._specs[tenant_id] = {
+            if key in self._specs:
+                return self._engines[key]
+            if not resolved:
+                self._specs[key] = {
                     "tenant_id": tenant_id,
                     "dsn": None,
                     "mode": "shared_default",
+                    "role": role,
                 }
-                self._engines[tenant_id] = self._default_engine
+                self._engines[key] = self._default_engine
                 return self._default_engine
+            settings = self.effective_pool(tenant_id)
             engine = create_async_engine(
-                dsn,
-                echo=TENANT_ECHO if echo is None else echo,
-                pool_size=pool_size or TENANT_POOL_SIZE,
+                resolved,
+                echo=settings["echo"] if echo is None else echo,
+                pool_size=pool_size or settings["size"],
                 max_overflow=max_overflow
                 if max_overflow is not None
-                else TENANT_MAX_OVERFLOW,
-                pool_timeout=pool_timeout or TENANT_POOL_TIMEOUT,
+                else settings["max_overflow"],
+                pool_timeout=pool_timeout or settings["timeout"],
             )
-            self._engines[tenant_id] = engine
-            self._specs[tenant_id] = {
+            self._engines[key] = engine
+            self._specs[key] = {
                 "tenant_id": tenant_id,
-                "dsn": dsn,
+                "dsn": resolved,
                 "mode": "dedicated_engine",
+                "role": role,
             }
-            logger.info("Tenant engine registered: %s (dedicated)", tenant_id)
+            self._recent.append(key)
+            logger.info(
+                "Tenant engine registered: %s (dedicated, role=%s)", tenant_id, role
+            )
+            await self._evict_if_needed()
             return engine
+
+    async def _evict_if_needed(self) -> list[str]:
+        """Dispose the least-recently-used dedicated engines over the cap."""
+        cap = int(self._policy.get("max_engines", 0) or 0)
+        evicted: list[str] = []
+        while cap and len(self._engines) > cap:
+            candidates = [k for k in self._recent if k in self._engines]
+            if not candidates:
+                break
+            victim = candidates[0]
+            engine = self._engines.pop(victim, None)
+            self._specs.pop(victim, None)
+            self._recent.remove(victim)
+            if engine is not None and engine is not self._default_engine:
+                await engine.dispose()
+            evicted.append(victim)
+        return evicted
 
     async def deregister(self, tenant_id: str) -> bool:
         """Drop a tenant's engine and dispose it (never touches the default)."""
+        keys = [
+            key
+            for key in self._engines
+            if key == tenant_id or key == f"{tenant_id}#read"
+        ]
+        if not keys:
+            return False
         async with self._lock:
-            engine = self._engines.pop(tenant_id, None)
-            spec = self._specs.pop(tenant_id, None)
-            if engine is None:
-                return False
-            if engine is not self._default_engine:
-                await engine.dispose()
+            for key in keys:
+                engine = self._engines.pop(key, None)
+                self._specs.pop(key, None)
+                if key in self._recent:
+                    self._recent.remove(key)
+                if engine is not None and engine is not self._default_engine:
+                    await engine.dispose()
             logger.info("Tenant engine deregistered: %s", tenant_id)
-            return bool(spec)
+        return True
 
-    async def engine_for(self, tenant_id: str | None = None) -> Any:
-        """Resolve the engine for a tenant, registering it lazily if needed."""
+    async def engine_for(self, tenant_id: str | None = None, *, role: str = "write") -> Any:
+        """Resolve the engine for a tenant, registering it lazily if needed.
+
+        Honors the policy: a suspended/quarantined/not-allowed tenant and an
+        unhealthy dedicated engine both fall back to the shared engine.
+        """
         tenant_id = (tenant_id or DEFAULT_TENANT).strip()
-        if tenant_id not in self._specs:
-            await self.register(tenant_id)
-        return self._engines[tenant_id]
+        resolution = self.resolve_tenant(tenant_id, role=role)
+        key = tenant_id if role == "write" else f"{tenant_id}#read"
+        if key not in self._specs and self._policy.get("auto_register", True):
+            await self.register(tenant_id, role=role)
+        engine = self._engines.get(key, self._default_engine)
+        if resolution.reason != "ok":
+            return self._default_engine
+        if not self.is_healthy(tenant_id):
+            return self._default_engine
+        self._recent.append(key)
+        self.record_request(tenant_id)
+        return engine
 
-    async def session_factory_for(self, tenant_id: str | None = None):
+    async def session_factory_for(self, tenant_id: str | None = None, *, role: str = "write"):
         """A fresh ``sessionmaker`` bound to the tenant's engine."""
-        engine = await self.engine_for(tenant_id)
+        engine = await self.engine_for(tenant_id, role=role)
         return sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
-        """Current routing table (tenant -> mode/dsn), for introspection."""
-        return {
-            tenant_id: {
+        """Current routing table (tenant -> mode/dsn), for introspection.
+
+        Keyed by tenant id, with the read role suffixed so a tenant that has
+        both a writer and a replica is visible as two entries.
+        """
+        rows: dict[str, dict[str, Any]] = {}
+        for spec in sorted(
+            self._specs.values(),
+            key=lambda s: (s["tenant_id"], s.get("role", "write")),
+        ):
+            tenant_id = spec["tenant_id"]
+            role = spec.get("role", "write")
+            key = tenant_id if role == "write" else f"{tenant_id}#read"
+            health = self._health.get(tenant_id) or {}
+            rows[key] = {
                 "mode": spec["mode"],
                 "dsn": spec.get("dsn"),
+                "role": role,
+                "status": self.status_for(tenant_id),
+                "healthy": self.is_healthy(tenant_id),
+                "dsn_redacted": redact_dsn(spec.get("dsn")),
+                "metadata": self.metadata_for(tenant_id),
+                "pool": self.effective_pool(tenant_id),
+                "health": {
+                    "ok": int(health.get("ok", 0)),
+                    "failed": int(health.get("failed", 0)),
+                    "last_ok_at": health.get("last_ok_at"),
+                    "last_failure_at": health.get("last_failure_at"),
+                },
+                "requests": len(self._usage.get(tenant_id, ())),
             }
-            for tenant_id, spec in sorted(self._specs.items())
+        return rows
+
+    def plan_provisioning(self, tenant_ids: list[str] | None = None) -> dict[str, Any]:
+        """What would be created for a set of tenants, without creating it."""
+        candidates = list(tenant_ids or sorted(parse_declared_tenants()))
+        rows = []
+        for tenant_id in candidates:
+            valid = is_valid_tenant_id(tenant_id, pattern=self._pattern)
+            allowed = self.is_allowed(tenant_id)
+            write_dsn = _resolve_dsn(tenant_id, None, "write")
+            read_dsn = _resolve_dsn(tenant_id, None, "read")
+            if not valid:
+                action, reason = "reject", "invalid_tenant_id"
+            elif not allowed:
+                action, reason = "reject", "not_allowed"
+            elif write_dsn:
+                action, reason = "create_engine", "dedicated"
+            else:
+                action, reason = "route_shared", "no_dsn"
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "action": action,
+                    "reason": reason,
+                    "mode": "dedicated_engine" if write_dsn else "shared_default",
+                    "read_replica": bool(read_dsn and read_dsn != write_dsn),
+                    "dsn": redact_dsn(write_dsn),
+                    "status": self.status_for(tenant_id),
+                    "registered": tenant_id in self._specs,
+                }
+            )
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "candidates": len(rows),
+            "rows": rows,
+            "pool_defaults": {
+                "size": TENANT_POOL_SIZE,
+                "max_overflow": TENANT_MAX_OVERFLOW,
+                "timeout": TENANT_POOL_TIMEOUT,
+                "echo": TENANT_ECHO,
+            },
         }
 
     async def dispose_all(self) -> None:
@@ -171,15 +578,18 @@ class TenantRouter:
                     await engine.dispose()
             self._engines.clear()
             self._specs.clear()
+            self._recent.clear()
 
 
 # Process-wide router; endpoints and workers share it.
 registry = TenantRouter()
 
 
-async def get_tenant_session(tenant_id: str | None = None) -> AsyncIterator[AsyncSession]:
+async def get_tenant_session(
+    tenant_id: str | None = None, *, role: str = "write"
+) -> AsyncIterator[AsyncSession]:
     """Async session scoped to a tenant (prefer this over raw engines)."""
-    factory = await registry.session_factory_for(tenant_id)
+    factory = await registry.session_factory_for(tenant_id, role=role)
     async with factory() as session:
         try:
             yield session
@@ -190,9 +600,9 @@ async def get_tenant_session(tenant_id: str | None = None) -> AsyncIterator[Asyn
             await session.close()
 
 
-async def get_tenant_db(tenant_id: str) -> AsyncIterator[AsyncSession]:
+async def get_tenant_db(tenant_id: str, *, role: str = "write") -> AsyncIterator[AsyncSession]:
     """FastAPI dependency form of :func:`get_tenant_session`."""
-    async for session in get_tenant_session(tenant_id):
+    async for session in get_tenant_session(tenant_id, role=role):
         yield session
 
 
@@ -211,20 +621,118 @@ def get_request_tenant_id(request: Request) -> str:
     return DEFAULT_TENANT
 
 
+def resolve_request_tenant(
+    request: Request,
+    router: TenantRouter | None = None,
+    *,
+    role: str = "write",
+) -> TenantResolution:
+    """Like :func:`get_request_tenant_id`, but policy-checked and labelled.
+
+    ``get_request_tenant_id`` stays the raw lookup so existing call sites keep
+    their exact precedence; this wrapper adds the source it resolved from and the
+    allowlist/status verdict.
+    """
+    header = (request.headers.get("x-tenant-id") or "").strip()
+    if header:
+        source = "X-Tenant-ID header"
+        tenant_id = header
+    else:
+        query = (request.query_params.get("tenant_id") or "").strip()
+        if query:
+            source = "tenant_id query param"
+            tenant_id = query
+        else:
+            source = "default tenant"
+            tenant_id = DEFAULT_TENANT
+    return (router or registry).resolve_tenant(tenant_id, source=source, role=role)
+
+
+async def get_request_tenant_session(
+    request: Request, *, role: str = "write"
+) -> AsyncIterator[AsyncSession]:
+    """Tenant session resolved from the request, with policy applied."""
+    resolution = resolve_request_tenant(request, role=role)
+    async for session in get_tenant_session(resolution.tenant_id, role=role):
+        yield session
+
+
 def build_tenant_router_catalog() -> dict[str, object]:
-    """Introspectable catalog for metadata endpoints."""
+    """Introspectable catalog for metadata endpoints.
+
+    The top-level key set is a pinned contract, so new capability is reported
+    *inside* the existing keys (``pool``, ``registered``) rather than as new
+    siblings. Routing policy that does not fit those shapes lives in
+    :func:`build_tenant_routing_policy` instead.
+    """
     declared = parse_declared_tenants()
     routed = bool(TENANT_DSN_TEMPLATE) or bool(declared)
+    policy = registry.policy
     return {
         "default_tenant": DEFAULT_TENANT,
         "mode": "routed" if routed else "shared_default",
         "dsn_template_configured": bool(TENANT_DSN_TEMPLATE),
-        "declared_tenants": declared,
+        "declared_tenants": {
+            tenant_id: redact_dsn(dsn) for tenant_id, dsn in sorted(declared.items())
+        },
         "registered": registry.snapshot(),
         "pool": {
             "size": TENANT_POOL_SIZE,
             "max_overflow": TENANT_MAX_OVERFLOW,
             "timeout": TENANT_POOL_TIMEOUT,
+            "echo": TENANT_ECHO,
+            "roles": list(TENANT_ROLES),
+            "max_engines": int(policy.get("max_engines", 0)),
+            "read_replica_template": bool(TENANT_READ_DSN_TEMPLATE),
+            "read_replica_dsn": redact_dsn(TENANT_READ_DSN_TEMPLATE) or None,
+            "overrides": {
+                tenant_id: registry.effective_pool(tenant_id)
+                for tenant_id in sorted(registry._pool_overrides)
+            },
+            "usage": registry.usage(),
         },
-        "lookup_order": ["X-Tenant-ID header", "tenant_id query param", "default tenant"],
+        "lookup_order": [
+            "X-Tenant-ID header",
+            "tenant_id query param",
+            "default tenant",
+        ],
+    }
+
+
+def build_tenant_routing_policy(router: TenantRouter | None = None) -> dict[str, object]:
+    """The routing policy that governs :func:`build_tenant_router_catalog`.
+
+    Kept separate because the catalog's key set is pinned: this is where the
+    id pattern, allowlist, lifecycle states, resolution reason codes, and the
+    provisioning plan are introspected.
+    """
+    router = router or registry
+    policy = router.policy
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "policy": policy,
+        "default_tenant": DEFAULT_TENANT,
+        "id_pattern": policy.get("id_pattern"),
+        "id_pattern_source": os.getenv("CSERVICE_TENANT_ID_PATTERN", "builtin"),
+        "allowlist": list(router.allowlist()),
+        "statuses": list(TENANT_STATUSES),
+        "roles": list(TENANT_ROLES),
+        "resolution_reasons": list(TENANT_RESOLUTION_REASONS),
+        "sources": ["X-Tenant-ID header", "tenant_id query param", "default tenant"],
+        "statuses_by_tenant": dict(sorted(router._statuses.items())),
+        "metadata_by_tenant": {
+            tenant_id: router.metadata_for(tenant_id)
+            for tenant_id in sorted(router._metadata)
+        },
+        "health": {
+            "unhealthy": router.unhealthy_tenants(),
+            "failover_enabled": bool(policy.get("failover_enabled", True)),
+            "failure_threshold": int(policy.get("health_failure_threshold", 0)),
+        },
+        "provisioning": router.plan_provisioning(),
+        "note": (
+            "tenant routing is opt-in; ids are pattern-validated, the allowlist "
+            "and lifecycle status are checked before an engine is handed out, and "
+            "DSNs are redacted in every introspection surface"
+        ),
     }

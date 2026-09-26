@@ -10,9 +10,17 @@ from app.protobuf_transaction_spec import (
     get_default_transaction_log,
 )
 from app.schemas.audit import (
+    AuditActorActivityReport,
+    AuditAnomalyReport,
     AuditLogEntryCreate,
+    AuditLogEntryOut,
+    AuditLogExportReport,
+    AuditLogIntegrityReport,
     AuditLogListReport,
     AuditLogSummaryReport,
+    AuditRetentionReport,
+    AuditTimelineReport,
+    AuditableLogEntryCreate,
     EnhancementListReport,
     PipelineEventAccepted,
     PipelineEventCreate,
@@ -22,12 +30,22 @@ from app.schemas.audit import (
     TransactionSpecReport,
 )
 from app.services.audit_log import (
+    AUDIT_ANOMALY_DEFAULTS,
     build_audit_log_catalog,
     build_audit_log_summary,
+    build_entity_timeline,
+    coerce_entry,
     count_audit_log_entries,
+    detect_audit_anomalies,
     entry_to_payload,
+    export_audit_trail,
     list_audit_log_entries,
+    plan_retention,
     record_audit_log_entry,
+    record_auditable,
+    seal_entries,
+    summarize_actor_activity,
+    verify_seal_chain,
 )
 from app.services.efficiency_audit import (
     build_efficiency_audit_catalog,
@@ -145,6 +163,179 @@ async def read_audit_log_summary(
 ):
     """Roll up the trail by action and severity."""
     return await build_audit_log_summary(db)
+
+
+# --- Governed writes & forensic reads -----------------------------------------
+#
+# The original `/audit/log`, `/audit/logs` and `/audit/logs/summary` above are
+# unchanged. The endpoints below cover the expanded `services/audit_log.py`
+# surface: a governed write path, tamper verification, actor/entity rollups,
+# anomaly findings, retention planning, and export.
+
+
+async def _trail_payloads(
+    db: AsyncSession,
+    *,
+    limit: int,
+    action: str | None = None,
+    severity: str | None = None,
+    actor_user_id: int | None = None,
+    entity_type: str | None = None,
+) -> list[dict]:
+    """Fetch the trail and coerce it into payload dicts for the pure helpers."""
+    entries = await list_audit_log_entries(
+        db,
+        action=action,
+        severity=severity,
+        actor_user_id=actor_user_id,
+        entity_type=entity_type,
+        limit=limit,
+    )
+    return [coerce_entry(entry) for entry in entries]
+
+
+@router.post(
+    "/log/auditable",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AuditLogEntryOut,
+)
+async def create_governed_audit_log_entry(
+    payload: AuditableLogEntryCreate,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Record a governed entry: alias-resolved, redacted, justified, sealed."""
+    try:
+        entry = await record_auditable(
+            db,
+            action=payload.action,
+            summary=payload.summary,
+            actor_user_id=current_user.id,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            detail=payload.detail,
+            severity=payload.severity,
+            source=payload.source,
+            strict=payload.strict,
+            require_justification=payload.require_justification,
+            seal=payload.seal,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return entry_to_payload(entry)
+
+
+@router.get("/logs/integrity", response_model=AuditLogIntegrityReport)
+async def read_audit_log_integrity(
+    limit: int = Query(default=200, ge=1, le=1000),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Re-derive the tamper-evident seal chain over the most recent entries."""
+    entries = await list_audit_log_entries(db, limit=limit)
+    # ``seal_entries`` walks oldest-first; the list endpoint is newest-first.
+    chain = verify_seal_chain(seal_entries(reversed(entries)))
+    return chain
+
+
+@router.get("/logs/actors", response_model=AuditActorActivityReport)
+async def read_audit_actor_activity(
+    limit: int = Query(default=200, ge=1, le=1000),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Per-actor volume, span, and severity/action mix."""
+    payloads = await _trail_payloads(db, limit=limit)
+    return summarize_actor_activity(payloads)
+
+
+@router.get("/logs/timeline", response_model=AuditTimelineReport)
+async def read_audit_entity_timeline(
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Chronological history for one entity (all entities when unfiltered)."""
+    payloads = await _trail_payloads(db, limit=limit, entity_type=entity_type)
+    events = build_entity_timeline(payloads, entity_type=entity_type, entity_id=entity_id)
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "count": len(events),
+        "events": events,
+    }
+
+
+@router.get("/logs/anomalies", response_model=AuditAnomalyReport)
+async def read_audit_anomalies(
+    limit: int = Query(default=500, ge=1, le=2000),
+    burst_threshold: int | None = Query(default=None, ge=1),
+    window_minutes: int | None = Query(default=None, ge=1),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Run the anomaly rule table (bursts, after-hours, unjustified actions)."""
+    thresholds = dict(AUDIT_ANOMALY_DEFAULTS)
+    if burst_threshold is not None:
+        thresholds["burst_threshold"] = burst_threshold
+    if window_minutes is not None:
+        thresholds["window_minutes"] = window_minutes
+    payloads = await _trail_payloads(db, limit=limit)
+    findings = detect_audit_anomalies(payloads, thresholds=thresholds)
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "scanned": len(payloads),
+        "finding_count": len(findings),
+        "rules": sorted({finding["rule"] for finding in findings}),
+        "thresholds": thresholds,
+        "findings": findings,
+    }
+
+
+@router.get("/logs/retention", response_model=AuditRetentionReport)
+async def read_audit_retention(
+    limit: int = Query(default=500, ge=1, le=2000),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Split the trail into entries past their retention window and the rest."""
+    payloads = await _trail_payloads(db, limit=limit)
+    return plan_retention(payloads)
+
+
+@router.get("/logs/export", response_model=AuditLogExportReport)
+async def export_audit_logs(
+    format: str = Query(default="ndjson", pattern="^(ndjson|csv)$"),
+    action: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    actor_user_id: int | None = Query(default=None, ge=1),
+    entity_type: str | None = Query(default=None),
+    page_size: int = Query(default=200, ge=1, le=1000),
+    max_pages: int = Query(default=25, ge=1, le=200),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+    db: AsyncSession = Depends(deps.get_db),
+):
+    """Stream the trail out as a single NDJSON or CSV document."""
+    try:
+        return await export_audit_trail(
+            db,
+            fmt=format,
+            page_size=page_size,
+            max_pages=max_pages,
+            action=action,
+            severity=severity,
+            actor_user_id=actor_user_id,
+            entity_type=entity_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
 
 
 # --- High-velocity audit pipeline & immutable transactions --------------------

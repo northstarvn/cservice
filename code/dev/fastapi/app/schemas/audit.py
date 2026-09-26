@@ -128,6 +128,130 @@ class AuditLogSummaryReport(BaseModel):
     by_severity: List[AuditLogSummaryItem] = Field(default_factory=list)
 
 
+# --- Governed writes & forensic reads -----------------------------------------
+#
+# These cover the expanded ``services/audit_log.py`` surface: validated/sealed
+# writes, tamper verification, actor rollups, entity timelines, anomaly
+# findings, retention planning, and export.
+
+
+class AuditableLogEntryCreate(BaseModel):
+    """Governed write: aliases resolve, sensitive detail must justify itself."""
+
+    action: str = Field(..., min_length=1, max_length=80)
+    entity_type: str = Field(default="system", max_length=50)
+    entity_id: str = Field(default="", max_length=120)
+    summary: str = Field(..., min_length=1)
+    detail: Dict[str, Any] = Field(default_factory=dict)
+    severity: Optional[str] = Field(
+        default=None, pattern="^(info|warning|critical)$"
+    )
+    source: str = Field(default="api", max_length=50)
+    strict: bool = Field(
+        default=False, description="Reject actions outside the audit catalog"
+    )
+    require_justification: bool = Field(
+        default=True, description="Enforce the action's justification requirement"
+    )
+    seal: bool = Field(default=True, description="Stamp the hash-chain seal")
+
+
+class AuditLogIntegrityReport(BaseModel):
+    generated_at: datetime
+    valid: bool
+    entries: int
+    broken_at: Optional[int] = None
+    algo: str
+    policy: str
+    sealed_fields: List[str] = Field(default_factory=list)
+
+
+class AuditActorActivityOut(BaseModel):
+    actor_user_id: Optional[int] = None
+    count: int
+    distinct_entities: int
+    by_action: Dict[str, int] = Field(default_factory=dict)
+    by_severity: Dict[str, int] = Field(default_factory=dict)
+    peak_severity: str = "info"
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+
+
+class AuditActorActivityReport(BaseModel):
+    generated_at: datetime
+    actor_count: int
+    actors: List[AuditActorActivityOut] = Field(default_factory=list)
+
+
+class AuditTimelineEventOut(BaseModel):
+    id: Optional[int] = None
+    action: str
+    actor_user_id: Optional[int] = None
+    severity: str
+    summary: str = ""
+    source: str = ""
+    occurred_at: Optional[datetime] = None
+    changed: Optional[bool] = None
+
+
+class AuditTimelineReport(BaseModel):
+    generated_at: datetime
+    entity_type: Optional[str] = None
+    entity_id: Optional[str] = None
+    count: int
+    events: List[AuditTimelineEventOut] = Field(default_factory=list)
+
+
+class AuditAnomalyFindingOut(BaseModel):
+    rule: str
+    severity: str
+    subject: str
+    message: str
+    count: int = 0
+    entry_ids: List[Optional[int]] = Field(default_factory=list)
+    observed_at: Optional[datetime] = None
+
+
+class AuditAnomalyReport(BaseModel):
+    generated_at: datetime
+    scanned: int
+    finding_count: int
+    rules: List[str] = Field(default_factory=list)
+    thresholds: Dict[str, Any] = Field(default_factory=dict)
+    findings: List[AuditAnomalyFindingOut] = Field(default_factory=list)
+
+
+class AuditRetentionRecordOut(BaseModel):
+    id: Optional[int] = None
+    action: str
+    severity: str
+    age_days: float
+    retention_days: int
+    expires_on: datetime
+
+
+class AuditRetentionReport(BaseModel):
+    generated_at: datetime
+    now: datetime
+    expired_count: int
+    keep_count: int
+    expired: List[AuditRetentionRecordOut] = Field(default_factory=list)
+    keep: List[AuditRetentionRecordOut] = Field(default_factory=list)
+    policies: Dict[str, int] = Field(default_factory=dict)
+    retention_by_severity: Dict[str, int] = Field(default_factory=dict)
+    minimum_days: int
+
+
+class AuditLogExportReport(BaseModel):
+    format: str
+    entry_count: int
+    page_size: int
+    max_pages: int
+    truncated: bool
+    columns: Optional[List[str]] = None
+    content: str
+
+
 # --- High-velocity audit pipeline ---------------------------------------------
 
 

@@ -46,62 +46,91 @@ Rules of thumb:
 
 ## Current Map — `CODE_MAP.newick`
 
-Tree size: **278 leaves / 53 internal nodes** (validated, see maintenance
+Tree size: **428 leaves / 53 internal nodes** (validated, see maintenance
 rule 4). Rendered multi-line for readability; the single-line Newick file is
 the source of truth.
 
 ```
 (((startup_lifespan,cors,exception_handler,meta,health,runtime,scoring_catalog,i18n_endpoint,
-    features,ecosystem,tenants,partitions,zero_trust,decisions,regional_endpoint)main,
-  (engine,pool_config,session,ping,retry)db,
-  (verify_password,hash_password,access_token,refresh_token,decode_token,password_policy)security,
-  (current_user,optional_user,admin_user,policy_or_admin,policy_score,control_posture)auth_deps,
-  (locale_resolution,locale_payload,message_catalog,translate,catalog_builder)localization,
-  ((registry,route_for_tenant,tenant_session,declared_tenants,catalog)tenant_router,
-   (policies,ensure_partition,archive,drop_expired,worker,catalog)partition_manager)multi_tenant,
-  ((hmac_signer,ed25519_signer,sign_bytes,verify_bytes,signature_envelope,catalog)hsm_signer,
-   (modalities,register,validate,revoke,list_templates,catalog)biometric_vault,
-   (risk_levels,risk_rules,evaluate,adaptive_weights,catalog)risk_evaluator,
-   (access_levels,cell_matrix,evaluate,resolve_roles,catalog)cell_matrix)zero_trust,
-  ((workers,batch,submit,drain,dead_letter,stats,catalog)high_throughput_pipeline,
-   (wire_format,transaction,hash_chain,append_only_log,spec_catalog)protobuf_transaction_spec)event_pipeline,
-  ((registry,snapshots,canary,shadow_scoring,promote,catalog)model_versioning,
-   (what_if,risk_scenarios,retention_scenarios,reports,catalog)simulation_engine,
-   (decision_trace,trace_store,explain,factor_trail,catalog)explainability,
-   (version_guard,compare_and_swap,stale_conflict,conflict_policy)optimistic_locking)decision_intelligence,
-  ((field_dsl,combinators,date_ops,expressions,catalog)rule_engine,
-   (calendars,labor_rules,tax_rules,booking_assessment,catalog)regional_policy)business_rules)infra,
- ((timestamp,tenant_scoped,partitioned,security_event)model_bases,user,booking,booking_event,
-  booking_assignment,chat_history,interaction_signal,retention_snapshot,recovery_outcome,
-  recovery_action,customer_policy_score,topic_selection,communication_override,arrears_entry,
-  points_wallet,points_transaction,audit_log_entry)models,
- ((register,login,me,policy_score,can_access,policy_decision,change_password)users,
-  (lifecycle_crud,analytics,assignment_report,audit_history,export)bookings,
-  (history,sentiment,insights,recovery,recovery_playbooks,loyalty_journey,retention_dashboard,
-   snapshot_operations,activity_tree,communication_strategy,arrears_payments,points_exchange,
-   topic_policy)chat,
-  (catalog,themes,intelligence,coverage,portfolio,workspace,overview,search,suggestions,
-   recommendations,current_selection,history)topics,
-  (efficiency,enhancements,audit_catalog,trail_catalog,log,logs,summary,pipeline_stats,
-   pipeline_event,transactions,protobuf_spec)audit)routers,
- ((area_scoring,sentiment,insights,recovery,topic_ranking,topic_policy,capabilities)chat_analytics,
-  (catalog,search,suggestion,theme,selection,workspace,intelligence,coverage)topics,
-  (lifecycle,normalization,transitions,ownership,assignment_report)bookings,
-  (policy_tier,control_posture,access_band,can_access,decision_reports)policy_scoring,
-  (snapshots,trends,deltas,retention_dashboard)retention,
-  (freshness,health,operations_status,compliance,posture,automation,launch_readiness,go_no_go)retention_snapshot_ops,
-  (scenario_catalog,matching,journey_plan,admin_report)loyalty_journey,
-  (grouping,ranking,smart_filter,anomaly_rules,admin_trees)activity_tree,
-  (override,policy,culture,profile,mood,decision_trail)communication_strategy,
-  (component_scoring,classifications,enhancement_proposals,catalog)efficiency_audit,
-  (interest_policies,late_fees,quote,open,settle,waive_interest,waive_fees,waiver_policy)arrears_payments,
-  (rate_rules,rate_multipliers,campaigns,quote,wallet,ledger,admin_rollup)points_exchange,
-  (realtime_context,playbook_rules,credit_points,escalation,policy_guardrail,orchestrator,
-   auto_sweep,catalog)recovery_playbooks,
-  (record,list,summary,action_catalog)audit_log)services,
- ((user,token,booking,policy_score,topic_selection)schemas_core,
-  (insight,recovery,recovery_playbooks,retention,snapshot_ops,topic_ranking,topic_policy)schemas_chat,
-  (efficiency,enhancements,audit_trail)schemas_audit)schemas)cservice_backend;
+      features,ecosystem,tenants,tenants_policy,partitions,zero_trust,decisions,
+      regional_endpoint)main,
+    (engine,pool_config,session,ping,retry,retry_policy,retry_classification,circuit_breaker,
+      statement_timeouts,advisory_lock,transaction,pool_status,db_health,readiness_probe,
+      test_connection,catalog)db,
+    (verify_password,hash_password,access_token,refresh_token,decode_token,password_policy,
+      key_rotation,token_revocation,token_validation,step_up,api_keys,password_strength,
+      password_history,catalog)security,
+    (current_user,optional_user,admin_user,policy_or_admin,policy_score,control_posture,
+      principal,optional_principal,require_principal,correlation_id,require_scopes,require_roles,
+      require_step_up,require_cell_access,require_tenant,rate_limit,catalog)auth_deps,
+    (locale_resolution,locale_payload,message_catalog,translate,catalog_builder,
+      locale_normalization,accept_language,negotiation,plural_rules,fallback_chain,coverage,
+      overrides,translate_many)localization,
+((registry,route_for_tenant,tenant_session,declared_tenants,catalog,tenant_validation,
+        request_resolution,dsn_redaction,routing_policy,tenant_health,provisioning_plan)tenant_router,
+      (policies,ensure_partition,archive,drop_expired,worker,catalog,identifier_validation,
+        period_keys,sql_builders,policy_validation,catalog_reads,legal_holds,lifecycle_plan,
+        adopt_partitions,attach_restore,dry_run)partition_manager)multi_tenant,
+((hmac_signer,ed25519_signer,sign_bytes,verify_bytes,signature_envelope,catalog,
+        backend_registry,signing_key_ring,key_fingerprint,detailed_verification,co_signature,
+        multi_signature,replay_guard,self_test,health)hsm_signer,
+      (modalities,register,validate,revoke,list_templates,catalog,adaptive_thresholds,
+        slot_enrollment,challenges,attempt_lockout,match_decision,history,state_export,
+        state_import,snapshot)biometric_vault,
+      (risk_levels,risk_rules,evaluate,adaptive_weights,catalog,signal_normalization,
+        context_gaps,required_controls,action_mapping,counterfactuals,weight_history,
+        weight_versions,outcome_batches,risk_decisions)risk_evaluator,
+      (access_levels,cell_matrix,evaluate,resolve_roles,catalog,row_scopes,cell_overrides,
+        masking,resource_plans,override_simulation,temporary_grants)cell_matrix)zero_trust,
+((workers,batch,submit,drain,dead_letter,stats,catalog)high_throughput_pipeline,
+      (wire_format,transaction,hash_chain,append_only_log,spec_catalog)protobuf_transaction_spec)event_pipeline,
+((registry,snapshots,canary,shadow_scoring,promote,catalog)model_versioning,
+      (what_if,risk_scenarios,retention_scenarios,reports,catalog)simulation_engine,
+      (decision_trace,trace_store,explain,factor_trail,catalog)explainability,
+      (version_guard,compare_and_swap,stale_conflict,conflict_policy,versioned_records,
+        versioned_store,field_diffs,json_merge_patch,retry_updates,lock_sets,catalog)optimistic_locking)decision_intelligence,
+((field_dsl,combinators,date_ops,expressions,catalog)rule_engine,
+      (calendars,labor_rules,tax_rules,booking_assessment,catalog)regional_policy)business_rules)infra,
+((timestamp,tenant_scoped,partitioned,security_event,soft_delete,row_version,expiring,
+      actor_audit,serialization,security_event_extensions,entity_registry,catalog)model_bases,
+    user,booking,booking_event,booking_assignment,chat_history,interaction_signal,
+    retention_snapshot,recovery_outcome,recovery_action,customer_policy_score,topic_selection,
+    communication_override,arrears_entry,points_wallet,points_transaction,audit_log_entry)models,
+((register,login,me,policy_score,can_access,policy_decision,change_password,session_refresh,
+      logout,session_inventory,step_up,api_keys,password_policy,password_feedback,
+      security_posture,catalog)users,
+    (lifecycle_crud,analytics,assignment_report,audit_history,export)bookings,
+    (history,sentiment,insights,recovery,recovery_playbooks,loyalty_journey,retention_dashboard,
+      snapshot_operations,activity_tree,communication_strategy,arrears_payments,points_exchange,
+      topic_policy)chat,
+    (catalog,themes,intelligence,coverage,portfolio,workspace,overview,search,suggestions,
+      recommendations,current_selection,history)topics,
+    (efficiency,enhancements,audit_catalog,trail_catalog,log,logs,summary,pipeline_stats,
+      pipeline_event,transactions,protobuf_spec,governed_log,integrity,actors,timeline,anomalies,
+      retention,export)audit)routers,
+((area_scoring,sentiment,insights,recovery,topic_ranking,topic_policy,capabilities)chat_analytics,
+    (catalog,search,suggestion,theme,selection,workspace,intelligence,coverage)topics,
+    (lifecycle,normalization,transitions,ownership,assignment_report)bookings,
+    (policy_tier,control_posture,access_band,can_access,decision_reports)policy_scoring,
+    (snapshots,trends,deltas,retention_dashboard)retention,
+    (freshness,health,operations_status,compliance,posture,automation,launch_readiness,go_no_go)retention_snapshot_ops,
+    (scenario_catalog,matching,journey_plan,admin_report)loyalty_journey,
+    (grouping,ranking,smart_filter,anomaly_rules,admin_trees)activity_tree,
+    (override,policy,culture,profile,mood,decision_trail)communication_strategy,
+    (component_scoring,classifications,enhancement_proposals,catalog)efficiency_audit,
+    (interest_policies,late_fees,quote,open,settle,waive_interest,waive_fees,waiver_policy)arrears_payments,
+    (rate_rules,rate_multipliers,campaigns,quote,wallet,ledger,admin_rollup)points_exchange,
+    (realtime_context,playbook_rules,credit_points,escalation,policy_guardrail,orchestrator,
+      auto_sweep,catalog)recovery_playbooks,
+    (record,list,summary,action_catalog,governed_record,action_aliases,action_specs,
+      severity_policy,justification,sensitive_detail,redaction,change_detail,paging,count,
+      retention_plan,retention_advice,actor_activity,entity_timeline,anomaly_detection,
+      seal_chain,chain_verification,trail_export,catalog)audit_log)services,
+((user,token,booking,policy_score,topic_selection,session_lifecycle,machine_credentials,
+      password_feedback,security_posture,step_up)schemas_core,
+    (insight,recovery,recovery_playbooks,retention,snapshot_ops,topic_ranking,topic_policy)schemas_chat,
+    (efficiency,enhancements,audit_trail,governed_write,integrity,actors,timeline,anomalies,
+      retention,export)schemas_audit)schemas)cservice_backend;
 ```
 
 ## Maintenance Rules
@@ -125,6 +154,90 @@ the source of truth.
    domain). Leaf-level additions are recorded in the log without a bump.
 
 ## Revision Log
+
+### r5 — flexible-core expansion (2026-09-26)
+
+Thin-group expansion pass: the fourteen smallest function groups (LOC ranked)
+were grown into configurable, introspectable surfaces. No new layer and no new
+top-level domain, so per maintenance rule 6 the revision stays `r5`; the tree
+grew 278/53 → **428 leaves / 53 internal nodes** and no r1–r5 leaf was lost.
+Every change is additive — existing signatures, returned payloads and pinned
+catalog key sets are untouched, and no DDL was added to an existing table.
+
+- **Infra — resilience & observability**
+  - `db`: `retry_policy` (frozen `RetryPolicy` with classification, backoff,
+    jitter; `policy=None` keeps the exact legacy `retry_async` behavior),
+    `circuit_breaker` (`CircuitBreaker` / `CircuitOpenError`),
+    `statement_timeouts`, `advisory_lock`, `pool_status`, `db_health`,
+    `readiness_probe`, `test_connection`, `catalog`.
+  - `security`: `key_rotation` (kid-bearing ring, `SECRET_KEY_PREVIOUS`),
+    `token_revocation` (`TokenRevocationRegistry`, TTL-bounded jti deny-list),
+    `token_validation` (`TokenValidation` explains *why* a token failed),
+    `step_up` (`acr`/`amr` claims, `STEP_UP_LEVELS`), `api_keys`
+    (digest-backed `ApiKeyRegistry` with hierarchical scopes),
+    `password_strength`, `password_history` (bcrypt-verify reuse ring),
+    `catalog`.
+  - `auth_deps`: `principal` (frozen `Principal` unifying user, API-key and
+    delegated credentials), `optional_principal`, `require_principal`,
+    `correlation_id`, `require_scopes`, `require_roles`, `require_step_up`,
+    `require_cell_access`, `require_tenant`, `rate_limit`, `catalog`.
+  - `localization`: `locale_normalization`, `accept_language`,
+    `negotiation` (`negotiate_locale`), `plural_rules`, `fallback_chain`,
+    `coverage` (`catalog_coverage`), `overrides` (`CatalogOverrides`),
+    `translate_many`.
+- **Models** — `model_bases` gains `soft_delete`, `row_version`, `expiring`,
+  `actor_audit`, `serialization`, `security_event_extensions` (extra STI
+  families live in their own table so the pinned 3-key `families` catalog stays
+  intact), `entity_registry`, `catalog`. No existing table changed.
+- **Multi-tenancy** — `tenant_router`: `tenant_validation`,
+  `request_resolution`, `dsn_redaction`, `routing_policy`
+  (`build_tenant_routing_policy` + `GET /meta/tenants/policy`), `tenant_health`,
+  `provisioning_plan`. `partition_manager`: `identifier_validation`
+  (`IDENTIFIER_PATTERN` strict / `PARTITION_NAME_PATTERN` allows `-` in period
+  keys), `period_keys`, `sql_builders` (attach/detach/restore/archive/drop),
+  `policy_validation`, `catalog_reads`, `legal_holds`,
+  `lifecycle_plan` (`plan_lifecycle`), `adopt_partitions`, `attach_restore`,
+  `dry_run`.
+- **Zero-trust** — `hsm_signer`: `backend_registry`, `signing_key_ring`
+  (rotation), `key_fingerprint`, `detailed_verification`, `co_signature`
+  (`sign_multi` / `verify_multi`), `multi_signature`, `replay_guard`
+  (`ReplayGuard`), `self_test`, `health`. `biometric_vault`:
+  `adaptive_thresholds` (config-driven per-modality bands), `slot_enrollment`,
+  `challenges` (replay-gated), `attempt_lockout`, `match_decision`,
+  `history`, `state_export` / `state_import`, `snapshot`.
+  `risk_evaluator`: `signal_normalization`, `context_gaps`,
+  `required_controls`, `action_mapping` (`RISK_ACTIONS`),
+  `counterfactuals` (+ `cheapest_clearing_signal`), `weight_history`,
+  `weight_versions` (`weights_at`), `outcome_batches` (`apply_risk_outcomes`,
+  one version bump per batch), `risk_decisions` (`evaluate_risk_decision` +
+  `RiskDecisionStore`). `evaluate_risk` score semantics are unchanged.
+  `cell_matrix`: `row_scopes`, `cell_overrides`, `masking`, `resource_plans`,
+  `override_simulation` (thread-safe), `temporary_grants`.
+- **Decision intelligence** — `optimistic_locking`: `versioned_records`,
+  `versioned_store`, `field_diffs`, `json_merge_patch`, `retry_updates`,
+  `lock_sets`, `catalog`.
+- **Audit trail** — `services.audit_log` (186 → 1326 LOC) gains
+  `governed_record` (`record_auditable`: justification, sensitive-detail
+  redaction), `action_aliases`, `action_specs`, `severity_policy`,
+  `justification`, `sensitive_detail`, `redaction`, `change_detail`
+  (`audit_diff`), `paging` (`iter_audit_pages`), `count`, `retention_plan`,
+  `retention_advice`, `actor_activity`, `entity_timeline`,
+  `anomaly_detection`, `seal_chain` (`SealChain`), `chain_verification`,
+  `trail_export` (CSV + NDJSON). `routers.audit` gains `governed_log`,
+  `integrity`, `actors`, `timeline`, `anomalies`, `retention`, `export`.
+- **Identity** — `routers.users` (185 → ~880 LOC) gains `session_refresh`
+  (`POST /users/refresh`, rotation burns the presented refresh token),
+  `logout` (single-token and `all_sessions`), `session_inventory`,
+  `step_up` (mint + describe `acr`/`amr`), `api_keys` (self-service issue/list/
+  revoke; the `*` wildcard is never self-assignable), `password_policy`,
+  `password_feedback` (non-mutating strength/advice), `security_posture`,
+  `catalog`. `/register`, `/login`, `/me` and `/me/password` are byte-identical.
+- **Meta wiring** — `GET /meta/tenants/policy`; 8 new `/meta/features` keys;
+  identity routes in the `/meta/ecosystem` `identity` subservice; 16 new
+  `schemas_core` / `schemas_audit` leaves.
+- **Tests**: `tests/test_flexible_core_expansion.py` (77),
+  `tests/test_risk_partition_expansion.py` (29),
+  `tests/test_users_identity_expansion.py` (42) — suite grew 552 → 700 passing.
 
 ### r5 (2026-09-26)
 

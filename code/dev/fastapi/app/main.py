@@ -233,8 +233,16 @@ async def app_ecosystem():
         "environment": APP_ENV,
         "subservices": {
             "identity": {
-                "routes": ["/users/me", "/users/password"],
-                "purpose": "authentication and account management",
+                "routes": [
+                    "/users/me",
+                    "/users/password",
+                    "/users/refresh",
+                    "/users/logout",
+                    "/users/me/sessions",
+                    "/users/me/step-up",
+                    "/users/me/api-keys",
+                ],
+                "purpose": "authentication, account management, and session lifecycle",
                 "status": "ready",
             },
             "booking_core": {
@@ -474,9 +482,17 @@ async def app_feature_summary():
             "audit_log": "/audit/log",
             "audit_logs": "/audit/logs",
             "audit_log_summary": "/audit/logs/summary",
+            "audit_log_governed": "/audit/log/auditable",
+            "audit_log_integrity": "/audit/logs/integrity",
+            "audit_log_actors": "/audit/logs/actors",
+            "audit_log_timeline": "/audit/logs/timeline",
+            "audit_log_anomalies": "/audit/logs/anomalies",
+            "audit_log_retention": "/audit/logs/retention",
+            "audit_log_export": "/audit/logs/export",
             "audit_trail_catalog": "/audit/trail-catalog",
             "i18n_catalog": "/meta/i18n",
             "tenant_routing": "/meta/tenants",
+            "tenant_routing_policy": "/meta/tenants/policy",
             "partition_management": "/meta/partitions",
             "zero_trust": "/meta/zero-trust",
             "pipeline_event": "/audit/pipeline/event",
@@ -493,6 +509,14 @@ async def app_feature_summary():
             "regional_policy": "/meta/regional",
             "recovery_playbooks": "/chat/recovery/playbooks",
             "recovery_playbooks_admin": "/chat/admin/recovery/playbooks",
+            "session_refresh": "/users/refresh",
+            "session_logout": "/users/logout",
+            "session_inventory": "/users/me/sessions",
+            "step_up": "/users/me/step-up",
+            "api_keys": "/users/me/api-keys",
+            "password_policy": "/users/password-policy",
+            "password_feedback": "/users/me/password-feedback",
+            "security_posture": "/users/me/security-posture",
         },
     }
 
@@ -545,6 +569,7 @@ async def scoring_catalog():
         "rule_engine": rule_engine.build_rule_engine_catalog(),
         "regional_policy": regional_policy.build_regional_policy_catalog(),
         "recovery_playbooks": recovery_playbooks.build_recovery_playbook_catalog(),
+        "identity": users.build_users_catalog(),
     }
 
 
@@ -718,6 +743,12 @@ async def explanation_detail(decision_id: str):
 async def tenants_metadata():
     """Expose runtime multi-tenant DB routing: mode, registration, pool tuning."""
     return tenant_router.build_tenant_router_catalog()
+
+
+@app.get("/meta/tenants/policy")
+async def tenant_routing_policy_metadata():
+    """Expose the tenant routing policy: id pattern, allowlist, lifecycle, plan."""
+    return tenant_router.build_tenant_routing_policy()
 
 
 @app.get("/meta/partitions")

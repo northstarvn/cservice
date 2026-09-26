@@ -372,5 +372,134 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
 - Tests: `tests/test_predictive_recovery_expansion.py` (27) — suite
   525 → 552 passing.
 
+### Flexible-core expansion (thin-group pass, r5 leaf-level growth)
+- Fourteen LOC-ranked thinnest function groups were grown into configurable,
+  introspectable surfaces. **All additive**: existing signatures, returned
+  payloads and pinned catalog key sets are untouched, and no existing table
+  changed (verified by diffing `sorted(Base.metadata.tables)` against a stashed
+  tree — 17 tables identical).
+- `security.py` (122 -> ~936 LOC): `key_id_for`/`key_ring` rotation with
+  `SECRET_KEY_PREVIOUS`; `TokenRevocationRegistry` (TTL-bounded jti deny-list
+  with a subject index, so "revoke everything" is O(1));
+  `decode_token_full` -> `TokenValidation` (explains *why*: expired / revoked /
+  wrong_token_type / audience_mismatch / issuer_mismatch / missing_subject);
+  `STEP_UP_LEVELS` + `with_step_up` (`acr`/`amr` claims); digest-backed
+  `ApiKeyRegistry` with hierarchical `:` and `*` scopes (secret never stored);
+  `PasswordPolicy` (composable via `with_overrides`), `validate_password_strength`,
+  `score_password_strength` (0-4 + entropy/penalties), `PasswordHistory`
+  (bcrypt-*verify* reuse ring, because bcrypt is salted so equality cannot
+  work). `security_scheme` stays `HTTPBearer()` (auto_error) — the historical
+  deps depend on its 403; `optional_security_scheme` is the new
+  `auto_error=False` variant.
+- `db.py` (104 -> ~542 LOC): `RetryPolicy` (frozen: classification, backoff,
+  jitter) + `retry_async`. **Keep-as-is decision:** `policy=None` reproduces the
+  exact legacy retry behavior, so every pre-existing caller is byte-identical
+  and the new classification/backoff only activates when a policy is passed.
+  Plus `CircuitBreaker`/`CircuitOpenError`, statement timeouts, advisory lock,
+  `pool_status`, `db_health`, `readiness_probe`, `build_db_catalog`.
+- `deps.py` (96 -> ~595 LOC): frozen `Principal` unifying the three credential
+  shapes (JWT user, `X-API-Key` machine, delegated `act` claim);
+  `get_optional_principal` / `get_principal`; declarative `require_scopes`,
+  `require_roles`, `require_step_up`, `require_cell_access`, `require_tenant`,
+  `require_rate_limit`; correlation id; `build_deps_catalog`. All seven
+  historical dependencies keep their exact behavior.
+- `i18n.py` (153 -> ~564 LOC): `normalize_locale`, `parse_accept_language`,
+  `negotiate_locale`, `translate_many`, `catalog_coverage`,
+  `CatalogOverrides` (per-locale catalog patching without mutating the shipped
+  tables), richer plural/fallback metadata. `locales == ["en","es","fr"]` and
+  `fallback_locale == "en"` still hold.
+- `model_bases.py` (121 -> ~390 LOC): `SoftDeleteMixin`, `RowVersionMixin`,
+  `ExpiringMixin`, `ActorAuditMixin`, `SerializationMixin`, `EntityRegistry`.
+  **Keep-as-is decision:** the extra single-table-inheritance families live in
+  `SECURITY_EVENT_EXTENSIONS`, not `families`, so the pinned 3-key
+  `families` catalog and `family_count == 3` stay intact.
+- `cell_matrix.py` (116 -> ~723 LOC): row scopes, cell overrides, payload
+  masking, resource access plans, temporary grants, and
+  `simulate_overrides` made thread-safe (it now takes an overrides *table*
+  instead of mutating the module global). `ACCESS_LEVELS == ["none","read","write"]`
+  and the pinned `resources` key set are unchanged.
+- `optimistic_locking.py` (120 -> ~470 LOC): `VersionedRecord`/
+  `VersionedStore`, `diff_fields`, `apply_json_merge_patch` (RFC-7386),
+  `update_with_retry`, `LockSet`. `conflict_policy["expected_status"] == 409`
+  is pinned by tests and unchanged.
+- `tenant_router.py` (230 -> ~737 LOC): tenant-id validation, request
+  resolution, DSN redaction, per-tenant pool overrides, health/outcome tracking,
+  `plan_provisioning`, and `build_tenant_routing_policy()` exposed at
+  `GET /meta/tenants/policy`. **Keep-as-is decision:** `build_tenant_router_catalog()`
+  has an exact pinned 7-key set, so the new capability nests *inside*
+  `pool` / `registered` rather than adding siblings.
+- `hsm_signer.py` (222 -> ~831 LOC): `SigningKeyRing` (rotation),
+  `sign_envelope`/`decode_envelope`, `signer_info`, `signer_self_test`,
+  `get_signer_health`, `CoSignature` (`sign_multi`/`verify_multi`), and
+  `ReplayGuard`. **Keep-as-is decisions:** the key ring and replay guard are
+  **opt-in** (`verify_envelope_detailed(..., ring=)`, `replay_guard=`) and
+  `supported_backends == ["hmac","ed25519","mock"]` is unchanged.
+- `biometric_vault.py` (200 -> ~808 LOC): per-modality config-driven thresholds
+  with `adapt_threshold`, slot enrollment, `BiometricChallenge` issue/consume,
+  `attempt_state` lockout, `decide`, bounded history, and
+  `export_state`/`import_state`. **Keep-as-is decisions:** (a) `_digest_similarity`
+  is bit-level Hamming over SHA-256 digests — a documented deterministic
+  *pseudo*-similarity, and pre-existing tests depend on a 1-bit input change
+  scoring ~0.47, not ~1.0; (b) the challenge gate replays only and is
+  deliberately *not* mixed into the similarity digest.
+- `risk_evaluator.py` (263 -> ~771 LOC): `normalize_signal`, `context_gaps`,
+  `normalize_context`, `required_controls_for`, `RISK_ACTIONS` +
+  `action_for_level`, `controls_missing_for`, `counterfactual` +
+  `cheapest_clearing_signal`, bounded `weight_history` + `weights_at`,
+  `apply_risk_outcomes` (one version bump per batch; `clamped` is computed
+  against the *un-clamped* value so a rule already at its bound still reports
+  `True`), and `evaluate_risk_decision` + `RiskDecisionStore`.
+  **Keep-as-is decision:** `evaluate_risk` score semantics are preserved
+  byte-for-byte (`evaluate_risk({"device_proven": False, "odd_hour": True})["score"] == 32`);
+  every new behavior is additive.
+- `partition_manager.py` (260 -> ~708 LOC): two name patterns because period
+  keys legitimately contain `-` — `IDENTIFIER_PATTERN` (strict, for table and
+  policy ids) and `PARTITION_NAME_PATTERN`; `policy_for`, attach/detach/restore/
+  archive/drop SQL builders, `build_partition_policy`, `validate_policies`,
+  `parse_partition_rows`, `read_partition_catalog`, legal holds,
+  `plan_lifecycle`, `adopt_partitions`, `attach_partition`/`restore_partition`,
+  and `dry_run` on `run_cycle`. **Keep-as-is decision:** `drop_expired_partitions`
+  keeps its original `moment - end > retention` comparison (equivalently
+  `reference > end + retention`).
+- `services/audit_log.py` (186 -> 1341 LOC) and `routers/audit.py`:
+  `record_auditable` (justification required for sensitive actions, redaction of
+  sensitive detail keys), `iter_audit_pages` (bounded pages + `carry`),
+  actor rollups, entity timelines, anomaly detection, retention planning, a
+  `SealChain` with `verify_seal_chain`, and CSV/NDJSON export. **Keep-as-is
+  decision:** `record_audit_log_entry` / `list_audit_log_entries` /
+  `entry_to_payload` / `build_audit_log_catalog` / `build_audit_log_summary` are
+  left byte-compatible; all new behavior is additive pure functions.
+- `routers/users.py` (185 -> ~880 LOC): `POST /users/refresh` (rotation burns
+  the presented refresh token by default), `POST /users/logout` (single token or
+  `all_sessions`, idempotent), `GET /users/me/sessions`, `GET|POST
+  /users/me/step-up`, `GET|POST /users/me/api-keys` +
+  `DELETE /users/me/api-keys/{key_id}`, `GET /users/password-policy`, `POST
+  /users/me/password-feedback`, `GET /users/me/security-posture`, and
+  `build_users_catalog()`. **Keep-as-is decisions:** `/register`, `/login`, `/me`
+  and `/me/password` are byte-identical (including the exact
+  "Password updated successfully under controlled access posture." message that
+  a test pins); self-issued API keys can never be granted the `*` wildcard.
+- Bugs found and fixed while expanding (do not reintroduce): `redact_dsn`
+  produced `f"{user}:***@{host}"`; a 300 s expiry skew swallowed negative TTLs
+  (split into `expiry_tolerance_seconds` / `not_before_skew_seconds`);
+  `verify_multi` could not resolve keys without a ring; `skew` was referenced
+  before assignment in `verify_envelope_detailed`; `iter_audit_pages` deduped via
+  `getattr(row, "id")` which silently did nothing for mapping rows; the router
+  `_trail_payloads` used `entry_to_payload` (crashes on dict rows — now
+  `coerce_entry`); `biometric_vault._locked_out` compared a `datetime` to an ISO
+  string (new `_as_datetime`).
+- **Keep-as-is fact:** python-jose 3.5.0 has no `leeway` kwarg — leeway goes
+  through `options={"leeway": N}`; `verify_aud` defaults to `True` so it must be
+  disabled when `TOKEN_AUDIENCE` is unset.
+- Code map: leaf-level growth on `main`, `db`, `security`, `auth_deps`,
+  `localization`, `multi_tenant`, `zero_trust`, `decision_intelligence`,
+  `model_bases`, `routers.users`, `routers.audit`, `services.audit_log`,
+  `schemas_core`, `schemas_audit`; regenerated via
+  `python3 scripts/build_code_map.py` to 428 leaves / 53 internal nodes
+  (was 278/53). Revision stays `r5` (no new layer / top-level domain).
+- Tests: `tests/test_flexible_core_expansion.py` (77),
+  `tests/test_risk_partition_expansion.py` (29),
+  `tests/test_users_identity_expansion.py` (42) — suite 552 -> 700 passing.
+
 ## Open blockages
 - None.

@@ -365,6 +365,155 @@ class PasswordChangeResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Session lifecycle / machine credentials (additive)
+#
+# ``Token`` and ``PasswordChangeResult`` above keep their historical shape;
+# everything here is new surface for session refresh, logout, API keys and
+# non-mutating password feedback.
+# ---------------------------------------------------------------------------
+
+
+class TokenRefreshRequest(BaseModel):
+    refresh_token: str
+    # Rotation is the default: a presented refresh token is burned and a new one
+    # is handed back, so a stolen token is single-use.
+    rotate_refresh_token: bool = True
+    locale: Optional[str] = None
+
+
+class TokenRefreshResult(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    refresh_token: Optional[str] = None
+    refresh_expires_in: int = 0
+    rotated: bool = False
+    previous_jti_revoked: bool = False
+    locale: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionOut(BaseModel):
+    jti: str
+    token_type: str = "access"
+    subject: str = ""
+    issued_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    revoked: bool = False
+    active: bool = False
+
+
+class SessionInventoryOut(BaseModel):
+    subject: str
+    sessions: List[SessionOut]
+    active_sessions: int = 0
+    revoked_sessions: int = 0
+    mechanism: str = "jti deny-list, TTL-bounded"
+
+
+class LogoutRequest(BaseModel):
+    # Omit to revoke the credential that authenticated the call.
+    token: Optional[str] = None
+    all_sessions: bool = False
+
+
+class LogoutResult(BaseModel):
+    revoked: bool = False
+    scope: str = "token"
+    newly_revoked: int = 0
+    token_type: Optional[str] = None
+    message: str
+
+
+class ApiKeyCreate(BaseModel):
+    name: str
+    scopes: List[str] = Field(default_factory=list)
+    expires_in_days: Optional[int] = None
+
+
+class ApiKeyOut(BaseModel):
+    key_id: str
+    name: str
+    subject: str
+    scopes: List[str] = Field(default_factory=list)
+    hash_prefix: str = ""
+    created_at: str = ""
+    expires_at: Optional[str] = None
+    revoked: bool = False
+    # Only ever populated on the issuing response — the secret is not stored.
+    plaintext: Optional[str] = None
+
+
+class ApiKeyListOut(BaseModel):
+    subject: str
+    keys: List[ApiKeyOut]
+    total: int = 0
+    active: int = 0
+    revoked: int = 0
+
+
+class ApiKeyRevokeResult(BaseModel):
+    key_id: str
+    revoked: bool = False
+    message: str
+
+
+class PasswordFeedbackRequest(BaseModel):
+    candidate: str
+    # Optional: lets the advisor flag usernames embedded in the candidate.
+    username: Optional[str] = None
+
+
+class PasswordFeedbackOut(BaseModel):
+    accepted: bool = False
+    score: int = 0
+    entropy_bits: float = 0.0
+    adjusted_bits: float = 0.0
+    factors: List[str] = Field(default_factory=list)
+    penalties: List[str] = Field(default_factory=list)
+    issues: List[str] = Field(default_factory=list)
+    advice: List[str] = Field(default_factory=list)
+    reused: bool = False
+    contains_username: bool = False
+    policy: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PasswordPolicyOut(BaseModel):
+    policy: Dict[str, Any]
+    history_depth: int = 0
+    requirements: List[str] = Field(default_factory=list)
+    advice: List[str] = Field(default_factory=list)
+    scale: List[int] = Field(default_factory=lambda: [0, 4])
+
+
+class SecurityPostureOut(BaseModel):
+    subject: str
+    control_posture: str = "observed"
+    step_up_level: str = "none"
+    auth_method: str = "user"
+    active_sessions: int = 0
+    active_api_keys: int = 0
+    expired_api_keys: int = 0
+    highest_known_step_up: str = "none"
+    signed_in_as_admin: bool = False
+    recommendations: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class StepUpRequest(BaseModel):
+    level: str = "loa2"
+    method: str = "mfa"
+
+
+class StepUpResult(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    level: str = "none"
+    granted_level: str = "none"
+    satisfied: bool = False
+    methods: List[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Customer policy scoring
 # ---------------------------------------------------------------------------
 

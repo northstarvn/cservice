@@ -18,6 +18,15 @@ Surfaces:
 - ``HsmSignature`` / ``sign_bytes`` / ``verify_bytes`` — raw payload signing.
 - ``sign_envelope`` / ``verify_envelope`` / ``decode_envelope`` — signed
   JSON envelopes (base64 payload + detached signature + key metadata).
+- ``verify_envelope_detailed`` — the same check with a machine-readable reason
+  code and an optional freshness / anti-replay policy.
+- ``SIGNER_BACKENDS`` / ``register_signer_backend`` — a registry, so a real
+  PKCS#11 or cloud-KMS adapter is registered rather than edited in.
+- ``SIGNER_KEY_RING`` — rotation: several key ids can verify concurrently while
+  exactly one signs.
+- ``sign_multi`` / ``verify_multi`` — N-of-M co-signature for workflows that
+  need more than one authority.
+- ``signer_self_test`` / ``build_signer_health`` — round-trip + tamper probes.
 """
 from __future__ import annotations
 
@@ -26,9 +35,12 @@ import hashlib
 import hmac
 import json
 import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Protocol
+import uuid
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional, Protocol
 
 from app.security import SECRET_KEY
 
@@ -38,6 +50,38 @@ HSM_SIGNER_KEY = os.getenv("HSM_SIGNER_KEY", "") or SECRET_KEY
 HSM_SIGNER_KEY_PATH = os.getenv("HSM_SIGNER_KEY_PATH", "")
 
 SUPPORTED_BACKENDS = ("hmac", "ed25519", "mock")
+
+# Verification reason codes. Callers branch on these instead of re-deriving
+# *why* a signature was rejected.
+VERIFY_REASONS = (
+    "ok",
+    "malformed_envelope",
+    "payload_digest_mismatch",
+    "unknown_algorithm",
+    "key_id_mismatch",
+    "signature_invalid",
+    "expired",
+    "not_yet_valid",
+    "replayed",
+    "threshold_not_met",
+)
+
+# Envelope freshness / anti-replay policy. Off by default so an envelope stays
+# verifiable exactly as long as the key is; opt in per call site.
+SIGNATURE_POLICY_DEFAULTS: dict[str, Any] = {
+    "allowed_algorithms": ("HSM-HS256", "HSM-ED25519", "HSM-MOCK"),
+    "check_algorithm": True,
+    "check_key_id": True,
+    "require_expiry": False,
+    # How long past ``expires_at`` an envelope is still honoured. Zero by
+    # default so a short TTL means what it says.
+    "expiry_tolerance_seconds": 0,
+    # How much *early* a ``not_before`` is honoured, to absorb clock skew
+    # between the signer and the verifier.
+    "not_before_skew_seconds": 300,
+}
+
+SIGNATURE_KEY_STATUSES = ("active", "previous", "retired")
 
 
 class HsmSigner(Protocol):
@@ -124,22 +168,278 @@ class MockHsmSigner:
 
 _signer_cache: dict[str, HsmSigner] = {}
 
+# Backend name -> zero-arg factory. A PKCS#11 or cloud-KMS adapter registers
+# itself here, which is what keeps business code off a device library.
+SIGNER_BACKENDS: dict[str, Callable[[], HsmSigner]] = {
+    "hmac": HmacHsmSigner,
+    "ed25519": Ed25519HsmSigner,
+    "mock": MockHsmSigner,
+}
+
+
+def register_signer_backend(
+    name: str, factory: Callable[[], HsmSigner], *, replace: bool = False
+) -> None:
+    """Register (or replace) a signer backend factory."""
+    key = str(name).strip().lower()
+    if not key:
+        raise ValueError("backend name must be a non-empty string")
+    if key in SIGNER_BACKENDS and not replace:
+        raise ValueError(
+            f"backend {key!r} is already registered; pass replace=True to override"
+        )
+    SIGNER_BACKENDS[key] = factory
+    _signer_cache.pop(key, None)
+
+
+def registered_backends() -> list[str]:
+    return sorted(SIGNER_BACKENDS)
+
 
 def get_signer(backend: str | None = None) -> HsmSigner:
-    """Return the configured (cached) signer for a backend."""
+    """Return the configured (cached) signer for a backend.
+
+    An unrecognized backend still falls back to the software HMAC signer, so a
+    typo in ``HSM_BACKEND`` degrades rather than taking the process down.
+    """
     backend = backend or HSM_BACKEND
     if backend not in _signer_cache:
-        if backend == "ed25519":
-            _signer_cache[backend] = Ed25519HsmSigner()
-        elif backend == "mock":
-            _signer_cache[backend] = MockHsmSigner()
-        else:
-            _signer_cache[backend] = HmacHsmSigner()
+        factory = SIGNER_BACKENDS.get(backend)
+        _signer_cache[backend] = factory() if factory else HmacHsmSigner()
     return _signer_cache[backend]
 
 
 def reset_signer_cache() -> None:
     _signer_cache.clear()
+
+
+# --- key identification --------------------------------------------------------
+
+
+def public_key_pem(signer: HsmSigner) -> str:
+    """Export the public half of ``signer`` as PEM (empty for symmetric keys)."""
+    key = getattr(signer, "_public", None)
+    if key is None:
+        return ""
+    try:
+        from cryptography.hazmat.primitives import serialization
+
+        return key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode("ascii")
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
+def key_fingerprint(signer: HsmSigner) -> str:
+    """Stable, non-secret identifier for a signing key.
+
+    Prefers the public key, falls back to a digest of the symmetric secret, and
+    is prefixed with the algorithm so an id is self-describing.
+    """
+    material = public_key_pem(signer) or repr(getattr(signer, "key", ""))
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"{signer.algorithm}:{digest[:32]}"
+
+
+def signer_info(signer: HsmSigner) -> dict[str, Any]:
+    """Non-secret description of a key, safe to expose through metadata."""
+    pem = public_key_pem(signer)
+    return {
+        "key_id": signer.key_id,
+        "algorithm": signer.algorithm,
+        "fingerprint": key_fingerprint(signer),
+        "asymmetric": bool(pem),
+        "public_key_pem": pem,
+        "signer_class": type(signer).__name__,
+    }
+
+
+# --- key rotation --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SigningKey:
+    """One key in the ring, with its lifecycle status."""
+
+    key_id: str
+    signer: HsmSigner
+    status: str = "active"
+    created_at: str = ""
+
+    def to_summary(self) -> dict[str, Any]:
+        return {
+            "key_id": self.key_id,
+            "status": self.status,
+            "algorithm": self.signer.algorithm,
+            "fingerprint": key_fingerprint(self.signer),
+            "created_at": self.created_at,
+        }
+
+
+class SigningKeyRing:
+    """Several verifiable key ids, exactly one of which signs.
+
+    Rotation is a two-step data change: ``add`` the incoming key, then
+    ``activate`` it. The outgoing key stays ``previous`` so envelopes signed
+    before the cutover still verify, and is only ``retired`` once its overlap
+    window has passed.
+    """
+
+    def __init__(self) -> None:
+        self._keys: "OrderedDict[str, SigningKey]" = OrderedDict()
+
+    def add(self, key_id: str, signer: HsmSigner, *, status: str = "active") -> SigningKey:
+        if status not in SIGNATURE_KEY_STATUSES:
+            raise ValueError(
+                f"status must be one of {', '.join(SIGNATURE_KEY_STATUSES)}"
+            )
+        if status == "active":
+            self._demote_active()
+        key = SigningKey(
+            key_id=key_id,
+            signer=signer,
+            status=status,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._keys[key_id] = key
+        return key
+
+    def _demote_active(self) -> None:
+        for existing in self._keys.values():
+            if existing.status == "active":
+                self._keys[existing.key_id] = SigningKey(
+                    key_id=existing.key_id,
+                    signer=existing.signer,
+                    status="previous",
+                    created_at=existing.created_at,
+                )
+
+    def activate(self, key_id: str) -> SigningKey:
+        """Promote ``key_id`` to active; the previous active key is demoted."""
+        key = self.get(key_id)
+        if key is None:
+            raise KeyError(f"unknown key id {key_id!r}")
+        self._demote_active()
+        promoted = SigningKey(
+            key_id=key.key_id,
+            signer=key.signer,
+            status="active",
+            created_at=key.created_at,
+        )
+        self._keys[key_id] = promoted
+        return promoted
+
+    def retire(self, key_id: str) -> SigningKey:
+        """Stop accepting signatures from ``key_id`` but keep it inspectable."""
+        key = self.get(key_id)
+        if key is None:
+            raise KeyError(f"unknown key id {key_id!r}")
+        if key.status == "active":
+            raise ValueError("cannot retire the active key; activate another first")
+        retired = SigningKey(
+            key_id=key.key_id, signer=key.signer, status="retired", created_at=key.created_at
+        )
+        self._keys[key_id] = retired
+        return retired
+
+    def get(self, key_id: str | None) -> SigningKey | None:
+        if key_id is None:
+            return self.active()
+        return self._keys.get(key_id)
+
+    def active(self) -> SigningKey | None:
+        for key in self._keys.values():
+            if key.status == "active":
+                return key
+        return None
+
+    def previous_key_ids(self) -> list[str]:
+        return [k.key_id for k in self._keys.values() if k.status == "previous"]
+
+    def verifiable_key_ids(self) -> list[str]:
+        return [k.key_id for k in self._keys.values() if k.status != "retired"]
+
+    def key_ids(self) -> list[str]:
+        return list(self._keys)
+
+    def signer_for(self, key_id: str | None = None) -> HsmSigner | None:
+        """Signer for ``key_id``, or the active one when unspecified."""
+        key = self.get(key_id)
+        return key.signer if key else None
+
+    def verify(self, payload: bytes, signature: bytes, *, key_id: str | None = None) -> str | None:
+        """Verify against the named key, else every still-verifiable key.
+
+        Returns the key id that validated the signature, or ``None``.
+        """
+        candidates = (
+            [self._keys[key_id]]
+            if key_id and key_id in self._keys
+            else [k for k in self._keys.values() if k.status != "retired"]
+        )
+        for key in candidates:
+            if key.signer.verify(payload, signature):
+                return key.key_id
+        return None
+
+    def catalog(self) -> dict[str, Any]:
+        active = self.active()
+        return {
+            "size": len(self._keys),
+            "active_key_id": active.key_id if active else None,
+            "previous_key_ids": self.previous_key_ids(),
+            "verifiable_key_ids": self.verifiable_key_ids(),
+            "keys": [k.to_summary() for k in self._keys.values()],
+        }
+
+    def reset(self) -> None:
+        self._keys.clear()
+
+
+# Opt-in: verification falls back to ``get_signer()`` unless a ring is passed
+# explicitly, so rotation never changes legacy behaviour by accident.
+SIGNER_KEY_RING = SigningKeyRing()
+
+
+class ReplayGuard:
+    """Bounded nonce memory for anti-replay on signed envelopes.
+
+    Deliberately in-process and LRU-bounded: it is a fast local filter, not a
+    distributed replay store.
+    """
+
+    def __init__(self, capacity: int = 4096) -> None:
+        self.capacity = max(1, int(capacity))
+        self._seen: "OrderedDict[str, None]" = OrderedDict()
+
+    def check_and_remember(self, nonce: str) -> bool:
+        """``True`` when ``nonce`` is fresh (and now remembered), else ``False``."""
+        if not nonce:
+            return False
+        if nonce in self._seen:
+            self._seen.move_to_end(nonce)
+            return False
+        self._seen[nonce] = None
+        while len(self._seen) > self.capacity:
+            self._seen.popitem(last=False)
+        return True
+
+    def forget(self, nonce: str) -> None:
+        self._seen.pop(nonce, None)
+
+    def size(self) -> int:
+        return len(self._seen)
+
+    def clear(self) -> None:
+        self._seen.clear()
+
+
+REPLAY_GUARD = ReplayGuard()
+
+
+# --- signatures ----------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -149,16 +449,44 @@ class HsmSignature:
     signature: bytes
     payload_sha256: str
     signed_at: str
+    nonce: str = ""
+    expires_at: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key_id": self.key_id,
+            "algorithm": self.algorithm,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+            "payload_sha256": self.payload_sha256,
+            "signed_at": self.signed_at,
+            "nonce": self.nonce,
+            "expires_at": self.expires_at,
+        }
 
 
-def sign_bytes(payload: bytes, signer: HsmSigner | None = None) -> HsmSignature:
+def sign_bytes(
+    payload: bytes,
+    signer: HsmSigner | None = None,
+    *,
+    nonce: str | None = None,
+    ttl_seconds: int | None = None,
+) -> HsmSignature:
+    """Sign ``payload``; optionally bind a nonce and an expiry into the result."""
     signer = signer or get_signer()
+    signed_at = datetime.now(timezone.utc)
+    expires_at = (
+        (signed_at + timedelta(seconds=int(ttl_seconds))).isoformat()
+        if ttl_seconds
+        else None
+    )
     return HsmSignature(
         key_id=signer.key_id,
         algorithm=signer.algorithm,
         signature=signer.sign(payload),
         payload_sha256=hashlib.sha256(payload).hexdigest(),
-        signed_at=datetime.now(timezone.utc).isoformat(),
+        signed_at=signed_at.isoformat(),
+        nonce=nonce if nonce is not None else uuid.uuid4().hex,
+        expires_at=expires_at,
     )
 
 
@@ -172,12 +500,24 @@ def _canonical_bytes(data: dict) -> bytes:
     ).encode("utf-8")
 
 
-def sign_envelope(data: dict, signer: HsmSigner | None = None) -> dict[str, Any]:
-    """Sign arbitrary JSON and return a self-contained signed envelope."""
+def sign_envelope(
+    data: dict,
+    signer: HsmSigner | None = None,
+    *,
+    nonce: str | None = None,
+    ttl_seconds: int | None = None,
+    extra: dict | None = None,
+) -> dict[str, Any]:
+    """Sign arbitrary JSON and return a self-contained signed envelope.
+
+    ``nonce``/``ttl_seconds`` opt the envelope into replay and freshness
+    checking; both are omitted from the wire format when unset, so a plain
+    ``sign_envelope(data)`` is byte-identical to the original contract.
+    """
     signer = signer or get_signer()
     payload_bytes = _canonical_bytes(data)
-    sig = sign_bytes(payload_bytes, signer)
-    return {
+    sig = sign_bytes(payload_bytes, signer, nonce=nonce, ttl_seconds=ttl_seconds)
+    envelope = {
         "payload": base64.b64encode(payload_bytes).decode("ascii"),
         "key_id": sig.key_id,
         "algorithm": sig.algorithm,
@@ -185,18 +525,135 @@ def sign_envelope(data: dict, signer: HsmSigner | None = None) -> dict[str, Any]
         "payload_sha256": sig.payload_sha256,
         "signature": base64.b64encode(sig.signature).decode("ascii"),
     }
+    if sig.expires_at:
+        envelope["expires_at"] = sig.expires_at
+    if nonce is not None:
+        envelope["nonce"] = sig.nonce
+    if extra:
+        for key, value in extra.items():
+            envelope.setdefault(key, value)
+    return envelope
 
 
-def verify_envelope(envelope: dict, signer: HsmSigner | None = None) -> bool:
-    """Verify an envelope's integrity (payload unchanged + signature valid)."""
+def _parse_ts(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def verify_envelope_detailed(
+    envelope: dict,
+    signer: HsmSigner | None = None,
+    *,
+    policy: dict | None = None,
+    ring: SigningKeyRing | None = None,
+    replay_guard: ReplayGuard | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Verify an envelope and report *why* it passed or failed.
+
+    Returns ``{"valid", "reason", "key_id", "algorithm", "expires_at"}`` with
+    ``reason`` drawn from :data:`VERIFY_REASONS`. The checks are layered: shape,
+    payload digest, algorithm/key policy, freshness, replay, then signature.
+    """
+    rules = {**SIGNATURE_POLICY_DEFAULTS, **dict(policy or {})}
+    result: dict[str, Any] = {
+        "valid": False,
+        "reason": "malformed_envelope",
+        "key_id": (envelope or {}).get("key_id"),
+        "algorithm": (envelope or {}).get("algorithm"),
+        "expires_at": (envelope or {}).get("expires_at"),
+    }
     try:
         payload_bytes = base64.b64decode(envelope["payload"].encode("ascii"))
         signature = base64.b64decode(envelope["signature"].encode("ascii"))
-    except (KeyError, TypeError, ValueError):
-        return False
-    if envelope.get("payload_sha256") and hashlib.sha256(payload_bytes).hexdigest() != envelope["payload_sha256"]:
-        return False
-    return verify_bytes(payload_bytes, signature, signer)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return result
+
+    digest = hashlib.sha256(payload_bytes).hexdigest()
+    if envelope.get("payload_sha256") and digest != envelope["payload_sha256"]:
+        result["reason"] = "payload_digest_mismatch"
+        return result
+
+    if rules.get("check_algorithm"):
+        allowed = rules.get("allowed_algorithms") or ()
+        if allowed and envelope.get("algorithm") not in allowed:
+            result["reason"] = "unknown_algorithm"
+            return result
+
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    expires_at = _parse_ts(envelope.get("expires_at"))
+    if rules.get("require_expiry") and expires_at is None:
+        result["reason"] = "malformed_envelope"
+        return result
+    tolerance = timedelta(seconds=int(rules.get("expiry_tolerance_seconds") or 0))
+    if expires_at is not None and reference - tolerance > expires_at:
+        result["reason"] = "expired"
+        return result
+    not_before = _parse_ts(envelope.get("not_before"))
+    skew = timedelta(seconds=int(rules.get("not_before_skew_seconds") or 0))
+    if not_before is not None and reference + skew < not_before:
+        result["reason"] = "not_yet_valid"
+        return result
+
+    if replay_guard is not None and envelope.get("nonce"):
+        if not replay_guard.check_and_remember(str(envelope["nonce"])):
+            result["reason"] = "replayed"
+            return result
+
+    claimed_key_id = envelope.get("key_id")
+    if signer is None and ring is not None:
+        # Ring-backed verification: honour the key the envelope claims, then
+        # fall back to the rest of the ring (an envelope signed just before a
+        # rotation is the common case).
+        if rules.get("check_key_id") and claimed_key_id not in ring.verifiable_key_ids():
+            result["reason"] = "key_id_mismatch"
+            return result
+        candidate = ring.signer_for(claimed_key_id)
+        if candidate is not None and candidate.verify(payload_bytes, signature):
+            result.update({"valid": True, "reason": "ok"})
+            return result
+        matched = ring.verify(payload_bytes, signature)
+        if matched:
+            result.update({"valid": True, "reason": "ok", "key_id": matched})
+            return result
+        result["reason"] = "signature_invalid"
+        return result
+
+    # Legacy single-key path: the signature itself is the proof of key id, so
+    # ``check_key_id`` only applies to ring-backed verification.
+    resolved = signer or get_signer()
+    if resolved.verify(payload_bytes, signature):
+        result.update({"valid": True, "reason": "ok"})
+    else:
+        result["reason"] = "signature_invalid"
+    return result
+
+
+def verify_envelope(
+    envelope: dict,
+    signer: HsmSigner | None = None,
+    *,
+    policy: dict | None = None,
+    ring: SigningKeyRing | None = None,
+    replay_guard: ReplayGuard | None = None,
+) -> bool:
+    """Verify an envelope's integrity (payload unchanged + signature valid)."""
+    return verify_envelope_detailed(
+        envelope,
+        signer,
+        policy=policy,
+        ring=ring,
+        replay_guard=replay_guard,
+    )["valid"]
 
 
 def decode_envelope(envelope: dict) -> dict | None:
@@ -208,8 +665,141 @@ def decode_envelope(envelope: dict) -> dict | None:
         return None
 
 
+# --- multi-authority (N-of-M) co-signature ------------------------------------
+
+
+@dataclass(frozen=True)
+class CoSignature:
+    """One authority's detached signature over a shared payload."""
+
+    key_id: str
+    algorithm: str
+    signature: str  # base64
+    signed_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key_id": self.key_id,
+            "algorithm": self.algorithm,
+            "signature": self.signature,
+            "signed_at": self.signed_at,
+        }
+
+
+def sign_multi(
+    payload: bytes, signers: list[HsmSigner] | None = None
+) -> dict[str, Any]:
+    """Collect one detached signature per signer into one co-signed document."""
+    authorities = signers or [get_signer()]
+    signatures = [
+        CoSignature(
+            key_id=signer.key_id,
+            algorithm=signer.algorithm,
+            signature=base64.b64encode(signer.sign(payload)).decode("ascii"),
+            signed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        for signer in authorities
+    ]
+    return {
+        "payload_sha256": hashlib.sha256(payload).hexdigest(),
+        "authorities": len(authorities),
+        "cosignatures": [sig.to_dict() for sig in signatures],
+        "threshold": len(authorities),
+    }
+
+
+def verify_multi(
+    payload: bytes,
+    document: dict,
+    *,
+    threshold: int = 1,
+    ring: SigningKeyRing | None = None,
+    signers: dict[str, HsmSigner] | None = None,
+) -> dict[str, Any]:
+    """Check a co-signed document against an N-of-M threshold.
+
+    Keys are resolved from ``ring`` first, then ``signers``, then the default
+    signer — so a caller without a key source still validates the authorities
+    that share the process's configured key.
+    """
+    result: dict[str, Any] = {
+        "valid": False,
+        "reason": "threshold_not_met",
+        "threshold": int(threshold),
+        "required": int(threshold),
+        "offered": len(document.get("cosignatures") or []),
+        "verified_key_ids": [],
+    }
+    if document.get("payload_sha256") and hashlib.sha256(payload).hexdigest() != document[
+        "payload_sha256"
+    ]:
+        result["reason"] = "payload_digest_mismatch"
+        return result
+
+    def _resolve(key_id: Any) -> HsmSigner | None:
+        if ring is not None:
+            found = ring.signer_for(str(key_id) if key_id is not None else None)
+            if found is not None:
+                return found
+        if signers is not None and key_id in signers:
+            return signers[key_id]
+        default = get_signer()
+        return default if key_id in (None, default.key_id) else None
+
+    verified: list[str] = []
+    for record in document.get("cosignatures") or []:
+        try:
+            raw = base64.b64decode(str(record["signature"]).encode("ascii"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        key_id = record.get("key_id")
+        signer = _resolve(key_id)
+        if signer is not None and signer.verify(payload, raw):
+            verified.append(str(key_id))
+    result["verified_key_ids"] = verified
+    if int(threshold) > 0 and len(verified) >= int(threshold):
+        result.update({"valid": True, "reason": "ok"})
+    return result
+
+
+# --- health --------------------------------------------------------------------
+
+
+def signer_self_test(signer: HsmSigner | None = None) -> dict[str, Any]:
+    """Round-trip and tamper probe for one signer."""
+    active = signer or get_signer()
+    probe = b"cservice-hsm-self-test"
+    signature = active.sign(probe)
+    roundtrip = active.verify(probe, signature)
+    tampered = active.verify(probe + b"!", signature)
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "key_id": active.key_id,
+        "algorithm": active.algorithm,
+        "signer_class": type(active).__name__,
+        "roundtrip": bool(roundtrip),
+        "tamper_detected": not tampered,
+        "healthy": bool(roundtrip) and not tampered,
+    }
+
+
+def build_signer_health(backends: list[str] | None = None) -> dict[str, Any]:
+    """Self-test the active signer, or each named backend."""
+    results = [
+        signer_self_test(get_signer(backend))
+        for backend in (backends if backends is not None else [HSM_BACKEND])
+    ]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "checked": len(results),
+        "healthy": all(row["healthy"] for row in results),
+        "signers": results,
+    }
+
+
 def build_hsm_signer_catalog() -> dict[str, object]:
     signer = get_signer()
+    self_test = signer_self_test(signer)
     return {
         "backend": HSM_BACKEND,
         "key_id": signer.key_id,
@@ -218,5 +808,25 @@ def build_hsm_signer_catalog() -> dict[str, object]:
         "signature_scheme": "detached signature over canonical JSON payload",
         "hash": "sha256",
         "key_source": "env/persisted PEM" if HSM_SIGNER_KEY_PATH else "env secret (derived)",
-
+        # --- expansion surface -------------------------------------------------
+        "registered_backends": registered_backends(),
+        "backend_registry": {
+            name: getattr(factory, "__name__", repr(factory))
+            for name, factory in sorted(SIGNER_BACKENDS.items())
+        },
+        "key": signer_info(signer),
+        "key_statuses": list(SIGNATURE_KEY_STATUSES),
+        "key_ring": SIGNER_KEY_RING.catalog(),
+        "verify_reasons": list(VERIFY_REASONS),
+        "policy_defaults": dict(SIGNATURE_POLICY_DEFAULTS),
+        "replay_guard": {
+            "capacity": REPLAY_GUARD.capacity,
+            "remembered": REPLAY_GUARD.size(),
+        },
+        "self_test": self_test,
+        "note": (
+            "backends register through SIGNER_BACKENDS; rotation is data (the key "
+            "ring), and verification is opt-in via ring= so legacy single-key "
+            "envelopes keep verifying unchanged"
+        ),
     }
