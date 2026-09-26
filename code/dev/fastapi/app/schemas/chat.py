@@ -1360,6 +1360,12 @@ class ArrearsEntryOut(BaseModel):
     total_settled: float = 0.0
     interest_waived: bool = False
     waived_interest: float = 0.0
+    late_fee_amount: float = 0.0
+    late_fee_pct: float = 0.0
+    late_fee_charged: bool = False
+    fees_waived: bool = False
+    waived_fees: float = 0.0
+    late_fee_total: float = 0.0
     note: str = ""
 
 
@@ -1392,6 +1398,7 @@ class ArrearsSettleResult(BaseModel):
     generated_at: datetime
     entry: ArrearsEntryOut
     interest_charged: float = 0.0
+    late_fee_charged: float = 0.0
     principal: float = 0.0
     total_paid: float = 0.0
 

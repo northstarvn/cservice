@@ -227,6 +227,15 @@ class ArrearsEntry(Base, TimestampMixin):
     total_settled = Column(Float, nullable=False, default=0.0)
     interest_waived = Column(Boolean, nullable=False, default=False)
     waived_interest = Column(Float, nullable=False, default=0.0)
+    # Late-fee terms are snapshotted from the matching policy at open time
+    # (flat amount and/or percentage of principal), like the interest terms.
+    # `late_fee_charged` marks a settlement that accrued the fee; `fees_waived`
+    # / `waived_fees` record a policy-score-governed admin fee waiver.
+    late_fee_amount = Column(Float, nullable=False, default=0.0)
+    late_fee_pct = Column(Float, nullable=False, default=0.0)
+    late_fee_charged = Column(Boolean, nullable=False, default=False)
+    fees_waived = Column(Boolean, nullable=False, default=False)
+    waived_fees = Column(Float, nullable=False, default=0.0)
     note = Column(Text, nullable=False, default="")
 
 

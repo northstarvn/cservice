@@ -48,7 +48,7 @@ from typing import Any, Optional
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import models
+from app import models, rule_engine
 from app.schemas.chat import (
     CommunicationAdminStrategyItem,
     CommunicationAdminStrategyReport,
@@ -542,9 +542,11 @@ _DEFAULT_PARAMS: dict[str, str] = {
     "reply_urgency": "normal",
 }
 
-# ---------------------------------------------------------------------------
-# Condition DSL (mirrors the loyalty-journey engine; dict-based context)
-# ---------------------------------------------------------------------------
+### Condition DSL (mirrors the loyalty-journey engine; dict-based context)
+###
+### Matching is delegated to the shared `app/rule_engine.py` core: behavior for
+### existing rules is identical, and the engine adds date-window operators and
+### any/all/not combinators for richer caller-defined rules.
 
 
 def _json_safe(value: Any) -> Any:
@@ -554,24 +556,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _matches_rule(rule_value: Any, context_value: Any) -> bool:
-    if isinstance(rule_value, dict):
-        for op_name, threshold in rule_value.items():
-            op = _NUMERIC_OPS.get(op_name)
-            if op is None or context_value is None:
-                return False
-            try:
-                if not op(context_value, threshold):
-                    return False
-            except TypeError:
-                return False
-        return True
-    if isinstance(context_value, (list, tuple, set)):
-        return _json_safe(rule_value) in list(context_value)
-    if isinstance(rule_value, (list, tuple, set, frozenset)):
-        return context_value in rule_value
-    if isinstance(rule_value, bool):
-        return bool(context_value) == rule_value
-    return context_value == rule_value
+    return rule_engine.matches_field(rule_value, context_value)
 
 
 def evaluate_when(when: dict[str, object], context: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -580,15 +565,7 @@ def evaluate_when(when: dict[str, object], context: dict[str, Any]) -> tuple[boo
     Unknown fields fail the whole rule (fail-safe) so catalog typos surface in
     self-check tests instead of silently never matching.
     """
-    matched_fields: dict[str, Any] = {}
-    for field_name, rule_value in when.items():
-        if field_name not in context:
-            return False, {}
-        context_value = context[field_name]
-        if not _matches_rule(rule_value, context_value):
-            return False, {}
-        matched_fields[field_name] = _json_safe(context_value)
-    return True, matched_fields
+    return rule_engine.evaluate_when(when, context)
 
 
 # ---------------------------------------------------------------------------

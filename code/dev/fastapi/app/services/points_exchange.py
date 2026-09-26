@@ -14,10 +14,20 @@ use, so eligibility and rates can depend on the user's state (premium users
 get a better loyalty-points rate, brand-new users cannot redeem activity
 points yet, ...).
 
+Rates are also *dynamic*: the base `points_per_unit` can be adjusted by
+composable factors — value-tier multipliers, LTV-proxy (monetization-readiness)
+multipliers, and seasonal campaign windows (shared `when`-DSL date operators).
+Multipliers are applied only when a quote evaluation is explicitly driven
+(`effective_date` and/or `param_overrides`), so default user quotes are never
+silently repriced and existing rate contracts stay intact; the effective rate
+and its breakdown are included in the payload for explainability.
+
 Implementation
 --------------
 - `POINTS_EXCHANGE_RULES` — config table; adding a rule/rate/currency is
   config-only, and a rule enables or disables a direction per point type.
+- `POINTS_TIER_MULTIPLIERS` / `POINTS_LTV_MULTIPLIERS` / `POINTS_CAMPAIGN_RULES`
+  — dynamic rate-factor config tables applied at quote time.
 - Pure core: `select_exchange_rule`, `quote_points_exchange`.
 - Async orchestrators: `get_or_create_wallet`, `list_user_wallets`,
   `list_user_point_transactions`, `quote_points_exchange_for_user`,
@@ -34,7 +44,7 @@ from typing import Any, Optional
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import models
+from app import models, rule_engine
 from app.schemas.chat import (
     PointsAdminReport,
     PointsExchangeQuote,
@@ -168,7 +178,68 @@ POINTS_EXCHANGE_RULES: list[dict[str, Any]] = [
 ]
 
 # ---------------------------------------------------------------------------
+# Config tables (dynamic earn/burn rate multipliers)
+# ---------------------------------------------------------------------------
+# Rates can be multiplied by three independent, composable factors:
+#
+# - `POINTS_TIER_MULTIPLIERS`  — value-tier factors (e.g. premium earns more
+#   and redeems at a better rate). Tier absent from the table is neutral.
+# - `POINTS_LTV_MULTIPLIERS`   — LTV-proxy factors keyed on
+#   `monetization_readiness` (first threshold the user reaches wins).
+# - `POINTS_CAMPAIGN_RULES`    — seasonal campaigns driven by the shared
+#   `when`-DSL with date-window operators on the reserved `_date` field
+#   (e.g. `{"_date": {"between_dates": [...]}}`). Active only while the
+#   evaluation date is inside the window; a campaign can be simulated in
+#   tests/ops review by passing `effective_date` to `quote_points_exchange`.
+#
+# Direction semantics:
+# - `redeem_multiplier`  > 1  -> better customer rate (fewer points per $1).
+# - `purchase_multiplier` > 1 -> more points earned per $1.
+# Combined factor is tier * ltv * campaign; the product stays 1.0 (neutral)
+# when none apply.
+POINTS_TIER_MULTIPLIERS: list[dict[str, Any]] = [
+    {
+        "value_tier": "premium",
+        "purchase_multiplier": 1.2,
+        "redeem_multiplier": 1.1,
+        "when_hint": "Premium tier earns 20% more points and redeems at a 10% better rate.",
+    },
+]
+
+POINTS_LTV_MULTIPLIERS: list[dict[str, Any]] = [
+    {
+        "min_monetization_readiness": 85.0,
+        "purchase_multiplier": 1.15,
+        "redeem_multiplier": 1.05,
+        "when_hint": "High monetization readiness (LTV proxy) boosts earn/burn rates.",
+    },
+]
+
+POINTS_CAMPAIGN_RULES: list[dict[str, Any]] = [
+    {
+        "campaign_id": "summer_earn_boost_2026",
+        "label": "Summer Earn Boost 2026",
+        "priority": "high",
+        "when": {"_date": {"between_dates": ["2026-06-01", "2026-08-31"]}},
+        "params": {"purchase_multiplier": 1.15, "redeem_multiplier": 1.05},
+        "when_hint": "Seasonal window 2026-06-01 .. 2026-08-31: earn 15% extra points and redeem at a 5% better rate.",
+    },
+    {
+        "campaign_id": "spring_purchase_boost_2026",
+        "label": "Spring Purchase Boost 2026",
+        "priority": "medium",
+        "when": {"_date": {"between_dates": ["2026-03-01", "2026-04-30"]}},
+        "params": {"purchase_multiplier": 1.08, "redeem_multiplier": 1.0},
+        "when_hint": "Seasonal window 2026-03-01 .. 2026-04-30: earn 8% extra points.",
+    },
+]
+
+# ---------------------------------------------------------------------------
 # Condition DSL (same shape as the loyalty / communication engines)
+#
+# Matching is delegated to the shared `app/rule_engine.py` core: behavior for
+# existing rules is identical, and the engine adds date-window operators and
+# any/all/not combinators for richer rules (e.g. seasonal campaign windows).
 # ---------------------------------------------------------------------------
 
 
@@ -189,36 +260,11 @@ _NUMERIC_OPS: dict[str, Any] = {
 
 
 def _matches_rule(rule_value: Any, context_value: Any) -> bool:
-    if isinstance(rule_value, dict):
-        for op_name, threshold in rule_value.items():
-            op = _NUMERIC_OPS.get(op_name)
-            if op is None or context_value is None:
-                return False
-            try:
-                if not op(context_value, threshold):
-                    return False
-            except TypeError:
-                return False
-        return True
-    if isinstance(context_value, (list, tuple, set)):
-        return _json_safe(rule_value) in list(context_value)
-    if isinstance(rule_value, (list, tuple, set, frozenset)):
-        return context_value in rule_value
-    if isinstance(rule_value, bool):
-        return bool(context_value) == rule_value
-    return context_value == rule_value
+    return rule_engine.matches_field(rule_value, context_value)
 
 
 def evaluate_when(when: dict[str, object], context: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    matched_fields: dict[str, Any] = {}
-    for field_name, rule_value in when.items():
-        if field_name not in context:
-            return False, {}
-        context_value = context[field_name]
-        if not _matches_rule(rule_value, context_value):
-            return False, {}
-        matched_fields[field_name] = _json_safe(context_value)
-    return True, matched_fields
+    return rule_engine.evaluate_when(when, context)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +291,93 @@ def _rule_params(rule: dict[str, Any]) -> dict[str, Any]:
         "max_daily_redeem_money": round(float(params.get("max_daily_redeem_money", 0.0) or 0.0), 2),
         "max_daily_purchase_money": round(float(params.get("max_daily_purchase_money", 0.0) or 0.0), 2),
         "when_hint": str(rule.get("when_hint", "")),
+    }
+
+
+def _match_tier_multipliers(context: dict[str, Any]) -> dict[str, Any]:
+    """First tier rule whose `value_tier` equals the context tier, else neutral."""
+    value_tier = context.get("value_tier")
+    for rule in POINTS_TIER_MULTIPLIERS:
+        if rule.get("value_tier") == value_tier:
+            return rule
+    return {"value_tier": value_tier, "purchase_multiplier": 1.0, "redeem_multiplier": 1.0, "when_hint": ""}
+
+
+def _match_ltv_multipliers(context: dict[str, Any]) -> dict[str, Any]:
+    """First LTV rule (highest threshold) whose readiness threshold is reached, else neutral."""
+    readiness = context.get("monetization_readiness")
+    if readiness is None:
+        return {"min_monetization_readiness": 0.0, "purchase_multiplier": 1.0, "redeem_multiplier": 1.0, "when_hint": ""}
+    ranked = sorted(
+        POINTS_LTV_MULTIPLIERS,
+        key=lambda rule: float(rule.get("min_monetization_readiness", 0.0) or 0.0),
+        reverse=True,
+    )
+    for rule in ranked:
+        if float(readiness or 0.0) >= float(rule.get("min_monetization_readiness", 0.0) or 0.0):
+            return rule
+    return {"min_monetization_readiness": 0.0, "purchase_multiplier": 1.0, "redeem_multiplier": 1.0, "when_hint": ""}
+
+
+def select_active_campaigns(context: dict[str, Any], effective_date: Any = None) -> list[dict[str, Any]]:
+    """Every campaign whose `when` (date-window DSL, reserved `_date` key) holds.
+
+    Without an explicit `effective_date` the evaluation date defaults to the
+    current UTC date, so fixed-window campaigns activate only while the window
+    contains today. Ops/review can simulate a window with `effective_date`.
+    """
+    ranked = sorted(
+        POINTS_CAMPAIGN_RULES,
+        key=lambda rule: (
+            PRIORITY_RANK.get(str(rule.get("priority", "medium")), 1),
+            POINTS_CAMPAIGN_RULES.index(rule),
+        ),
+    )
+    active: list[dict[str, Any]] = []
+    for rule in ranked:
+        ok, fields = rule_engine.evaluate_when(dict(rule["when"]), dict(context), effective_date=effective_date)
+        if ok:
+            active.append({**rule, "matched_conditions": fields})
+    return active
+
+
+def _select_active_campaign(context: dict[str, Any], effective_date: Any = None) -> Optional[dict[str, Any]]:
+    active = select_active_campaigns(context, effective_date=effective_date)
+    return active[0] if active else None
+
+
+def _combined_points_multipliers(
+    context: dict[str, Any],
+    *,
+    effective_date: Any = None,
+    campaign: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Compose the tier * LTV * campaign rate factors (1.0 when nothing applies)."""
+    tier = _match_tier_multipliers(context)
+    ltv = _match_ltv_multipliers(context)
+    if campaign is None:
+        campaign = _select_active_campaign(context, effective_date=effective_date)
+    campaign_params = (campaign or {}).get("params") or {}
+    camp_purchase = float(campaign_params.get("purchase_multiplier", 1.0) or 1.0)
+    camp_redeem = float(campaign_params.get("redeem_multiplier", 1.0) or 1.0)
+    purchase = round(
+        float(tier.get("purchase_multiplier", 1.0) or 1.0)
+        * float(ltv.get("purchase_multiplier", 1.0) or 1.0)
+        * camp_purchase,
+        4,
+    )
+    redeem = round(
+        float(tier.get("redeem_multiplier", 1.0) or 1.0)
+        * float(ltv.get("redeem_multiplier", 1.0) or 1.0)
+        * camp_redeem,
+        4,
+    )
+    return {
+        "tier": tier,
+        "ltv": ltv,
+        "campaign": campaign,
+        "purchase_multiplier": purchase,
+        "redeem_multiplier": redeem,
     }
 
 
@@ -284,8 +417,21 @@ def quote_points_exchange(
     context: dict[str, Any],
     *,
     daily_used_money: float = 0.0,
+    effective_date: Any = None,
+    param_overrides: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Quote a conversion (no write). `amount` is points for redeem, money for purchase."""
+    """Quote a conversion (no write). `amount` is points for redeem, money for purchase.
+
+    Dynamic rate multipliers (value-tier * LTV/readiness * seasonal campaign)
+    are applied only when an evaluation is explicitly driven — i.e. either
+    `effective_date` (simulate/review a campaign window or seasonal pricing) or
+    `param_overrides` (enterprise `=formula` points_per_unit, resolved by the
+    shared rule engine against the context plus the resolved multipliers) is
+    supplied. Without either, the quote uses the base rule rate exactly as
+    before, so default user behavior is never silently repriced. The published
+    effective rate and its breakdown are included in the payload whenever a
+    dynamic evaluation runs.
+    """
     rule, fields = select_exchange_rule(point_type, direction, currency, context)
     if rule is None:
         return {
@@ -298,6 +444,44 @@ def quote_points_exchange(
     if amount <= 0:
         return {"eligible": False, "reason": "Amount must be positive.", "rule": terms}
     daily_used = float(daily_used_money or 0.0)
+
+    # --- dynamic rate multipliers (only when the evaluation is driven) ------
+    driven = effective_date is not None or bool(param_overrides)
+    base_ppu = terms["points_per_unit"]
+    effective_ppu = base_ppu
+    rate_multipliers: dict[str, Any] = {}
+    applied_overrides: dict[str, Any] = {}
+    if driven:
+        multipliers = _combined_points_multipliers(context, effective_date=effective_date)
+        direction_factor = (
+            multipliers["redeem_multiplier"] if direction == "redeem" else multipliers["purchase_multiplier"]
+        )
+        if direction == "redeem":
+            effective_ppu = base_ppu / direction_factor if direction_factor > 0 else base_ppu
+        else:
+            effective_ppu = base_ppu * direction_factor
+        effective_ppu = round(float(effective_ppu), 4)
+        campaign = multipliers["campaign"]
+        rate_multipliers = {
+            "purchase_multiplier": multipliers["purchase_multiplier"],
+            "redeem_multiplier": multipliers["redeem_multiplier"],
+            "tier": multipliers["tier"].get("value_tier"),
+            "ltv_min_readiness": multipliers["ltv"].get("min_monetization_readiness"),
+            "campaign_id": (campaign or {}).get("campaign_id"),
+            "campaign_label": (campaign or {}).get("label"),
+        }
+        if param_overrides:
+            scope = dict(context)
+            scope["purchase_multiplier"] = multipliers["purchase_multiplier"]
+            scope["redeem_multiplier"] = multipliers["redeem_multiplier"]
+            scope["campaign_multiplier"] = multipliers["purchase_multiplier"]
+            applied_overrides = rule_engine.resolve_params(param_overrides, scope)
+            if applied_overrides.get("points_per_unit") is not None:
+                try:
+                    effective_ppu = round(float(applied_overrides["points_per_unit"]), 4)
+                except (TypeError, ValueError):
+                    effective_ppu = base_ppu
+
     if direction == "redeem":
         points_in = amount
         if points_in < terms["min_redeem_points"]:
@@ -306,13 +490,13 @@ def quote_points_exchange(
                 "reason": f"Minimum redeem is {terms['min_redeem_points']:.0f} points.",
                 "rule": terms,
             }
-        gross_money = points_in / terms["points_per_unit"] if terms["points_per_unit"] > 0 else 0.0
+        gross_money = points_in / effective_ppu if effective_ppu > 0 else 0.0
         fee = gross_money * terms["fee_pct"] / 100.0
         net_money = gross_money - fee
         daily_max = terms["max_daily_redeem_money"]
         remaining = max(0.0, daily_max - daily_used)
         exceeded = daily_max > 0 and gross_money > remaining
-        return {
+        payload = {
             "eligible": True,
             "exceeds_daily_cap": exceeded,
             "reason": "Redeem quote computed." if not exceeded else "Daily redeem cap would be exceeded.",
@@ -329,6 +513,11 @@ def quote_points_exchange(
             "daily_max_money": daily_max,
             "matched_conditions": fields,
         }
+        if driven:
+            payload["points_per_unit_effective"] = effective_ppu
+            payload["rate_multipliers"] = rate_multipliers
+            payload["applied_param_overrides"] = applied_overrides
+        return payload
     # purchase: money -> points
     money_in = amount
     if money_in < terms["min_purchase_money"]:
@@ -337,13 +526,13 @@ def quote_points_exchange(
             "reason": f"Minimum purchase is {terms['min_purchase_money']:.2f} {terms['currency']}.",
             "rule": terms,
         }
-    gross_points = money_in * terms["points_per_unit"]
+    gross_points = money_in * effective_ppu
     fee = gross_points * terms["fee_pct"] / 100.0
     net_points = gross_points - fee
     daily_max = terms["max_daily_purchase_money"]
     remaining = max(0.0, daily_max - daily_used)
     exceeded = daily_max > 0 and money_in > remaining
-    return {
+    payload = {
         "eligible": True,
         "exceeds_daily_cap": exceeded,
         "reason": "Purchase quote computed." if not exceeded else "Daily purchase cap would be exceeded.",
@@ -360,6 +549,11 @@ def quote_points_exchange(
         "daily_max_money": daily_max,
         "matched_conditions": fields,
     }
+    if driven:
+        payload["points_per_unit_effective"] = effective_ppu
+        payload["rate_multipliers"] = rate_multipliers
+        payload["applied_param_overrides"] = applied_overrides
+    return payload
 
 
 def list_convertible_point_types() -> dict[str, dict[str, Any]]:
@@ -694,6 +888,22 @@ def build_points_exchange_catalog() -> dict[str, Any]:
             }
             for rule in POINTS_EXCHANGE_RULES
         ],
+        "rate_multipliers": {
+            "note": "Effective rate = base points_per_unit adjusted by composed tier * LTV * campaign factors (redeem: divide; purchase: multiply).",
+            "tiers": [_json_safe(rule) for rule in POINTS_TIER_MULTIPLIERS],
+            "ltv": [_json_safe(rule) for rule in POINTS_LTV_MULTIPLIERS],
+            "campaigns": [
+                {
+                    "campaign_id": rule["campaign_id"],
+                    "label": rule.get("label", rule["campaign_id"]),
+                    "priority": rule.get("priority", "medium"),
+                    "when": _json_safe(rule["when"]),
+                    "params": dict(rule["params"]),
+                    "when_hint": rule.get("when_hint", ""),
+                }
+                for rule in POINTS_CAMPAIGN_RULES
+            ],
+        },
         "endpoints": {
             "catalog": "/chat/points/exchange/rates",
             "wallet": "/chat/points/wallet",

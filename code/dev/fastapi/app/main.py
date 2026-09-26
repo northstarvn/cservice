@@ -30,7 +30,9 @@ from app import (
     optimistic_locking,
     partition_manager,
     protobuf_transaction_spec,
+    regional_policy,
     risk_evaluator,
+    rule_engine,
     simulation_engine,
     tenant_router,
 )
@@ -197,6 +199,8 @@ async def app_metadata():
             "retention",
             "topic_intelligence_overview",
             "efficiency_audit",
+            "regional_policy",
+            "rule_engine",
         ],
     }
 
@@ -388,6 +392,21 @@ async def app_ecosystem():
                 "status": "ready",
                 "canary_auto_promote": model_versioning.CANARY_AUTOPROMOTE,
             },
+            "rule_engine": {
+                "routes": [
+                    "/meta/scoring-catalog",
+                ],
+                "purpose": "shared when-DSL rule engine core: unified condition evaluation (combinators, date-window operators, expression params) that the loyalty, communication, points, and arrears engines delegate to",
+                "status": "ready",
+            },
+            "regional_policy": {
+                "routes": [
+                    "/meta/regional",
+                    "/meta/scoring-catalog",
+                ],
+                "purpose": "regional booking & tax policy: per-region calendars (holidays/weekends), labor-compliance guardrails, and per-jurisdiction tax rates for service types",
+                "status": "ready",
+            },
         },
         "capabilities": capabilities,
     }
@@ -447,6 +466,8 @@ async def app_feature_summary():
             "decision_canary_promote": "/meta/decisions/canary/promote",
             "explanations": "/meta/decisions/explanations",
             "explanation_detail": "/meta/decisions/explanations/{decision_id}",
+            "rule_engine_core": "/meta/scoring-catalog",
+            "regional_policy": "/meta/regional",
         },
     }
 
@@ -496,6 +517,8 @@ async def scoring_catalog():
             "explainability": explainability.build_explainability_catalog(),
             "optimistic_locking": optimistic_locking.build_optimistic_locking_catalog(),
         },
+        "rule_engine": rule_engine.build_rule_engine_catalog(),
+        "regional_policy": regional_policy.build_regional_policy_catalog(),
     }
 
 
@@ -513,6 +536,32 @@ async def i18n_catalog(locale: str | None = None):
         "catalog": i18n.build_i18n_catalog(),
         "resolution": i18n.locale_payload(locale),
     }
+
+
+@app.get("/meta/regional")
+async def regional_policy_catalog(region: str | None = None):
+    """Expose the regional booking & tax policy surfaces.
+
+    Includes the regional calendars (weekends + holidays), labor-compliance
+    guardrails, and per-region tax rules. Pass ``?region=de`` to also resolve
+    the working-day verdict for *today* plus a sample tax computation.
+    """
+    catalog = regional_policy.build_regional_policy_catalog()
+    payload = {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "catalog": catalog,
+    }
+    if region:
+        payload["resolved"] = {
+            "region": region,
+            "working_day": regional_policy.is_working_day(region),
+            "labor": regional_policy.get_labor_rule(region),
+            "tax": regional_policy.compute_taxed_amount(100.0, region, "consultation"),
+        }
+    return payload
 
 # --- Phase 1: decision quality & consistency surfaces ------------------------
 

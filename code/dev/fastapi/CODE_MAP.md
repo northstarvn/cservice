@@ -7,7 +7,7 @@ keep it in sync as the backend evolves.
 
 ## Revision Control
 
-- Revision ID: `r3`
+- Revision ID: `r4`
 - Scope: backend logic only (`fastapi/app/**`); frontend and requirement
   artifacts are out of scope, matching `ARCHITECTURE_CONCEPT_MAP.md`
 - Purpose: a machine-readable, diff-friendly map that mirrors module
@@ -28,7 +28,7 @@ Leaves are business surfaces; internal node labels name layers (root:
 
 | Layer | What its leaves mean |
 |---|---|
-| `infra` | startup/metadata (`main`), database plumbing (`db`), auth primitives (`security`), auth dependencies (`auth_deps`), localization, multi-tenant routing + partition lifecycle (`multi_tenant`), zero-trust crypto (`zero_trust`), event pipeline (`event_pipeline`), decision intelligence (`decision_intelligence`) |
+| `infra` | startup/metadata (`main`), database plumbing (`db`), auth primitives (`security`), auth dependencies (`auth_deps`), localization, multi-tenant routing + partition lifecycle (`multi_tenant`), zero-trust crypto (`zero_trust`), event pipeline (`event_pipeline`), decision intelligence (`decision_intelligence`), business-rule hyper-flexibility (`business_rules`) |
 | `models` | isolated polymorphic base models (`model_bases`) plus persisted domain entities (identity, booking lifecycle, chat signals, retention, policy, topics, communication, payments, points, audit trail, security events) |
 | `routers` | public API domains and their grouped surfaces (`users`, `bookings`, `chat`, `topics`, `audit`) |
 | `services` | the rule engines — own the business logic (scoring, retention, loyalty, activity trees, communication strategy, payments, points, audit trail) |
@@ -46,13 +46,13 @@ Rules of thumb:
 
 ## Current Map — `CODE_MAP.newick`
 
-Tree size: **251 leaves / 49 internal nodes** (validated, see maintenance
+Tree size: **267 leaves / 52 internal nodes** (validated, see maintenance
 rule 4). Rendered multi-line for readability; the single-line Newick file is
 the source of truth.
 
 ```
 (((startup_lifespan,cors,exception_handler,meta,health,runtime,scoring_catalog,i18n_endpoint,
-    features,ecosystem,tenants,partitions,zero_trust,decisions)main,
+    features,ecosystem,tenants,partitions,zero_trust,decisions,regional_endpoint)main,
   (engine,pool_config,session,ping,retry)db,
   (verify_password,hash_password,access_token,refresh_token,decode_token,password_policy)security,
   (current_user,optional_user,admin_user,policy_or_admin,policy_score,control_posture)auth_deps,
@@ -68,7 +68,9 @@ the source of truth.
   ((registry,snapshots,canary,shadow_scoring,promote,catalog)model_versioning,
    (what_if,risk_scenarios,retention_scenarios,reports,catalog)simulation_engine,
    (decision_trace,trace_store,explain,factor_trail,catalog)explainability,
-   (version_guard,compare_and_swap,stale_conflict,conflict_policy)optimistic_locking)decision_intelligence)infra,
+   (version_guard,compare_and_swap,stale_conflict,conflict_policy)optimistic_locking)decision_intelligence,
+  ((field_dsl,combinators,date_ops,expressions,catalog)rule_engine,
+   (calendars,labor_rules,tax_rules,booking_assessment,catalog)regional_policy)business_rules)infra,
  ((timestamp,tenant_scoped,partitioned,security_event)model_bases,user,booking,booking_event,
   booking_assignment,chat_history,interaction_signal,retention_snapshot,recovery_outcome,
   customer_policy_score,topic_selection,communication_override,arrears_entry,points_wallet,
@@ -91,8 +93,8 @@ the source of truth.
   (grouping,ranking,smart_filter,anomaly_rules,admin_trees)activity_tree,
   (override,policy,culture,profile,mood,decision_trail)communication_strategy,
   (component_scoring,classifications,enhancement_proposals,catalog)efficiency_audit,
-  (interest_policies,quote,open,settle,waive_interest)arrears_payments,
-  (rate_rules,quote,wallet,ledger,admin_rollup)points_exchange,
+  (interest_policies,late_fees,quote,open,settle,waive_interest,waive_fees,waiver_policy)arrears_payments,
+  (rate_rules,rate_multipliers,campaigns,quote,wallet,ledger,admin_rollup)points_exchange,
   (record,list,summary,action_catalog)audit_log)services,
  ((user,token,booking,policy_score,topic_selection)schemas_core,
   (insight,recovery,retention,snapshot_ops,topic_ranking,topic_policy)schemas_chat,
@@ -120,6 +122,54 @@ the source of truth.
    domain). Leaf-level additions are recorded in the log without a bump.
 
 ## Revision Log
+
+### r4 (2026-09-26)
+
+Stage 1 — business-rule hyper-flexibility & granular customization (R1 shared
+`when`-DSL core, R2 financial flexibility in points + arrears, R3 regional
+booking & tax). Tree grew 251/49 → **267 leaves / 52 internal nodes**; no r1–r3
+leaf was lost.
+
+- **New infra group** `business_rules` (all under `infra`):
+  - `rule_engine.py` — the shared `when`-DSL core that the four service engines
+    (loyalty_journey, communication_strategy, arrears_payments,
+    points_exchange) now delegate to (behavior-identical; the `risk_evaluator`
+    `(op, value)` engine is a different DSL and stays as-is). Adds combinators
+    (`any`/`all`/`not`), the reserved `_date` key bound to the evaluation date,
+    date-window operators (`between_dates`, `month_in`, `weekday_in`,
+    `on_date`, `within_days`), and safe `=formula` expression params
+    (AST-walked calculator; imports/attributes/subscripts rejected).
+  - `regional_policy.py` — pure regional engine: `REGIONAL_CALENDARS`
+    (timezone, weekends, fixed + annual holidays), `REGIONAL_LABOR_RULES`
+    (max shift hours / consecutive days / minimum rest), `TAX_RULES` per
+    jurisdiction × service type, `is_working_day`,
+    `evaluate_labor_compliance`, `compute_taxed_amount`,
+    `assess_booking_dates`. `bookings.py` lifecycle untouched (pinned routes).
+  - `main` gained the `regional_endpoint` leaf: `GET /meta/regional`
+    (`?region=` resolves today's working-day verdict, labor rule, sample tax).
+- **R2 — points flexibility** (`points_exchange`): `rate_multipliers` +
+  `campaigns` leaves — tier (`POINTS_TIER_MULTIPLIERS`), LTV-proxy
+  (`POINTS_LTV_MULTIPLIERS`), seasonal campaign rules (`POINTS_CAMPAIGN_RULES`,
+  date-window DSL). Multipliers are applied **only** when the quote is
+  explicitly driven via `effective_date` / `param_overrides` (governed
+  what-if/seasonal evaluation), so default quotes and pinned rate contracts are
+  byte-identical; `param_overrides` may carry `=formula` `points_per_unit`
+  resolved by the shared rule engine.
+- **R2 — arrears flexibility** (`arrears_payments`): `late_fees`,
+  `waive_fees`, `waiver_policy` leaves — optional late-fee terms
+  (`late_fee_amount` flat / `late_fee_pct` of principal) snapshotted onto rows
+  at open and charged at settlement when past due (unless waived);
+  `ARREARS_WAIVER_POLICY` gates interest/fee waivers on the operator's
+  `PolicyScoreSnapshot` (tier rank + access score); legacy un-scored calls
+  stay un-gated. Five additive `ArrearsEntry` columns
+  (`late_fee_amount`, `late_fee_pct`, `late_fee_charged`, `fees_waived`,
+  `waived_fees`) with `getattr` defaults, so existing fake-row tests are safe.
+- **Meta wiring**: `rule_engine` + `regional_policy` subservices in
+  `/meta/ecosystem`; `rule_engine` / `regional_policy` keys in
+  `/meta/scoring-catalog`; both features listed under `/meta` and
+  `/meta/features`.
+- **Tests**: `tests/test_rule_hyper_flexibility.py` (70) — suite grew
+  455 → 525 passing.
 
 ### r3 (2026-09-25)
 

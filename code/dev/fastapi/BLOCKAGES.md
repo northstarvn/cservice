@@ -292,5 +292,46 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
 - Tests: `tests/test_decision_quality_expansion.py` (28) — suite 427 → 455
   passing.
 
+### Stage 1 R1–R3 — business-rule hyper-flexibility (r4 expansion)
+- R1 shared `when`-DSL core (`app/rule_engine.py`): the 4 duplicated engines
+  (loyalty_journey, communication_strategy, arrears_payments, points_exchange)
+  now delegate to one core and stay behavior-identical (delegation only);
+  `risk_evaluator`'s `(op, value)` engine is a different DSL and was left
+  as-is. New capabilities: `any`/`all`/`not` combinators, reserved `_date` key,
+  date-window operators (`between_dates`, `month_in`, `weekday_in`, `on_date`,
+  `within_days`), and safe `=formula` expression params (`evaluate_expression`
+  AST-walked calculator; imports/attributes/subscripts rejected at parse).
+- R2 points dynamic rates: `POINTS_TIER_MULTIPLIERS`,
+  `POINTS_LTV_MULTIPLIERS`, `POINTS_CAMPAIGN_RULES` config tables; multipliers
+  compose tier × LTV × campaign. **Key keep-as-is decision:** pinned quote
+  contracts (premium 90 pts/$ on empty-history defaults, standard rate math)
+  must not change — so multipliers are applied *only* when a quote is
+  explicitly driven via `effective_date` and/or `param_overrides`
+  (campaign/seasonal evaluation is a deliberate, review-first op action; the
+  default user path is never silently repriced). `param_overrides` may carry
+  `=formula` `points_per_unit` resolved by the shared rule engine.
+- R2 arrears fees + waivers: optional `late_fee_amount` / `late_fee_pct`
+  policy params snapshotted onto rows at open (5 additive `ArrearsEntry`
+  columns; `getattr` defaults keep fake-row tests safe); fee charged at
+  settlement when past-due and not waived; `ARREARS_WAIVER_POLICY` +
+  `evaluate_waiver_approval` gate interest/fee waivers on the operator's
+  `PolicyScoreSnapshot` (customer-premium tier rank + access score; fees need
+  access ≥ 70). **Keep-as-is decision:** legacy calls without a policy score
+  stay un-gated (existing integration/tests untouched).
+- R3 `app/regional_policy.py`: `REGIONAL_CALENDARS` (global/us/de/jp; fixed +
+  annual holidays), `REGIONAL_LABOR_RULES` (shift hours / consecutive days /
+  rest), `TAX_RULES` (de 19%, jp 10%, us project 8.5% example); pure engine,
+  `bookings.py` lifecycle + pinned routes untouched.
+- `main.py`: `rule_engine` + `regional_policy` in `/meta/ecosystem` and
+  `/meta/scoring-catalog`; new `GET /meta/regional` (`?region=` resolves
+  today's working-day verdict + sample tax); features keys under `/meta`.
+- Code map: new `business_rules` infra group (`rule_engine`,
+  `regional_policy`) + `regional_endpoint` main leaf; `points_exchange`
+  gained `rate_multipliers`/`campaigns`; `arrears_payments` gained
+  `late_fees`/`waive_fees`/`waiver_policy`; regenerated to 267 leaves /
+  52 internal nodes (was 251/49), revision bumped to `r4`.
+- Tests: `tests/test_rule_hyper_flexibility.py` (70) — suite 455 → 525
+  passing.
+
 ## Open blockages
 - None.
