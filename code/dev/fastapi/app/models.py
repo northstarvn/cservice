@@ -99,6 +99,26 @@ class RecoveryOutcome(Base, TimestampMixin):
     source = Column(String(50), nullable=False, default="chat")
 
 
+class RecoveryAction(Base, TimestampMixin):
+    """Audit row for every automatically triggered recovery playbook action.
+
+    The recovery-playbooks orchestrator executes config-driven playbooks
+    (credit_points / escalate_ticket / adjust_policy_score) and records each
+    action here, so automated recovery stays explainable and auditable.
+    """
+    __tablename__ = "recovery_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    playbook_id = Column(String(80), nullable=False, index=True)
+    action = Column(String(40), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="executed", index=True)
+    payload_json = Column(Text, nullable=False, default="{}")
+    result_json = Column(Text, nullable=False, default="{}")
+    reference = Column(String(120), nullable=False, default="", index=True)
+    failure_reason = Column(Text, nullable=False, default="")
+
+
 class TopicSelection(Base, TimestampMixin):
     __tablename__ = "topic_selections"
 
@@ -296,6 +316,11 @@ class User(Base, TimestampMixin):
     )
     recovery_outcomes = relationship(
         "RecoveryOutcome",
+        backref="user",
+        cascade="all, delete-orphan",
+    )
+    recovery_actions = relationship(
+        "RecoveryAction",
         backref="user",
         cascade="all, delete-orphan",
     )

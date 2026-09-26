@@ -187,6 +187,7 @@ SYSTEM_DATA_METRICS: list[tuple[str, Any]] = [
     ("interaction_signals", models.InteractionSignal),
     ("retention_snapshots", models.RetentionSnapshot),
     ("recovery_outcomes", models.RecoveryOutcome),
+    ("recovery_actions", models.RecoveryAction),
 ]
 
 MAX_FILE_READ_BYTES = 2 * 1024 * 1024  # guard against huge/binary files

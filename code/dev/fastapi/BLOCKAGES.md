@@ -333,5 +333,44 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
 - Tests: `tests/test_rule_hyper_flexibility.py` (70) — suite 455 → 525
   passing.
 
+### Predictive sentiment & automated service recovery (r5 expansion)
+- New `app/services/recovery_playbooks.py`: realtime dissatisfaction
+  indicators (`build_realtime_recovery_context`,
+  `compute_realtime_dissatisfaction_indicators`) computed from the *live*
+  interaction window (chat rows + bookings + latest-sentence sentiment) rather
+  than persisted dashboard snapshots.
+- Config-driven `RECOVERY_PLAYBOOKS` table matched by the shared when-DSL
+  engine (`rule_engine.evaluate_when` + `=formula` `resolve_params`):
+  `recovery_goodwill_points` (premium + negative + high/critical → credit),
+  `recovery_ticket_escalation` (critical + churn high → escalate),
+  `recovery_policy_guardrail` (premium/growth + high/critical + not-low churn →
+  apply goodwill access/customer deltas). Adding a playbook is data, not code.
+- Actions: `credit_points` reuses the canonical `get_or_create_wallet` and
+  appends a **new** `recovery_credit` ledger kind (additive; existing
+  `redeem_points`/`purchase_points` kinds untouched); `escalate_ticket`
+  records a support escalation with a generated `ESC-<user>-<seq>` reference;
+  `adjust_policy_score` previews the lifted `PolicyScoreSnapshot` (frozen
+  snapshot never mutated; tier/posture recomputed via canonical helpers) and
+  always records the action.
+- Audit trail: new additive `recovery_actions` table (`models.RecoveryAction`)
+  with payload/result JSON, reference, and `failure_reason` — one row per
+  triggered action; failed actions are recorded, never raised through the
+  sweep. `dry_run` mode evaluates matches without writing anything.
+- **Keep-as-is decisions:** default single-tenant operation unchanged; the
+  background sweep is env-gated (`CSERVICE_AUTO_RECOVERY`, default `0`, wired
+  into the lifespan like the partition worker); existing points wallet / ledger
+  kinds and recovery-outcome contracts untouched.
+- Wiring: `POST /chat/recovery/playbooks` (self-service, optional `dry_run`
+  request body) + `GET /chat/admin/recovery/playbooks` (read-only catalog);
+  `recovery_automation` subservice in `/meta/ecosystem`, `recovery_playbooks`
+  key in `/meta/scoring-catalog`, feature/endpoints keys under `/meta` and
+  `/meta/features`; `recovery_actions` added to the efficiency-audit system
+  metrics.
+- Code map: new `recovery_playbooks` service group (8 leaves) + `recovery_action`
+  model leaf + `recovery_playbooks` router/schema-chat leaves; regenerated to
+  278 leaves / 53 internal nodes (was 267/52), revision bumped to `r5`.
+- Tests: `tests/test_predictive_recovery_expansion.py` (27) — suite
+  525 → 552 passing.
+
 ## Open blockages
 - None.

@@ -1062,6 +1062,52 @@ class RecoveryOutcomeAggregateReport(BaseModel):
     items: list[RecoveryOutcomeAggregateItem]
 
 
+class RecoveryPlaybookRunRequest(BaseModel):
+    """Trigger a recovery-playbook pass, optionally in read-only dry-run mode."""
+    window_days: int = Field(default=30, ge=1, le=365)
+    dry_run: bool = False
+
+
+class RecoveryPlaybookActionItem(BaseModel):
+    action: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecoveryPlaybookMatchResult(BaseModel):
+    playbook_id: str
+    name: str
+    priority: int
+    description: str
+    matched: bool
+    matched_fields: Dict[str, Any] = Field(default_factory=dict)
+    actions: List[RecoveryPlaybookActionItem] = Field(default_factory=list)
+
+
+class RecoveryAutomationActionResult(BaseModel):
+    id: int
+    playbook_id: str
+    action: str
+    status: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    result: Dict[str, Any] = Field(default_factory=dict)
+    reference: str
+    failure_reason: str
+    executed_at: datetime
+
+
+class RecoveryPlaybookRunReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    dry_run: bool
+    auto_recovery_enabled: bool
+    context: Dict[str, Any]
+    matched_playbooks: List[RecoveryPlaybookMatchResult] = Field(default_factory=list)
+    executed_actions: List[RecoveryAutomationActionResult] = Field(default_factory=list)
+    policy_adjustment_preview: Optional[Dict[str, Any]] = None
+    summary: str
+
+
 class Section11ExpansionSummary(BaseModel):
     generated_at: datetime
     window_days: int

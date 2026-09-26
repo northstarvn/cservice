@@ -7,7 +7,7 @@ keep it in sync as the backend evolves.
 
 ## Revision Control
 
-- Revision ID: `r4`
+- Revision ID: `r5`
 - Scope: backend logic only (`fastapi/app/**`); frontend and requirement
   artifacts are out of scope, matching `ARCHITECTURE_CONCEPT_MAP.md`
 - Purpose: a machine-readable, diff-friendly map that mirrors module
@@ -46,7 +46,7 @@ Rules of thumb:
 
 ## Current Map — `CODE_MAP.newick`
 
-Tree size: **267 leaves / 52 internal nodes** (validated, see maintenance
+Tree size: **278 leaves / 53 internal nodes** (validated, see maintenance
 rule 4). Rendered multi-line for readability; the single-line Newick file is
 the source of truth.
 
@@ -73,12 +73,13 @@ the source of truth.
    (calendars,labor_rules,tax_rules,booking_assessment,catalog)regional_policy)business_rules)infra,
  ((timestamp,tenant_scoped,partitioned,security_event)model_bases,user,booking,booking_event,
   booking_assignment,chat_history,interaction_signal,retention_snapshot,recovery_outcome,
-  customer_policy_score,topic_selection,communication_override,arrears_entry,points_wallet,
-  points_transaction,audit_log_entry)models,
+  recovery_action,customer_policy_score,topic_selection,communication_override,arrears_entry,
+  points_wallet,points_transaction,audit_log_entry)models,
  ((register,login,me,policy_score,can_access,policy_decision,change_password)users,
   (lifecycle_crud,analytics,assignment_report,audit_history,export)bookings,
-  (history,sentiment,insights,recovery,loyalty_journey,retention_dashboard,snapshot_operations,
-   activity_tree,communication_strategy,arrears_payments,points_exchange,topic_policy)chat,
+  (history,sentiment,insights,recovery,recovery_playbooks,loyalty_journey,retention_dashboard,
+   snapshot_operations,activity_tree,communication_strategy,arrears_payments,points_exchange,
+   topic_policy)chat,
   (catalog,themes,intelligence,coverage,portfolio,workspace,overview,search,suggestions,
    recommendations,current_selection,history)topics,
   (efficiency,enhancements,audit_catalog,trail_catalog,log,logs,summary,pipeline_stats,
@@ -95,9 +96,11 @@ the source of truth.
   (component_scoring,classifications,enhancement_proposals,catalog)efficiency_audit,
   (interest_policies,late_fees,quote,open,settle,waive_interest,waive_fees,waiver_policy)arrears_payments,
   (rate_rules,rate_multipliers,campaigns,quote,wallet,ledger,admin_rollup)points_exchange,
+  (realtime_context,playbook_rules,credit_points,escalation,policy_guardrail,orchestrator,
+   auto_sweep,catalog)recovery_playbooks,
   (record,list,summary,action_catalog)audit_log)services,
  ((user,token,booking,policy_score,topic_selection)schemas_core,
-  (insight,recovery,retention,snapshot_ops,topic_ranking,topic_policy)schemas_chat,
+  (insight,recovery,recovery_playbooks,retention,snapshot_ops,topic_ranking,topic_policy)schemas_chat,
   (efficiency,enhancements,audit_trail)schemas_audit)schemas)cservice_backend;
 ```
 
@@ -122,6 +125,56 @@ the source of truth.
    domain). Leaf-level additions are recorded in the log without a bump.
 
 ## Revision Log
+
+### r5 (2026-09-26)
+
+Predictive sentiment & automated service recovery — realtime dissatisfaction
+indicators and config-driven recovery playbooks that auto-trigger credit /
+escalation / policy-guardrail actions. Tree grew 267/52 → **278 leaves / 53
+internal nodes**; no r1–r4 leaf was lost.
+
+- **New service** `recovery_playbooks.py` (all under `services`):
+  - `realtime_context` — `build_realtime_recovery_context` + 
+    `compute_realtime_dissatisfaction_indicators`: derives a live context
+    (readiness, dissatisfaction score, sentiment, churn risk, value tier, risk
+    areas, peak intensity, repeated messages, booking states) from the current
+    interaction window rather than persisted dashboard snapshots.
+  - `playbook_rules` — config-driven `RECOVERY_PLAYBOOKS` table evaluated by
+    the shared when-DSL engine (`evaluate_when` + `=formula`
+    `resolve_params`): `recovery_goodwill_points`, `recovery_ticket_escalation`,
+    `recovery_policy_guardrail` (priority-ordered; adding a playbook is data,
+    not code).
+  - `credit_points` — `credit_recovery_points` reuses the canonical wallet
+    (`get_or_create_wallet`) and appends a `recovery_credit` ledger row.
+  - `escalation` — `build_escalation_result` records a senior-support
+    escalation with a generated `ESC-<user>-<seq>` ticket reference.
+  - `policy_guardrail` — `apply_policy_adjustment` applies score deltas to a
+    frozen `PolicyScoreSnapshot` (preview only; tier/posture recomputed via the
+    canonical policy helpers; persisted scores never mutated).
+  - `orchestrator` — `run_recovery_playbooks` loads the interaction window,
+    matches playbooks, executes actions, and writes one `RecoveryAction` audit
+    row per action (`dry_run` mode writes nothing; failures are recorded, never
+    raised through the sweep).
+  - `auto_sweep` — `run_auto_recovery_pass` +
+    `auto_recovery_worker_forever`, gated by `CSERVICE_AUTO_RECOVERY` (default
+    off) and wired into the app lifespan like the partition worker.
+- **New model** `recovery_action` (`recovery_actions` table): additive audit
+  rows for every automatically triggered playbook action (payload/result JSON,
+  `reference`, `failure_reason`) + `User.recovery_actions` relationship.
+- **New schemas** (`schemas_chat` leaf `recovery_playbooks`):
+  `RecoveryPlaybookRunRequest`, `RecoveryPlaybookRunReport`,
+  `RecoveryPlaybookMatchResult`, `RecoveryAutomationActionResult`.
+- **New routers** (`chat` leaf `recovery_playbooks`): self-service
+  `POST /chat/recovery/playbooks` (runs the orchestrator against the realtime
+  context, optional `dry_run`) and admin `GET /chat/admin/recovery/playbooks`
+  (read-only catalog).
+- **Meta wiring**: `recovery_automation` subservice in `/meta/ecosystem`
+  (`auto_recovery_enabled` flag), `recovery_playbooks` key in
+  `/meta/scoring-catalog`, feature listed under `/meta` and enough
+  `/meta/features`; `recovery_actions` added to the efficiency-audit system
+  metrics.
+- **Tests**: `tests/test_predictive_recovery_expansion.py` (27) — suite grew
+  525 → 552 passing.
 
 ### r4 (2026-09-26)
 

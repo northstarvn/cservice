@@ -68,6 +68,8 @@ from app.schemas.chat import (
     RecoveryOutcomeReport,
     RecoveryOutcomeAggregateItem,
     RecoveryOutcomeAggregateReport,
+    RecoveryPlaybookRunRequest,
+    RecoveryPlaybookRunReport,
     MonetizationCohortReport,
     WeightedSystemMonitoringReport,
     WeightedFocusItem,
@@ -154,6 +156,13 @@ from app.services.points_exchange import (
     list_user_point_transactions,
     list_user_wallets,
     quote_points_exchange_for_user,
+)
+from app.services.policy_scoring import (
+    build_customer_policy_snapshot,
+)
+from app.services.recovery_playbooks import (
+    build_recovery_playbook_catalog,
+    run_recovery_playbooks,
 )
 from app.services.retention_snapshots import (
     _build_retention_snapshot_action_plan,
@@ -1584,6 +1593,56 @@ async def get_recovery_outcome_aggregate(
         total_acknowledged=total_acknowledged,
         total_complaint_recurrences=total_complaint_recurrences,
         items=items,
+    )
+
+
+@router.get("/chat/admin/recovery/playbooks")
+async def get_recovery_playbook_catalog(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Expose the config-driven recovery playbook table (read-only, idempotent)."""
+    return build_recovery_playbook_catalog()
+
+
+@router.post("/chat/recovery/playbooks", response_model=RecoveryPlaybookRunReport)
+async def run_user_recovery_playbooks(
+    payload: RecoveryPlaybookRunRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """Auto-execute recovery playbooks against the user's realtime context.
+
+    Computes realtime dissatisfaction indicators from the recent interaction
+    window, matches them against the config-driven playbook table, and triggers
+    the matched actions (credit points / escalate ticket / policy guardrail).
+    Pass ``dry_run=true`` to preview matches without writing anything.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=payload.window_days)
+    chat_query = (
+        select(models.ChatHistory)
+        .where(models.ChatHistory.user_id == current_user.id)
+        .where(models.ChatHistory.timestamp >= cutoff)
+        .order_by(desc(models.ChatHistory.timestamp))
+    )
+    booking_query = (
+        select(models.Booking)
+        .where(models.Booking.user_id == current_user.id)
+        .where(models.Booking.created_at >= cutoff)
+        .order_by(desc(models.Booking.created_at))
+    )
+    chat_rows = (await db.execute(chat_query)).scalars().all()
+    bookings = (await db.execute(booking_query)).scalars().all()
+    latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
+    policy_snapshot = await build_customer_policy_snapshot(db, current_user)
+    return await run_recovery_playbooks(
+        db,
+        current_user.id,
+        chat_rows=list(chat_rows),
+        bookings=list(bookings),
+        sentiment=latest_sentiment,
+        window_days=payload.window_days,
+        dry_run=payload.dry_run,
+        policy_snapshot=policy_snapshot,
     )
 
 

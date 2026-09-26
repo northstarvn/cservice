@@ -17,7 +17,7 @@ from app.db import Base, engine, get_db
 from app import i18n
 from app.i18n import locale_payload
 from app.routers import audit, bookings, chat, topics, users
-from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange
+from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
 from app import (
@@ -117,6 +117,7 @@ async def lifespan(app: FastAPI):
     # Optional background workers (off by default so single-tenant behavior and
     # the test suite stay untouched; enable per deployment via env).
     partition_worker = None
+    recovery_worker = None
     try:
         if partition_manager.PARTITION_WORKER_ENABLED:
             partition_worker = asyncio.create_task(
@@ -124,6 +125,12 @@ async def lifespan(app: FastAPI):
                 name="partition-lifecycle",
             )
             logger.info("Partition lifecycle worker started")
+        if recovery_playbooks.AUTO_RECOVERY_ENABLED:
+            recovery_worker = asyncio.create_task(
+                recovery_playbooks.auto_recovery_worker_forever(),
+                name="recovery-playbooks",
+            )
+            logger.info("Recovery playbook worker started")
         if high_throughput_pipeline.PIPELINE_AUTOSTART:
             await high_throughput_pipeline.get_default_pipeline().start()
     except Exception as e:
@@ -137,6 +144,12 @@ async def lifespan(app: FastAPI):
             partition_worker.cancel()
             try:
                 await partition_worker
+            except asyncio.CancelledError:
+                pass
+        if recovery_worker is not None:
+            recovery_worker.cancel()
+            try:
+                await recovery_worker
             except asyncio.CancelledError:
                 pass
         await high_throughput_pipeline.get_default_pipeline().stop()
@@ -201,6 +214,7 @@ async def app_metadata():
             "efficiency_audit",
             "regional_policy",
             "rule_engine",
+            "recovery_playbooks",
         ],
     }
 
@@ -407,6 +421,15 @@ async def app_ecosystem():
                 "purpose": "regional booking & tax policy: per-region calendars (holidays/weekends), labor-compliance guardrails, and per-jurisdiction tax rates for service types",
                 "status": "ready",
             },
+            "recovery_automation": {
+                "routes": [
+                    "/chat/recovery/playbooks",
+                    "/chat/admin/recovery/playbooks",
+                ],
+                "purpose": "predictive sentiment & automated service recovery: realtime dissatisfaction indicators matched against config-driven when-DSL playbooks that auto-issue credit points, escalate tickets, and apply policy-score guardrails",
+                "status": "ready",
+                "auto_recovery_enabled": recovery_playbooks.AUTO_RECOVERY_ENABLED,
+            },
         },
         "capabilities": capabilities,
     }
@@ -468,6 +491,8 @@ async def app_feature_summary():
             "explanation_detail": "/meta/decisions/explanations/{decision_id}",
             "rule_engine_core": "/meta/scoring-catalog",
             "regional_policy": "/meta/regional",
+            "recovery_playbooks": "/chat/recovery/playbooks",
+            "recovery_playbooks_admin": "/chat/admin/recovery/playbooks",
         },
     }
 
@@ -519,6 +544,7 @@ async def scoring_catalog():
         },
         "rule_engine": rule_engine.build_rule_engine_catalog(),
         "regional_policy": regional_policy.build_regional_policy_catalog(),
+        "recovery_playbooks": recovery_playbooks.build_recovery_playbook_catalog(),
     }
 
 
