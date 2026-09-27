@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from collections import Counter
+import re
 from typing import Optional
 
 from sqlalchemy import select
@@ -1353,3 +1354,1088 @@ async def archive_topic_selection(
 
 def list_topic_catalog() -> list[dict[str, str | float | list[str]]]:
     return list(TOPIC_CATALOG)
+
+
+# --- selection governance ---------------------------------------------------
+#
+# Everything a topic selection needs to be *defensible* lives in config rather
+# than in the write path. ``create_topic_selection``/``replace_topic_selection``
+# keep their exact behaviour (they still only normalise length and non-empty);
+# the tables below are evaluated by ``POST /topics/validate`` and the reports, so
+# a caller can ask "would this be accepted, and why" before writing anything.
+
+#: Who may propose a topic, and how far that proposal is trusted. ``source`` is
+#: free text on the column, so an unknown source is not trusted by default.
+TOPIC_SOURCE_POLICIES: list[dict[str, object]] = [
+    {
+        "source": "chat",
+        "trust": "untrusted",
+        "default_confidence": 0.4,
+        "requires_rationale": False,
+        "note": "free text lifted from the conversation; guarded, never authoritative",
+    },
+    {
+        "source": "policy",
+        "trust": "trusted",
+        "default_confidence": 0.85,
+        "requires_rationale": True,
+        "note": "derived from a configured policy; rationale is the policy reference",
+    },
+    {
+        "source": "system",
+        "trust": "trusted",
+        "default_confidence": 0.9,
+        "requires_rationale": True,
+        "note": "produced by a deterministic rule (catalog match, classification)",
+    },
+    {
+        "source": "admin",
+        "trust": "trusted",
+        "default_confidence": 0.95,
+        "requires_rationale": True,
+        "note": "explicit operator decision; the only source allowed to override a guard",
+    },
+    {
+        "source": "import",
+        "trust": "trusted",
+        "default_confidence": 0.8,
+        "requires_rationale": False,
+        "note": "migrated from another system; trusted on provenance, not on content",
+    },
+]
+DEFAULT_TOPIC_SOURCE = "chat"
+TOPIC_SOURCE_BY_NAME: dict[str, dict[str, object]] = {
+    str(row["source"]): dict(row) for row in TOPIC_SOURCE_POLICIES
+}
+#: Weakest -> strongest, so a trust comparison is a rank comparison.
+TOPIC_TRUST_ORDER: tuple[str, ...] = ("untrusted", "suspected", "trusted")
+TOPIC_TRUST_RANK: dict[str, int] = {
+    name: rank for rank, name in enumerate(TOPIC_TRUST_ORDER)
+}
+#: Sources allowed to override a failing guard. Deliberately narrow: a guard that
+#: anyone can waive is not a guard.
+TOPIC_OVERRIDE_SOURCES: tuple[str, ...] = ("admin",)
+
+#: Content the topic column must not carry. A topic is displayed back to users
+#: and read by every downstream decision, so identifiers pasted into free text
+#: are a leak, not a topic.
+TOPIC_SENSITIVE_PATTERNS: list[dict[str, object]] = [
+    {
+        "pattern_id": "email",
+        "regex": r"[\w.+-]+@[\w-]+\.[\w.]+",
+        "severity": "blocking",
+        "rationale": "an email address is a contact record, not a topic",
+    },
+    {
+        "pattern_id": "phone",
+        "regex": r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)",
+        "severity": "blocking",
+        "rationale": "a phone number is a contact record, not a topic",
+    },
+    {
+        "pattern_id": "long_digit_run",
+        "regex": r"(?<!\w)\d{9,}(?!\w)",
+        "severity": "blocking",
+        "rationale": "a long digit run is an account, card or case identifier",
+    },
+    {
+        "pattern_id": "bearer_token",
+        "regex": r"(?i)\b(?:bearer|token|api[_-]?key|secret)\b\s*[:=]\s*\S+",
+        "severity": "blocking",
+        "rationale": "a credential in a topic would end up in reports and prompts",
+    },
+    {
+        "pattern_id": "url",
+        "regex": r"https?://\S+",
+        "severity": "advisory",
+        "rationale": "a bare URL is usually an accident of paste, not the subject",
+    },
+]
+TOPIC_SENSITIVE_PATTERN_BY_ID: dict[str, dict[str, object]] = {
+    str(row["pattern_id"]): dict(row) for row in TOPIC_SENSITIVE_PATTERNS
+}
+
+#: Operators a guard may use (the same idiom as the decision-intelligence gate
+#: tables, so a threshold reads identically across subservices).
+TOPIC_GUARD_OPS: dict[str, str] = {
+    "gte": "metric >= threshold",
+    "gt": "metric > threshold",
+    "lte": "metric <= threshold",
+    "lt": "metric < threshold",
+    "eq": "metric == threshold",
+    "neq": "metric != threshold",
+    "in": "metric is one of threshold (a list)",
+    "not_in": "metric is not one of threshold (a list)",
+    "is_true": "metric is truthy; threshold ignored",
+    "is_false": "metric is falsy; threshold ignored",
+    "is_none": "metric is missing or None",
+    "present": "the metric key exists at all",
+}
+TOPIC_GUARD_SEVERITIES: tuple[str, ...] = ("advisory", "review", "reject")
+TOPIC_GUARD_SEVERITY_RANK: dict[str, int] = {
+    name: rank for rank, name in enumerate(TOPIC_GUARD_SEVERITIES)
+}
+
+#: Guards applied to a *proposed* selection. ``sources: ["*"]`` matches every
+#: source; a list narrows the guard. The length bounds mirror
+#: ``_normalize_topic_value`` so the pre-flight verdict and the write agree.
+TOPIC_SELECTION_GUARDS: list[dict[str, object]] = [
+    {
+        "guard_id": "topic_not_empty",
+        "metric": "topic_length",
+        "op": "gte",
+        "threshold": 1,
+        "severity": "reject",
+        "sources": ("*",),
+        "rationale": "an empty topic is not a selection",
+    },
+    {
+        "guard_id": "topic_length_cap",
+        "metric": "topic_length",
+        "op": "lte",
+        "threshold": 120,
+        "severity": "reject",
+        "sources": ("*",),
+        "rationale": "the column is String(120); a longer value cannot be stored",
+    },
+    {
+        "guard_id": "no_sensitive_content",
+        "metric": "sensitive_hit_count",
+        "op": "lte",
+        "threshold": 0,
+        "severity": "reject",
+        "sources": ("*",),
+        "rationale": "a contact record or credential pasted into the topic leaks downstream",
+    },
+    {
+        "guard_id": "source_known",
+        "metric": "source_known",
+        "op": "is_true",
+        "severity": "review",
+        "threshold": True,
+        "sources": ("*",),
+        "rationale": "source is free text; an unlisted source has no trust level",
+    },
+    {
+        "guard_id": "source_trusted",
+        "metric": "source_trust",
+        "op": "in",
+        "threshold": ("trusted",),
+        "severity": "review",
+        "sources": ("*",),
+        "rationale": "an untrusted source may propose, but a human should confirm",
+    },
+    {
+        "guard_id": "min_confidence",
+        "metric": "confidence",
+        "op": "gte",
+        "threshold": 0.3,
+        "severity": "review",
+        "sources": ("chat", "import"),
+        "rationale": "a low-confidence proposal is a guess, and guesses need confirmation",
+    },
+    {
+        "guard_id": "rationale_present",
+        "metric": "rationale_length",
+        "op": "gte",
+        "threshold": 1,
+        "severity": "review",
+        "sources": ("system", "policy", "admin"),
+        "rationale": "a machine-sourced topic without a rationale cannot be audited",
+    },
+    {
+        "guard_id": "catalog_recognised",
+        "metric": "catalog_match_count",
+        "op": "gte",
+        "threshold": 1,
+        "severity": "advisory",
+        "sources": ("*",),
+        "rationale": "off-catalog topics are allowed, but coverage reporting will miss them",
+    },
+    {
+        "guard_id": "unambiguous_sector",
+        "metric": "sector_count",
+        "op": "lte",
+        "threshold": 1,
+        "severity": "advisory",
+        "sources": ("*",),
+        "rationale": "a topic in two sectors cannot be routed by sector alone",
+    },
+    {
+        "guard_id": "changed_from_current",
+        "metric": "unchanged_from_current",
+        "op": "is_false",
+        "severity": "advisory",
+        "sources": ("*",),
+        "rationale": "re-saving an identical topic adds a history row without changing anything",
+    },
+]
+TOPIC_GUARD_BY_ID: dict[str, dict[str, object]] = {
+    str(row["guard_id"]): dict(row) for row in TOPIC_SELECTION_GUARDS
+}
+
+#: How a proposal is matched back to the catalog, cheapest test first. The first
+#: mode that matches wins, so a config change can move a topic between bands
+#: without touching the ranking code.
+TOPIC_MATCH_MODES: list[dict[str, object]] = [
+    {"mode": "exact", "description": "the proposal is a catalog topic, ignoring case and padding"},
+    {"mode": "keyword", "description": "a catalog keyword appears in the proposal"},
+    {"mode": "phrase", "description": "a catalog topic appears inside the proposal, or vice versa"},
+    {"mode": "tokens", "description": "token overlap with a catalog topic, scored by share of tokens"},
+    {"mode": "none", "description": "off-catalog; allowed, but reported as uncovered"},
+]
+DEFAULT_TOPIC_MATCH_MODE = "tokens"
+TOPIC_TOKEN_MATCH_FLOOR = 0.5
+
+#: Weighting for the config-driven ranker. These are the signals the built-in
+#: suggester uses implicitly, made explicit and tunable; contributions are
+#: reported per item so a ranking is explainable.
+TOPIC_RANKING_WEIGHTS: dict[str, float] = {
+    "keyword": 3.0,
+    "theme": 2.0,
+    "sector": 2.0,
+    "overlap": 1.0,
+    "confidence": 1.0,
+}
+TOPIC_RANKING_TIEBREAK: tuple[str, ...] = ("overlap", "confidence", "topic")
+
+#: How a selection history is banded. ``switches`` counts transitions between
+#: consecutive *distinct* topics; a customer who re-picks the same topic is not
+#: drifting.
+TOPIC_DRIFT_BANDS: list[dict[str, object]] = [
+    {
+        "band": "stable",
+        "max_switches": 1,
+        "max_distinct_topics": 2,
+        "description": "one settled topic, at most one change",
+    },
+    {
+        "band": "drifting",
+        "max_switches": 3,
+        "max_distinct_topics": 4,
+        "description": "the topic is still settling",
+    },
+    {
+        "band": "volatile",
+        "max_switches": None,
+        "max_distinct_topics": None,
+        "description": "no upper bound; treat downstream decisions as unstable",
+    },
+]
+DEFAULT_TOPIC_DRIFT_BAND = "stable"
+TOPIC_DRIFT_BAND_BY_NAME: dict[str, dict[str, object]] = {
+    str(row["band"]): dict(row) for row in TOPIC_DRIFT_BANDS
+}
+
+#: Retention/refresh expectations for the selection history. Advisory only: the
+#: table is not DDL, and nothing here deletes a row.
+TOPIC_LIFECYCLE_POLICIES: list[dict[str, object]] = [
+    {
+        "policy_id": "default",
+        "history_retention": 50,
+        "history_window_days": 365,
+        "min_confidence_to_persist": 0.0,
+        "require_rationale_on_replace": False,
+        "cooldown_minutes_between_changes": 0,
+        "description": "keep the last 50 selections for a year; no write-side throttling",
+    },
+    {
+        "policy_id": "high_volume",
+        "history_retention": 20,
+        "history_window_days": 90,
+        "min_confidence_to_persist": 0.2,
+        "require_rationale_on_replace": True,
+        "cooldown_minutes_between_changes": 5,
+        "description": "chatty tenants: throttle replacements and insist on a rationale",
+    },
+    {
+        "policy_id": "regulated",
+        "history_retention": 200,
+        "history_window_days": 1095,
+        "min_confidence_to_persist": 0.0,
+        "require_rationale_on_replace": True,
+        "cooldown_minutes_between_changes": 0,
+        "description": "three years of decision history, every replacement justified",
+    },
+]
+DEFAULT_TOPIC_LIFECYCLE_POLICY = "default"
+TOPIC_LIFECYCLE_POLICY_BY_ID: dict[str, dict[str, object]] = {
+    str(row["policy_id"]): dict(row) for row in TOPIC_LIFECYCLE_POLICIES
+}
+
+
+def _number(value: object) -> Optional[float]:
+    """Coerce to float, or None. Booleans are never numbers."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _op_holds(value: object, op: str, threshold: object) -> bool:
+    """Apply one guard operator. Fails closed on an unknown operator name."""
+    if op not in TOPIC_GUARD_OPS:
+        return False
+    if op == "is_true":
+        return bool(value)
+    if op == "is_false":
+        return not value
+    if op == "is_none":
+        return value is None
+    if op == "present":
+        return value is not None
+    if op in {"in", "not_in"}:
+        options = threshold if isinstance(threshold, (list, tuple, set)) else [threshold]
+        inside = value in options
+        return inside if op == "in" else not inside
+    if op == "eq":
+        return value == threshold
+    if op == "neq":
+        return value != threshold
+    number = _number(value)
+    limit = _number(threshold)
+    if number is None or limit is None:
+        return False
+    if op == "gte":
+        return number >= limit
+    if op == "gt":
+        return number > limit
+    if op == "lte":
+        return number <= limit
+    if op == "lt":
+        return number < limit
+    return False
+
+
+def topic_source_policy(source: str | None) -> dict[str, object]:
+    """The source row, or an unlisted-source row that trusts nothing."""
+    name = (source or "").strip() or DEFAULT_TOPIC_SOURCE
+    if name in TOPIC_SOURCE_BY_NAME:
+        return dict(TOPIC_SOURCE_BY_NAME[name])
+    return {
+        "source": name,
+        "trust": "untrusted",
+        "default_confidence": 0.0,
+        "requires_rationale": False,
+        "note": "unlisted source; the column is free text, so it defaults to untrusted",
+    }
+
+
+def topic_sensitivity_hits(topic: str) -> list[dict[str, object]]:
+    """Every configured sensitive pattern that matches, with the matched text."""
+    text = topic or ""
+    hits: list[dict[str, object]] = []
+    for row in TOPIC_SENSITIVE_PATTERNS:
+        match = re.search(str(row["regex"]), text)
+        if not match:
+            continue
+        hits.append(
+            {
+                "pattern_id": row["pattern_id"],
+                "severity": row["severity"],
+                "matched": match.group(0),
+                "rationale": row["rationale"],
+            }
+        )
+    return hits
+
+
+def classify_topic_match(
+    topic: str,
+    *,
+    modes: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Match a proposal to the catalog and say *how* it matched.
+
+    Reports the first mode in :data:`TOPIC_MATCH_MODES` that matches, so the
+    band a topic lands in is a config decision rather than a code path.
+    """
+    text = (topic or "").strip()
+    lowered = text.lower()
+    catalog = {str(item["topic"]): dict(item) for item in TOPIC_CATALOG}
+    result: dict[str, object] = {
+        "topic": text,
+        "mode": "none",
+        "matched_topics": [],
+        "best_overlap": 0.0,
+        "theme": None,
+        "sector": None,
+    }
+    for row in modes or TOPIC_MATCH_MODES:
+        mode = str(row["mode"])
+        if mode == "exact":
+            matches = [name for name in catalog if name.lower() == lowered]
+        elif mode == "keyword":
+            matches = [
+                str(item["topic"])
+                for item in TOPIC_CATALOG
+                if any(str(k).lower() in lowered for k in item.get("keywords", []))
+            ]
+        elif mode == "phrase":
+            matches = [
+                name
+                for name in catalog
+                if lowered and (lowered in name.lower() or name.lower() in lowered)
+            ]
+        elif mode == "tokens":
+            proposal_tokens = set(_topic_keywords(text))
+            scored: list[tuple[float, str]] = []
+            for name in catalog:
+                tokens = set(_topic_keywords(name))
+                if not tokens or not proposal_tokens:
+                    continue
+                share = len(proposal_tokens & tokens) / len(proposal_tokens)
+                if share >= TOPIC_TOKEN_MATCH_FLOOR:
+                    scored.append((share, name))
+            scored.sort(key=lambda pair: (-pair[0], pair[1]))
+            matches = [name for share, name in scored]
+            result["best_overlap"] = round(scored[0][0], 4) if scored else 0.0
+        else:
+            matches = []
+        if matches:
+            result["mode"] = mode
+            result["matched_topics"] = matches
+            primary = matches[0]
+            result["theme"] = _topic_theme_for(primary)
+            result["sector"] = _topic_sector_for(primary)
+            result["best_overlap"] = max(
+                float(result.get("best_overlap") or 0.0),
+                round(_topic_overlap_score(text, primary) / max(1, len(_topic_keywords(primary))), 4),
+            )
+            return result
+    return result
+
+
+def topic_proposal_metrics(
+    topic: str,
+    *,
+    source: str | None = None,
+    rationale: str = "",
+    confidence: float = 0.0,
+    current_topic: str | None = None,
+) -> dict[str, object]:
+    """Every metric a guard may read about one proposed selection."""
+    text = (topic or "").strip()
+    match = classify_topic_match(text)
+    sensitivity = topic_sensitivity_hits(text)
+    policy = topic_source_policy(source)
+    sectors = sorted(
+        {
+            str(group["sector"])
+            for group in TOPIC_SECTORS
+            if text and text in [str(item) for item in group["topics"]]
+        }
+    )
+    return {
+        "topic": text,
+        "topic_length": len(text),
+        "source": policy["source"],
+        "source_known": str(policy["source"]) in TOPIC_SOURCE_BY_NAME,
+        "source_trust": policy["trust"],
+        "rationale_length": len((rationale or "").strip()),
+        "confidence": _number(confidence) or 0.0,
+        "catalog_match_count": len(match["matched_topics"]),
+        "match_mode": match["mode"],
+        "sector_count": len(sectors),
+        "sectors": sectors,
+        "sensitive_hit_count": len(sensitivity),
+        "sensitive_hits": sensitivity,
+        "unchanged_from_current": bool(
+            current_topic is not None and current_topic.strip() == text
+        ),
+        "override_allowed": str(policy["source"]) in TOPIC_OVERRIDE_SOURCES,
+    }
+
+
+def evaluate_selection_guards(
+    metrics: dict[str, object],
+    *,
+    guards: list[dict[str, object]] | None = None,
+    source: str | None = None,
+) -> list[dict[str, object]]:
+    """Evaluate the applicable guards, strongest severity first.
+
+    A guard applies when its ``sources`` list contains the proposal's source or
+    ``"*"``. Every result keeps the reason, the observed value and the
+    rationale, because a guard that cannot explain itself gets disabled.
+    """
+    source_name = str(metrics.get("source") or source or DEFAULT_TOPIC_SOURCE)
+    results: list[dict[str, object]] = []
+    for row in guards or TOPIC_SELECTION_GUARDS:
+        sources = tuple(row.get("sources") or ("*",))
+        if "*" not in sources and source_name not in sources:
+            continue
+        metric = str(row.get("metric", ""))
+        op = str(row.get("op", ""))
+        threshold = row.get("threshold")
+        observed = metric in metrics and metrics[metric] is not None
+        actual = metrics.get(metric)
+        if not observed:
+            holds = False
+            reason = "metric_missing"
+        else:
+            holds = _op_holds(actual, op, threshold)
+            reason = "ok" if holds else "threshold_not_met"
+        severity = str(row.get("severity", "advisory"))
+        if severity not in TOPIC_GUARD_SEVERITY_RANK:
+            severity = "advisory"
+        results.append(
+            {
+                "guard_id": row.get("guard_id"),
+                "metric": metric,
+                "op": op,
+                "op_meaning": TOPIC_GUARD_OPS.get(op, "unknown operator"),
+                "threshold": threshold,
+                "actual": actual,
+                "observed": observed,
+                "severity": severity,
+                "holds": holds,
+                "reason": reason,
+                "rationale": row.get("rationale", ""),
+            }
+        )
+    results.sort(
+        key=lambda result: (
+            -TOPIC_GUARD_SEVERITY_RANK.get(str(result["severity"]), 0),
+            str(result["guard_id"]),
+        )
+    )
+    return results
+
+
+def selection_verdict(
+    metrics: dict[str, object],
+    *,
+    guards: list[dict[str, object]] | None = None,
+    source: str | None = None,
+) -> dict[str, object]:
+    """``accept`` / ``review`` / ``reject``, plus the guards that decided it.
+
+    ``reject``  — a ``reject``-severity guard failed: do not write this.
+    ``review``  — nothing fatal, but something needs a human: write it knowingly.
+    ``accept``  — every applicable guard holds.
+
+    The verdict is advisory by construction: the write path is unchanged, so an
+    admin can still persist a rejected topic and record why.
+    """
+    results = evaluate_selection_guards(metrics, guards=guards, source=source)
+    failed = [result for result in results if not result["holds"]]
+    rejected = [str(r["guard_id"]) for r in failed if r["severity"] == "reject"]
+    review = [str(r["guard_id"]) for r in failed if r["severity"] == "review"]
+    advisory = [str(r["guard_id"]) for r in failed if r["severity"] == "advisory"]
+    if rejected:
+        decision = "reject"
+    elif review or advisory:
+        decision = "review"
+    else:
+        decision = "accept"
+    return {
+        "decision": decision,
+        "rejected_by": rejected,
+        "needs_review_by": review,
+        "advisory_by": advisory,
+        "guards": results,
+        "metrics": metrics,
+        "override_allowed": bool(metrics.get("override_allowed")),
+        "override_note": (
+            "an override-capable source may still persist; the verdict is "
+            "advisory and the write path is unchanged"
+        ),
+    }
+
+
+def build_topic_selection_validation(
+    topic: str,
+    *,
+    source: str | None = None,
+    rationale: str = "",
+    confidence: float = 0.0,
+    current_topic: str | None = None,
+    guards: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Pre-flight a proposed selection without touching the database."""
+    metrics = topic_proposal_metrics(
+        topic,
+        source=source,
+        rationale=rationale,
+        confidence=confidence,
+        current_topic=current_topic,
+    )
+    verdict = selection_verdict(metrics, guards=guards, source=source)
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "topic": metrics["topic"],
+        "source": metrics["source"],
+        "source_policy": topic_source_policy(source),
+        "match": classify_topic_match(str(metrics["topic"])),
+        "sensitive_hits": metrics["sensitive_hits"],
+        "verdict": verdict,
+        "summary": (
+            f"Proposed topic '{metrics['topic']}' from {metrics['source']} is "
+            f"{verdict['decision']} by {len(verdict['guards']) - len([g for g in verdict['guards'] if g['holds']])} "
+            f"of {len(verdict['guards'])} guards (mode {metrics['match_mode']}, "
+            f"{metrics['catalog_match_count']} catalog matches)."
+        ),
+    }
+
+
+def build_topic_governance_catalog() -> dict[str, object]:
+    """The introspectable contract for topic governance (meta tooling)."""
+    return {
+        "sources": {
+            "table": [dict(row) for row in TOPIC_SOURCE_POLICIES],
+            "default": DEFAULT_TOPIC_SOURCE,
+            "trust_order": list(TOPIC_TRUST_ORDER),
+            "override_sources": list(TOPIC_OVERRIDE_SOURCES),
+            "unknown_source": "unlisted sources resolve to untrusted with 0.0 default confidence",
+            "helper": "topic_source_policy",
+        },
+        "guards": {
+            "table": [dict(row) for row in TOPIC_SELECTION_GUARDS],
+            "operators": dict(TOPIC_GUARD_OPS),
+            "severities": list(TOPIC_GUARD_SEVERITIES),
+            "severity_meaning": {
+                "reject": "do not write the proposal",
+                "review": "a human should confirm before or after writing",
+                "advisory": "reported only, never decisive",
+            },
+            "verdict": "accept | review | reject",
+            "verdict_rule": "any reject failure -> reject; any review/advisory failure -> review; else accept",
+            "applies_to": "a guard applies when its sources list holds the proposal's source or '*'",
+            "advisory": (
+                "the verdict does not gate the write path; create/replace keep their "
+                "existing behaviour, so an operator can override knowingly"
+            ),
+            "helpers": [
+                "topic_proposal_metrics",
+                "evaluate_selection_guards",
+                "selection_verdict",
+                "build_topic_selection_validation",
+            ],
+        },
+        "sensitive_patterns": {
+            "table": [dict(row) for row in TOPIC_SENSITIVE_PATTERNS],
+            "checked": "against the topic text, before persistence",
+            "helper": "topic_sensitivity_hits",
+            "note": "the topic is rendered back to users and read by every downstream decision",
+        },
+        "match_modes": {
+            "table": [dict(row) for row in TOPIC_MATCH_MODES],
+            "order": "cheapest test first; the first mode that matches wins",
+            "token_floor": TOPIC_TOKEN_MATCH_FLOOR,
+            "default": DEFAULT_TOPIC_MATCH_MODE,
+            "helper": "classify_topic_match",
+        },
+        "ranking": {
+            "weights": dict(TOPIC_RANKING_WEIGHTS),
+            "tiebreak": list(TOPIC_RANKING_TIEBREAK),
+            "note": (
+                "the same signals the built-in suggester uses, each with an explicit "
+                "weight; the suggester hardcodes them. Ordering is therefore not "
+                "guaranteed to match, and every per-signal contribution is reported"
+            ),
+            "strict_filters": "theme/sector drop out-of-scope topics instead of down-weighting them",
+            "helper": "rank_topics",
+        },
+        "drift_bands": {
+            "table": [dict(row) for row in TOPIC_DRIFT_BANDS],
+            "default": DEFAULT_TOPIC_DRIFT_BAND,
+            "note": "switches count transitions between consecutive distinct topics",
+            "helper": "build_topic_drift_report",
+        },
+        "lifecycle": {
+            "table": [dict(row) for row in TOPIC_LIFECYCLE_POLICIES],
+            "default": DEFAULT_TOPIC_LIFECYCLE_POLICY,
+            "advisory": "retention and cooldown are reported, never enforced: no DDL, no deletes",
+            "helper": "build_topic_lifecycle_report",
+        },
+        "taxonomy_integrity": {
+            "checks": [
+                "catalog topics in no theme",
+                "catalog topics in no sector",
+                "topics in more than one sector",
+                "themes with no sector",
+                "sectors with no themes",
+                "duplicate catalog topics",
+            ],
+            "helper": "build_topic_taxonomy_integrity_report",
+        },
+    }
+
+
+def rank_topics(
+    query: str,
+    *,
+    limit: int = 5,
+    theme: str | None = None,
+    sector: str | None = None,
+    weights: dict[str, float] | None = None,
+    catalog: list[dict[str, object]] | None = None,
+    strict_filters: bool = False,
+) -> dict[str, object]:
+    """Config-weighted catalog ranking.
+
+    The signals are the ones the built-in suggester already uses (keyword hits,
+    token overlap, theme/sector affinity, catalog confidence), but each one is
+    weighted from :data:`TOPIC_RANKING_WEIGHTS` and the per-signal contributions
+    are returned, so a ranking can be explained ("why is this first") instead of
+    just trusted. The ordering is therefore *not* guaranteed to match the
+    suggester's. ``strict_filters`` drops out-of-scope topics instead of merely
+    down-weighting them.
+    """
+    table = dict(TOPIC_RANKING_WEIGHTS if weights is None else weights)
+    text = (query or "").strip()
+    lowered = text.lower()
+    scored: list[dict[str, object]] = []
+    for item in catalog or TOPIC_CATALOG:
+        topic = str(item["topic"])
+        theme_name = _topic_theme_for(topic)
+        sector_name = _topic_sector_for(topic)
+        if strict_filters and theme and theme_name != theme:
+            continue
+        if strict_filters and sector and sector_name != sector:
+            continue
+        keywords = [str(keyword).lower() for keyword in item.get("keywords", [])]
+        keyword_hits = [keyword for keyword in keywords if keyword and keyword in lowered]
+        theme_hit = 1 if theme and theme_name == theme else 0
+        sector_hit = 1 if sector and sector_name == sector else 0
+        overlap = _topic_overlap_score(text, topic) if text else 0
+        confidence = _number(item.get("confidence")) or 0.0
+        contributions = {
+            "keyword": table.get("keyword", 0.0) * len(keyword_hits),
+            "theme": table.get("theme", 0.0) * theme_hit,
+            "sector": table.get("sector", 0.0) * sector_hit,
+            "overlap": table.get("overlap", 0.0) * overlap,
+            "confidence": table.get("confidence", 0.0) * confidence,
+        }
+        score = sum(contributions.values())
+        if score <= 0:
+            continue
+        scored.append(
+            {
+                "topic": topic,
+                "score": round(score, 4),
+                "contributions": {key: round(value, 4) for key, value in contributions.items()},
+                "matched_keywords": keyword_hits,
+                "overlap": overlap,
+                "confidence": confidence,
+                "theme": _topic_theme_for(topic),
+                "sector": _topic_sector_for(topic),
+            }
+        )
+    for key in reversed(TOPIC_RANKING_TIEBREAK):
+        if key == "confidence":
+            scored.sort(key=lambda row: -float(row["confidence"]))
+        elif key == "overlap":
+            scored.sort(key=lambda row: -int(row["overlap"]))
+    scored.sort(key=lambda row: (-float(row["score"]), str(row["topic"])))
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "query": text,
+        "theme": theme,
+        "sector": sector,
+        "weights": table,
+        "total_matches": len(scored),
+        "items": scored[: max(1, int(limit))],
+        "match": classify_topic_match(text),
+        "summary": (
+            f"Ranked {len(scored)} catalog topics for '{text or 'all topics'}' "
+            f"using weights {table}."
+        ),
+    }
+
+
+def _distinct_topic_sequence(
+    selections: list[models.TopicSelection],
+) -> list[dict[str, object]]:
+    """Chronological selections with consecutive repeats collapsed."""
+    ordered = list(reversed(list(selections or [])))
+    sequence: list[dict[str, object]] = []
+    for selection in ordered:
+        topic = (selection.topic or "").strip()
+        if sequence and str(sequence[-1]["topic"]) == topic:
+            continue
+        sequence.append(
+            {
+                "topic": topic,
+                "source": selection.source,
+                "confidence": float(selection.confidence or 0.0),
+                "created_at": selection.created_at,
+                "theme": _topic_theme_for(topic),
+                "sector": _topic_sector_for(topic),
+            }
+        )
+    return sequence
+
+
+def topic_drift_band(
+    switches: int,
+    distinct_topics: int,
+    *,
+    bands: list[dict[str, object]] | None = None,
+) -> str:
+    """The configured band for an observed switch/distinct count."""
+    for row in bands or TOPIC_DRIFT_BANDS:
+        max_switches = row.get("max_switches")
+        max_distinct = row.get("max_distinct_topics")
+        if max_switches is not None and switches > int(max_switches):
+            continue
+        if max_distinct is not None and distinct_topics > int(max_distinct):
+            continue
+        return str(row["band"])
+    return str((bands or TOPIC_DRIFT_BANDS)[-1]["band"])
+
+
+def build_topic_drift_report(
+    selections: Optional[list[models.TopicSelection]] = None,
+    *,
+    bands: list[dict[str, object]] | None = None,
+    window: int | None = None,
+) -> dict[str, object]:
+    """Is a customer's topic settled, or is it moving under every decision?
+
+    ``switches`` counts transitions between consecutive *distinct* topics, so
+    re-saving the same topic is not drift; ``volatility`` is switches per
+    transition window and is the number to threshold on.
+    """
+    sequence = _distinct_topic_sequence(selections or [])
+    if window:
+        sequence = sequence[-int(window) :]
+    switches = max(0, len(sequence) - 1)
+    distinct = sorted({str(item["topic"]) for item in sequence})
+    themes = [item["theme"] for item in sequence if item["theme"]]
+    dominant_theme = max(set(themes), key=themes.count) if themes else None
+    band = topic_drift_band(switches, len(distinct), bands=bands)
+    mean_confidence = (
+        round(sum(float(item["confidence"]) for item in sequence) / len(sequence), 4)
+        if sequence
+        else 0.0
+    )
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "selections": len(selections or []),
+        "distinct_transitions": len(sequence),
+        "switches": switches,
+        "distinct_topics": len(distinct),
+        "topics": distinct,
+        "sequence": sequence,
+        "band": band,
+        "volatility": round(switches / max(1, len(sequence)), 4),
+        "dominant_theme": dominant_theme,
+        "mean_confidence": mean_confidence,
+        "settled": band == DEFAULT_TOPIC_DRIFT_BAND,
+        "bands": [dict(row) for row in (bands or TOPIC_DRIFT_BANDS)],
+        "summary": (
+            f"{len(distinct)} distinct topics across {switches} switches -> band "
+            f"'{band}' (volatility {round(switches / max(1, len(sequence)), 4)}), "
+            f"dominant theme {dominant_theme or 'none'}."
+        ),
+    }
+
+
+def build_topic_lifecycle_report(
+    selections: Optional[list[models.TopicSelection]] = None,
+    *,
+    policy_id: str | None = None,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    """Compare a selection history against the configured retention policy.
+
+    Advisory by construction: the policy says what *should* be kept, and this
+    report says what is; nothing is deleted.
+    """
+    policy = dict(
+        TOPIC_LIFECYCLE_POLICY_BY_ID.get(
+            policy_id or DEFAULT_TOPIC_LIFECYCLE_POLICY, {}
+        )
+    )
+    if not policy:
+        raise ValueError(
+            f"unknown lifecycle policy {policy_id!r}; "
+            f"expected one of {sorted(TOPIC_LIFECYCLE_POLICY_BY_ID)}"
+        )
+    rows = list(selections or [])
+    retention = policy.get("history_retention")
+    window_days = policy.get("history_window_days")
+    horizon = (as_of or datetime.now(timezone.utc)).timestamp() - float(window_days or 0) * 86400
+    within_window = 0
+    for selection in rows:
+        created = selection.created_at
+        if created is None:
+            continue
+        created_ts = created.timestamp() if hasattr(created, "timestamp") else None
+        if created_ts is not None and created_ts >= horizon:
+            within_window += 1
+    min_confidence = _number(policy.get("min_confidence_to_persist")) or 0.0
+    below_floor = [
+        {"id": selection.id, "topic": selection.topic, "confidence": float(selection.confidence or 0.0)}
+        for selection in rows
+        if float(selection.confidence or 0.0) < min_confidence
+    ]
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "policy": policy["policy_id"],
+        "description": policy.get("description"),
+        "selections": len(rows),
+        "history_retention": retention,
+        "retention_exceeded": bool(retention is not None and len(rows) > int(retention)),
+        "over_retention": max(0, len(rows) - int(retention)) if retention is not None else 0,
+        "history_window_days": window_days,
+        "selections_within_window": within_window,
+        "min_confidence_to_persist": min_confidence,
+        "below_confidence_floor": below_floor,
+        "require_rationale_on_replace": bool(policy.get("require_rationale_on_replace")),
+        "rationale_less": [
+            {"id": selection.id, "topic": selection.topic}
+            for selection in rows
+            if not (selection.rationale or "").strip()
+        ],
+        "cooldown_minutes_between_changes": policy.get("cooldown_minutes_between_changes"),
+        "advisory": "reported only: no row is deleted and no write is refused",
+    }
+
+
+def build_topic_taxonomy_integrity_report() -> dict[str, object]:
+    """Consistency checks over the three taxonomy tables.
+
+    The tables are maintained by hand and genuinely overlap (``cancellations and
+    refunds`` lives in two sectors on purpose, some topics in none), so this
+    report makes the consequences explicit rather than leaving them implicit in
+    a lookup.
+    """
+    catalog_topics = [str(item["topic"]) for item in TOPIC_CATALOG]
+    theme_membership: dict[str, list[str]] = {}
+    for group in TOPIC_THEME_GROUPS:
+        for topic in group["topics"]:
+            theme_membership.setdefault(str(topic), []).append(str(group["theme"]))
+    sector_membership: dict[str, list[str]] = {}
+    for group in TOPIC_SECTORS:
+        for topic in group["topics"]:
+            sector_membership.setdefault(str(topic), []).append(str(group["sector"]))
+    unthemed = sorted(topic for topic in catalog_topics if topic not in theme_membership)
+    unsectored = sorted(topic for topic in catalog_topics if topic not in sector_membership)
+    multi_sector = sorted(
+        topic for topic in catalog_topics if len(sector_membership.get(topic, [])) > 1
+    )
+    sector_themes: dict[str, set[str]] = {str(g["sector"]): set() for g in TOPIC_SECTORS}
+    for group in TOPIC_THEME_GROUPS:
+        for topic in group["topics"]:
+            for sector in sector_membership.get(str(topic), []):
+                sector_themes.setdefault(sector, set()).add(str(group["theme"]))
+    orphan_themes = sorted(
+        str(group["theme"])
+        for group in TOPIC_THEME_GROUPS
+        if not any(
+            sector_membership.get(str(topic)) for topic in group["topics"]
+        )
+    )
+    empty_sectors = sorted(
+        str(group["sector"])
+        for group in TOPIC_SECTORS
+        if not group["topics"]
+    )
+    duplicates = sorted(
+        {topic for topic in catalog_topics if catalog_topics.count(topic) > 1}
+    )
+    findings: list[dict[str, object]] = []
+    if unthemed:
+        findings.append(
+            {
+                "check": "catalog_topics_in_no_theme",
+                "count": len(unthemed),
+                "items": unthemed,
+                "impact": "theme coverage reports these as uncovered",
+            }
+        )
+    if unsectored:
+        findings.append(
+            {
+                "check": "catalog_topics_in_no_sector",
+                "count": len(unsectored),
+                "items": unsectored,
+                "impact": "sector routing cannot place these",
+            }
+        )
+    if multi_sector:
+        findings.append(
+            {
+                "check": "topics_in_multiple_sectors",
+                "count": len(multi_sector),
+                "items": multi_sector,
+                "impact": "sector-filtered search returns the topic under more than one sector",
+            }
+        )
+    if orphan_themes:
+        findings.append(
+            {
+                "check": "themes_with_no_sector",
+                "count": len(orphan_themes),
+                "items": orphan_themes,
+                "impact": "a theme with no sector cannot be reached by sector filters",
+            }
+        )
+    if empty_sectors:
+        findings.append(
+            {
+                "check": "sectors_with_no_topics",
+                "count": len(empty_sectors),
+                "items": empty_sectors,
+                "impact": "an empty sector can never match a search",
+            }
+        )
+    if duplicates:
+        findings.append(
+            {
+                "check": "duplicate_catalog_topics",
+                "count": len(duplicates),
+                "items": duplicates,
+                "impact": "a duplicate inflates catalog size and splits coverage credit",
+            }
+        )
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "catalog_size": len(catalog_topics),
+        "theme_count": len(TOPIC_THEME_GROUPS),
+        "sector_count": len(TOPIC_SECTORS),
+        "unthemed_topics": unthemed,
+        "unsectored_topics": unsectored,
+        "multi_sector_topics": multi_sector,
+        "orphan_themes": orphan_themes,
+        "empty_sectors": empty_sectors,
+        "duplicate_topics": duplicates,
+        "sector_theme_map": {sector: sorted(themes) for sector, themes in sector_themes.items()},
+        "findings": findings,
+        "healthy": not findings,
+        "summary": (
+            f"Taxonomy integrity over {len(catalog_topics)} topics: {len(findings)} "
+            f"findings ({len(unthemed)} unthemed, {len(unsectored)} unsectored, "
+            f"{len(multi_sector)} in multiple sectors)."
+        ),
+    }
+
+
+def build_topic_governance_report() -> dict[str, object]:
+    """The full governance surface: config, integrity, and the live verdicts."""
+    integrity = build_topic_taxonomy_integrity_report()
+    catalog = build_topic_governance_catalog()
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "catalog": catalog,
+        "integrity": integrity,
+        "guards": [dict(row) for row in TOPIC_SELECTION_GUARDS],
+        "sources": [dict(row) for row in TOPIC_SOURCE_POLICIES],
+        "sensitive_patterns": [dict(row) for row in TOPIC_SENSITIVE_PATTERNS],
+        "match_modes": [dict(row) for row in TOPIC_MATCH_MODES],
+        "drift_bands": [dict(row) for row in TOPIC_DRIFT_BANDS],
+        "lifecycle_policies": [dict(row) for row in TOPIC_LIFECYCLE_POLICIES],
+        "ranking_weights": dict(TOPIC_RANKING_WEIGHTS),
+        "healthy": integrity["healthy"],
+        "summary": (
+            f"Topic governance over {integrity['catalog_size']} topics: "
+            f"{len(TOPIC_SELECTION_GUARDS)} guards, {len(TOPIC_SOURCE_POLICIES)} "
+            f"sources, {len(TOPIC_SENSITIVE_PATTERNS)} sensitive patterns, "
+            f"{len(integrity['findings'])} integrity findings."
+        ),
+    }

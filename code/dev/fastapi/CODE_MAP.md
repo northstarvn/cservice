@@ -46,7 +46,7 @@ Rules of thumb:
 
 ## Current Map — `CODE_MAP.newick`
 
-Tree size: **428 leaves / 53 internal nodes** (validated, see maintenance
+Tree size: **498 leaves / 54 internal nodes** (validated, see maintenance
 rule 4). Rendered multi-line for readability; the single-line Newick file is
 the source of truth.
 
@@ -82,17 +82,27 @@ the source of truth.
         weight_versions,outcome_batches,risk_decisions)risk_evaluator,
       (access_levels,cell_matrix,evaluate,resolve_roles,catalog,row_scopes,cell_overrides,
         masking,resource_plans,override_simulation,temporary_grants)cell_matrix)zero_trust,
-((workers,batch,submit,drain,dead_letter,stats,catalog)high_throughput_pipeline,
-      (wire_format,transaction,hash_chain,append_only_log,spec_catalog)protobuf_transaction_spec)event_pipeline,
-((registry,snapshots,canary,shadow_scoring,promote,catalog)model_versioning,
-      (what_if,risk_scenarios,retention_scenarios,reports,catalog)simulation_engine,
-      (decision_trace,trace_store,explain,factor_trail,catalog)explainability,
+((workers,batch,submit,drain,dead_letter,stats,catalog,replay_policy,replay_dead_letters)high_throughput_pipeline,
+      (wire_format,transaction,hash_chain,append_only_log,spec_catalog,query,
+        integrity_report,export)protobuf_transaction_spec)event_pipeline,
+((registry,snapshots,canary,shadow_scoring,promote,catalog,lifecycle,promotion_gates,
+      version_diff,rollback_policy,deprecation,prune,traffic_split,label_templates)model_versioning,
+      (what_if,risk_scenarios,retention_scenarios,reports,catalog,scenario_library,
+        partition_policies,sensitivity,comparison)simulation_engine,
+      (decision_trace,trace_store,explain,factor_trail,catalog,counterfactuals,
+        audiences,replay,regression)explainability,
       (version_guard,compare_and_swap,stale_conflict,conflict_policy,versioned_records,
-        versioned_store,field_diffs,json_merge_patch,retry_updates,lock_sets,catalog)optimistic_locking)decision_intelligence,
-((field_dsl,combinators,date_ops,expressions,catalog)rule_engine,
-      (calendars,labor_rules,tax_rules,booking_assessment,catalog)regional_policy)business_rules)infra,
+        versioned_store,field_diffs,json_merge_patch,retry_updates,lock_sets,merge_semantics,
+        advisory_locks,audit,catalog)optimistic_locking)decision_intelligence,
+((field_dsl,combinators,date_ops,expressions,catalog,operators,policy,validation,
+      explanation,packs)rule_engine,
+      (calendars,labor_rules,tax_rules,booking_assessment,catalog,jurisdictions,compliance,
+        holiday_resolution,quotas)regional_policy)business_rules)infra,
 ((timestamp,tenant_scoped,partitioned,security_event,soft_delete,row_version,expiring,
       actor_audit,serialization,security_event_extensions,entity_registry,catalog)model_bases,
+    (sensitivity_vocabulary,redaction_presets,json_payloads,enum_vocabulary,table_lifecycle,
+      introspection,enum_access,serialization,constraint_coverage,referential_gaps,
+      relationship_catalog,schema_catalog)metadata,
     user,booking,booking_event,booking_assignment,chat_history,interaction_signal,
     retention_snapshot,recovery_outcome,recovery_action,customer_policy_score,topic_selection,
     communication_override,arrears_entry,points_wallet,points_transaction,audit_log_entry)models,
@@ -104,10 +114,12 @@ the source of truth.
       snapshot_operations,activity_tree,communication_strategy,arrears_payments,points_exchange,
       topic_policy)chat,
     (catalog,themes,intelligence,coverage,portfolio,workspace,overview,search,suggestions,
-      recommendations,current_selection,history)topics,
+      recommendations,current_selection,history,taxonomy,governance,integrity,match,ranked,
+      validate,drift,lifecycle)topics,
     (efficiency,enhancements,audit_catalog,trail_catalog,log,logs,summary,pipeline_stats,
       pipeline_event,transactions,protobuf_spec,governed_log,integrity,actors,timeline,anomalies,
-      retention,export)audit)routers,
+      retention,export,view,integrity_gates,dead_letters,replay,transactions_query,
+      transactions_integrity,transactions_export)audit)routers,
 ((area_scoring,sentiment,insights,recovery,topic_ranking,topic_policy,capabilities)chat_analytics,
     (catalog,search,suggestion,theme,selection,workspace,intelligence,coverage)topics,
     (lifecycle,normalization,transitions,ownership,assignment_report)bookings,
@@ -125,12 +137,14 @@ the source of truth.
     (record,list,summary,action_catalog,governed_record,action_aliases,action_specs,
       severity_policy,justification,sensitive_detail,redaction,change_detail,paging,count,
       retention_plan,retention_advice,actor_activity,entity_timeline,anomaly_detection,
-      seal_chain,chain_verification,trail_export,catalog)audit_log)services,
+      seal_chain,chain_verification,trail_export,view_profiles,integrity_gates,
+      entry_seal_chain,catalog)audit_log)services,
 ((user,token,booking,policy_score,topic_selection,session_lifecycle,machine_credentials,
       password_feedback,security_posture,step_up)schemas_core,
     (insight,recovery,recovery_playbooks,retention,snapshot_ops,topic_ranking,topic_policy)schemas_chat,
     (efficiency,enhancements,audit_trail,governed_write,integrity,actors,timeline,anomalies,
-      retention,export)schemas_audit)schemas)cservice_backend;
+      retention,export,view_projection,integrity_gates,dead_letters,replay,transaction_query,
+      transaction_integrity,transaction_export)schemas_audit)schemas)cservice_backend;
 ```
 
 ## Maintenance Rules
@@ -154,6 +168,136 @@ the source of truth.
    domain). Leaf-level additions are recorded in the log without a bump.
 
 ## Revision Log
+
+### r5 — thin-group expansion, second pass (2026-09-27)
+
+The twelve thinnest remaining function groups (LOC ranked, after the pass
+below) were grown into configurable, introspectable surfaces. No new layer and
+no new top-level domain — `models.metadata` is a new internal node under the
+existing `models` node — so per maintenance rule 6 the revision stays `r5`; the
+tree grew 428/53 → **498 leaves / 54 internal nodes** and **no r1–r5 leaf was
+lost** (verified by diffing parsed leaf paths, not by eye). Every change is
+additive: existing signatures, returned payloads and pinned catalog key sets
+are untouched, and no DDL was added to an existing table, so no Alembic
+migration is required.
+
+| function group | before | after |
+| --- | ---: | ---: |
+| `routers.topics` | 190 | 304 |
+| `explainability` | 269 | 946 |
+| `high_throughput_pipeline` | 287 | 780 |
+| `simulation_engine` | 300 | 911 |
+| `schemas.schemas_audit` | 312 | 520 |
+| `models` | 363 | 2158 |
+| `protobuf_transaction_spec` | 379 | 1392 |
+| `routers.audit` | 394 | 767 |
+| `regional_policy` | 424 | 1445 |
+| `rule_engine` | 449 | 1477 |
+| `optimistic_locking` | 461 | 1159 |
+| `model_versioning` | 483 | 2299 |
+
+- **`models` — a new `metadata` layer** (the only structural addition). The file
+  now has two explicitly separated layers: the DDL layer above the expansion
+  marker is byte-identical to `r1` and remains authoritative; everything below
+  is *derived* from `Base.metadata` at call time plus config tables that carry
+  the judgments DDL cannot express. Leaves: `sensitivity_vocabulary`,
+  `redaction_presets`, `json_payloads`, `enum_vocabulary`, `table_lifecycle`,
+  `introspection`, `enum_access`, `serialization`, `constraint_coverage`,
+  `referential_gaps`, `relationship_catalog`, `schema_catalog`.
+  - Config tables: `SENSITIVITY_CLASSES` (7 classes, ranked by blast radius),
+    `FIELD_SENSITIVITY` / `TABLE_FIELD_SENSITIVITY`, `REDACTION_PRESETS`
+    (`internal` / `operator` / `public` / `export`), `ENUM_FIELD_SPECS` (15
+    columns, with a `vocabulary` key so the alias set is shared by every column
+    holding the same vocabulary) + `ENUM_VOCABULARY_ALIASES` +
+    `OPEN_VOCABULARY_COLUMNS` + `OPEN_TEXT_COLUMNS`, `TABLE_LIFECYCLE` (all 17
+    tables classified), `SIGNED_QUANTITY_COLUMNS`,
+    `UNCONSTRAINED_REFERENCE_COLUMNS` (exhaustive — every `*_id` column with no
+    foreign key has a declared reason and severity).
+  - `model_to_dict` / `redact_instance` / `model_to_rows` classify every column
+    through the preset table, so a new column cannot silently start leaking.
+  - `check_constraint_coverage` and `referential_integrity_gaps` **report and
+    do not fix**: closing either is new DDL, so the answer is a description an
+    operator can act on.
+  - The module never imports `app.services.*` (the services import the models,
+    so a reverse import is a cycle) and implements its own redaction for the
+    same reason.
+- **Decision intelligence** — `model_versioning` (483 → 2299): `VERSION_STATES`,
+  `GATE_OPS`, `PROMOTION_GATES` (11), `ROLLBACK_POLICIES` (3),
+  `DEPRECATION_POLICIES` (3), `PRUNE_POLICIES` (3), `TRAFFIC_SPLITS` (2),
+  `LABEL_TEMPLATES`, `DIFF_FORMATS`; helpers `weight_moves`, `diff_versions`,
+  `render_diff`, `version_changelog`, `promotion_verdict`, `rollback_plan`,
+  `deprecation_status`, `prune_plan`, `traffic_plan`, `select_version`,
+  `stage_progress`, `next_stage`, `render_label`, `version_report`. The v1
+  `_ModelEntry` lifecycle is byte-identical; only *structurally wrong* cases are
+  `blocking`, thin evidence / no rollback target / auto-promote-off are `auto`
+  → verdict `manual`, and a missing metric fails closed.
+  `optimistic_locking` (461 → 1159) gains `merge_semantics`, `advisory_locks`,
+  `audit`. `simulation_engine` (300 → 911) gains `scenario_library`,
+  `partition_policies`, `sensitivity`, `comparison`, plus a wildcard
+  (`RETENTION_OVERRIDE_WILDCARD = "*"`) and the dead-config reporter
+  `unmatched_retention_overrides` — see the bug-fix note below.
+  `explainability` (269 → 946) gains `counterfactuals`, `audiences`, `replay`,
+  `regression`.
+- **Business rules** — `rule_engine` (449 → 1477) gains `operators`, `policy`,
+  `validation`, `explanation`, `packs`; the extended string/collection/null
+  operator families stay opt-in and an operator no family declares is never
+  silently true. `regional_policy` (424 → 1445) gains `jurisdictions`,
+  `compliance`, `holiday_resolution`, `quotas`.
+- **Event pipeline** — `high_throughput_pipeline` (287 → 780) gains
+  `replay_policy`, `replay_dead_letters`; `dead_letter_report` is enriched
+  additively. `protobuf_transaction_spec` (379 → 1392) gains `query`,
+  `integrity_report`, `export`.
+- **Audit trail** — `services.audit_log` gains `view_profiles` (digest /
+  operations / investigation), `integrity_gates` (7), `entry_seal_chain`
+  (`verify_entry_seal_chain` recomputes each seal from the persisted
+  `detail["_integrity"]` block and compares, because the old `chain_valid` read
+  valid for every real entry; an empty trail now reports `chain_valid=True` +
+  `sealed_ratio=None` → verdict `review` instead of a misleading `reject`).
+  `AUDIT_GATE_OPS` is declared locally to avoid a decision-intelligence
+  dependency. `routers.audit` (394 → 767) gains `view`, `integrity_gates`,
+  `dead_letters`, `replay` (with `dry_run`), `transactions_query`,
+  `transactions_integrity`, `transactions_export`, and an optional `?section=`
+  on `GET /transactions/spec` (the full catalog is still returned by default;
+  an unknown section is a 422). `schemas.schemas_audit` (312 → 520) gains the
+  10 matching Pydantic contracts. `build_transaction_spec_catalog` stays
+  imported at `app/routers/audit.py:9` and `/audit/transactions/spec` still
+  returns `{"spec": …}` with `spec["version"] == 1` and `prev_hash` in
+  `spec["fields"]`.
+- **Topic intelligence** — `routers.topics` (190 → 304) gains `taxonomy`,
+  `governance`, `integrity`, `match`, `ranked`, `validate`, `drift`,
+  `lifecycle`, backed by a governance block in `services/topics.py`. The new
+  guards are **advisory**: `POST /topics/validate` is pre-flight only, known
+  data defects are reported by `/topics/integrity` rather than fixed, and
+  `rank_topics` is not guaranteed to match the built-in suggester's ordering.
+- **Meta wiring** — new `GET /meta/schema` with an optional `?section=`
+  (unknown section → 422), a `data_model` entry in the `/meta/ecosystem`
+  `subservices` map, and a `schema_catalog` key in `/meta/features`.
+  `audit_trail` and `high_velocity_audit` route lists and 7 new `features`
+  keys were extended for the audit routes.
+- **Bugs found and fixed along the way** (all reachable from the new
+  endpoints): `TransactionLog.query(sort=…)` raised `KeyError: 'field'`
+  because the fallback sort spec had no `field` key; and
+  `/audit/transactions/export` miscounted `frame_count` for `json`
+  (line-count gave 1) and for `csv` (the header was counted as a frame).
+  Also `SIMULATION_MODIFIERS["short_retention"]` shipped
+  `retention_overrides = {"policy_id": "=retention_days"}` — the literal string
+  `"policy_id"` as a key, where an override is looked up by real policy id. The
+  key matched no policy, so every lookup fell back to the baseline and the
+  `partition_cost_trim` scenario reported `changed_count: 0` while advertising
+  "partitions older than 30 days flip keep → drop". Fixed with a wildcard key
+  plus `unmatched_retention_overrides` — see `BLOCKAGES.md` for why a key rename
+  would only have fixed half of it.
+  Auditing the new `models.py` metadata against itself then found two more:
+  `interaction_signals.source` was declared a *closed* vocabulary while `source`
+  is listed in `OPEN_TEXT_COLUMNS` as open (so one of seven identically-named
+  columns rejected values the others accepted), and
+  `unbacked_enum_like_columns()` never implemented the `OPEN_TEXT_COLUMNS`
+  exclusion its own docstring promised — it had been masked by that same entry.
+  Both fixed; the gap report's residual is now empty and still fires on a new
+  repeated column name.
+- **Tests**: unchanged by policy — the suite was **700 passing** before and
+  after every step of this pass, and the new surfaces were verified with
+  scripted harnesses in `/tmp/opencode/` rather than added test files.
 
 ### r5 — flexible-core expansion (2026-09-26)
 

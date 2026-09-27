@@ -247,6 +247,173 @@ AUDIT_SENSITIVE_CATEGORIES = ("governance", "financial")
 # Actions that should always justify themselves regardless of spec drift.
 DEFAULT_BUSINESS_HOURS = (6, 22)
 
+# --- Read profiles and integrity gates ---------------------------------------
+#
+# Two config tables for the *read* side of the trail. A trail that is correct but
+# unreadable (or readable in full by anyone with admin) is still a problem, so:
+#
+# * ``AUDIT_VIEW_PROFILES`` says how much of an entry a given audience needs.
+#   ``/audit/logs`` keeps returning everything; the profile view is a separate,
+#   explicitly requested projection.
+# * ``AUDIT_INTEGRITY_GATES`` turns "is this trail trustworthy right now" into a
+#   pass/fail table over derived metrics, instead of a boolean from one hash
+#   check. The single most useful gate is ``unredacted_credentials``: it finds
+#   entries written through the ungated ``/audit/log`` path, which does not run
+#   ``redact_detail``.
+
+#: Operator vocabulary shared by the other config-driven gate tables. Declared
+#: locally so the audit service keeps no decision-intelligence dependency.
+AUDIT_GATE_OPS: dict[str, str] = {
+    "gte": "metric >= threshold",
+    "gt": "metric > threshold",
+    "lte": "metric <= threshold",
+    "lt": "metric < threshold",
+    "eq": "metric == threshold",
+    "neq": "metric != threshold",
+    "in": "metric is one of threshold (a list)",
+    "not_in": "metric is not one of threshold (a list)",
+    "is_true": "metric is truthy; threshold ignored",
+    "is_false": "metric is falsy; threshold ignored",
+    "is_none": "metric is missing or None",
+    "present": "the metric key exists at all",
+}
+AUDIT_GATE_SEVERITIES: tuple[str, ...] = ("advisory", "review", "reject")
+AUDIT_GATE_SEVERITY_RANK: dict[str, int] = {
+    name: rank for rank, name in enumerate(AUDIT_GATE_SEVERITIES)
+}
+
+#: How much of an entry a profile reveals. ``detail`` selects the projection:
+#: ``omit`` (no payload at all), ``shape`` (keys and types, no values) or
+#: ``full`` (values, still credential-redacted at write time).
+AUDIT_VIEW_PROFILES: tuple[dict[str, Any], ...] = (
+    {
+        "profile": "digest",
+        "detail": "omit",
+        "fields": (
+            "id",
+            "action",
+            "severity",
+            "entity_type",
+            "entity_id",
+            "actor_user_id",
+            "created_at",
+        ),
+        "max_summary_chars": 120,
+        "include_seal": False,
+        "note": "the shape of an event without its content; for dashboards and lists",
+    },
+    {
+        "profile": "operations",
+        "detail": "shape",
+        "fields": (
+            "id",
+            "action",
+            "severity",
+            "entity_type",
+            "entity_id",
+            "actor_user_id",
+            "source",
+            "summary",
+            "created_at",
+        ),
+        "max_summary_chars": 400,
+        "include_seal": True,
+        "note": "which keys a payload carries, not what they say; for triage",
+    },
+    {
+        "profile": "investigation",
+        "detail": "full",
+        "fields": (
+            "id",
+            "action",
+            "severity",
+            "entity_type",
+            "entity_id",
+            "actor_user_id",
+            "source",
+            "summary",
+            "detail",
+            "created_at",
+            "updated_at",
+        ),
+        "max_summary_chars": None,
+        "include_seal": True,
+        "note": "full payloads for an incident; credential redaction still applies",
+    },
+)
+DEFAULT_AUDIT_VIEW_PROFILE = "digest"
+AUDIT_VIEW_PROFILE_BY_ID: dict[str, dict[str, Any]] = {
+    str(row["profile"]): dict(row) for row in AUDIT_VIEW_PROFILES
+}
+AUDIT_DETAIL_MODES: tuple[str, ...] = ("omit", "shape", "full")
+AUDIT_VIEW_SHAPE_MAX_DEPTH = 3
+
+#: Gates over the whole trail. ``metrics`` are derived by
+#: :func:`audit_integrity_metrics`; a missing metric fails its gate closed, so a
+#: metric that stops being derivable can never read as a pass.
+AUDIT_INTEGRITY_GATES: tuple[dict[str, Any], ...] = (
+    {
+        "gate_id": "trail_not_empty",
+        "metric": "entries",
+        "op": "gte",
+        "threshold": 1,
+        "severity": "advisory",
+        "rationale": "an empty trail satisfies every other gate trivially, so it proves nothing",
+    },
+    {
+        "gate_id": "seal_chain_valid",
+        "metric": "chain_valid",
+        "op": "is_true",
+        "severity": "reject",
+        "threshold": True,
+        "rationale": "a broken seal chain means entries were removed or edited",
+    },
+    {
+        "gate_id": "seal_coverage_complete",
+        "metric": "sealed_ratio",
+        "op": "gte",
+        "threshold": 1.0,
+        "severity": "review",
+        "rationale": "unsealed entries are the ones an edit would leave invisible",
+    },
+    {
+        "gate_id": "no_unredacted_credentials",
+        "metric": "unredacted_credential_entries",
+        "op": "lte",
+        "threshold": 0,
+        "severity": "reject",
+        "rationale": "the ungated write path does not scrub detail, so its entries can still hold a credential",
+    },
+    {
+        "gate_id": "sensitive_actions_justified",
+        "metric": "unjustified_sensitive_entries",
+        "op": "lte",
+        "threshold": 0,
+        "severity": "reject",
+        "rationale": "a sensitive action without a reason cannot be defended in review",
+    },
+    {
+        "gate_id": "actors_attributed",
+        "metric": "actor_coverage",
+        "op": "gte",
+        "threshold": 0.9,
+        "severity": "review",
+        "rationale": "an unattributed action cannot be held to anyone",
+    },
+    {
+        "gate_id": "retention_backlog_clear",
+        "metric": "retention_expired_entries",
+        "op": "lte",
+        "threshold": 0,
+        "severity": "advisory",
+        "rationale": "entries past their window are a data-minimisation debt, not a tamper signal",
+    },
+)
+AUDIT_INTEGRITY_GATE_BY_ID: dict[str, dict[str, Any]] = {
+    str(row["gate_id"]): dict(row) for row in AUDIT_INTEGRITY_GATES
+}
+
+
 
 def build_action_specs(
     extra: Mapping[str, Mapping[str, Any]] | None = None,
@@ -693,6 +860,73 @@ SEAL_CHAIN = SealChain()
 # --- rollups over fetched entries --------------------------------------------
 
 
+#: The two ways a stored ``_integrity`` block can stop matching the entry it
+#: describes. ``link`` means the entry is not chained onto its predecessor;
+#: ``content`` means the chained-on hash no longer covers the entry's fields,
+#: which is what an edit looks like.
+AUDIT_SEAL_FAILURE_REASONS: dict[str, str] = {
+    "link": "the stored prev_seal does not match the seal of the preceding entry",
+    "content": "the stored seal does not match a recomputed seal over the entry's sealed fields",
+    "malformed": "the _integrity block is missing a seal or prev_seal",
+}
+
+
+def verify_entry_seal_chain(entries: Iterable[Any]) -> dict[str, Any]:
+    """Recompute the seal chain over real trail entries and compare it.
+
+    :func:`verify_seal_chain` checks that a list of *seal records* links up. This
+    is the other direction: given entries that each carry a persisted
+    ``_integrity`` block, re-derive each seal and say whether the stored hashes
+    still describe what the entries now say. An unsealed entry does not
+    participate in the chain (it is reported as coverage, not as tampering), so
+    the running ``prev_seal`` only advances across sealed entries.
+    """
+    broken_at: int | None = None
+    broken_reason: str | None = None
+    previous = ""
+    checked = 0
+    sealed = 0
+    for index, entry in enumerate(entries):
+        payload = coerce_entry(entry)
+        detail = payload.get("detail")
+        if not isinstance(detail, Mapping) or SEAL_DETAIL_KEY not in detail:
+            continue
+        block = detail.get(SEAL_DETAIL_KEY)
+        if not isinstance(block, Mapping):
+            broken_at, broken_reason = index, "malformed"
+            break
+        stored_seal = str(block.get("seal") or "")
+        stored_prev = str(block.get("prev_seal") or "")
+        if not stored_seal:
+            broken_at, broken_reason = index, "malformed"
+            break
+        sealed += 1
+        if stored_prev != previous:
+            broken_at, broken_reason = index, "link"
+            break
+        recomputed = entry_seal(payload, prev_seal=previous)
+        if recomputed != stored_seal:
+            broken_at, broken_reason = index, "content"
+            break
+        checked += 1
+        previous = stored_seal
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "valid": broken_at is None,
+        "sealed_entries": sealed,
+        "verified_entries": checked,
+        "broken_at": broken_at,
+        "broken_reason": broken_reason,
+        "broken_explanation": AUDIT_SEAL_FAILURE_REASONS.get(str(broken_reason or ""), ""),
+        "algo": AUDIT_SEAL_ALGO,
+        "sealed_fields": list(AUDIT_SEALED_FIELDS),
+        "policy": (
+            "recomputed per entry and compared to the persisted _integrity block; "
+            "unsealed entries are coverage, not tampering"
+        ),
+    }
+
+
 def _as_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -1118,8 +1352,325 @@ async def export_audit_trail(
     }
 
 
+def audit_view_profile(profile: str | None = None) -> dict[str, Any]:
+    """The :data:`AUDIT_VIEW_PROFILES` row to project with."""
+    key = profile or DEFAULT_AUDIT_VIEW_PROFILE
+    if key not in AUDIT_VIEW_PROFILE_BY_ID:
+        raise ValueError(
+            f"unknown view profile {key!r}; "
+            f"expected one of {sorted(AUDIT_VIEW_PROFILE_BY_ID)}"
+        )
+    return dict(AUDIT_VIEW_PROFILE_BY_ID[key])
+
+
+def _detail_shape(value: Any, depth: int = 0) -> Any:
+    """Type-only projection of a payload: keys without values."""
+    if depth > AUDIT_VIEW_SHAPE_MAX_DEPTH:
+        return "_depth"
+    if isinstance(value, Mapping):
+        return {
+            str(key): _detail_shape(item, depth + 1)
+            for key, item in list(value.items())[:AUDIT_REDACT_MAX_ITEMS]
+        }
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return "_empty_list"
+        return [_detail_shape(value[0], depth + 1), f"_{len(value)}_items"]
+    if value is None:
+        return "_null"
+    return type(value).__name__
+
+
+def project_audit_entry(
+    entry: Any,
+    *,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Project one trail entry through a view profile.
+
+    The projection is additive: ``/audit/logs`` is untouched, and a caller has to
+    ask for a profile to get one. ``detail`` is resolved by mode (``omit`` /
+    ``shape`` / ``full``) and the summary is truncated to the profile's budget so
+    a list view cannot be turned into a bulk payload dump.
+    """
+    rules = audit_view_profile(profile)
+    payload = coerce_entry(entry)
+    detail = payload.get("detail") or {}
+    mode = str(rules["detail"])
+    if mode == "omit":
+        projected_detail: Any = None
+    elif mode == "shape":
+        projected_detail = _detail_shape(detail)
+    else:
+        projected_detail = redact_detail(detail)
+    summary = str(payload.get("summary") or "")
+    budget = rules.get("max_summary_chars")
+    truncated = bool(budget is not None and len(summary) > int(budget))
+    if truncated:
+        summary = summary[: int(budget)]
+    sealed = SEAL_DETAIL_KEY in (detail if isinstance(detail, Mapping) else {})
+    out: dict[str, Any] = {
+        "profile": rules["profile"],
+        "detail_mode": mode,
+        "detail_keys": sorted(str(key) for key in detail) if isinstance(detail, Mapping) else [],
+        "redacted": bool(projected_detail) and REDACTED_PLACEHOLDER in json.dumps(
+            projected_detail, default=str
+        ),
+        "truncated": truncated,
+    }
+    for field in rules["fields"]:
+        if field == "detail":
+            out["detail"] = projected_detail
+        else:
+            out[field] = payload.get(field)
+    if rules.get("include_seal"):
+        out["sealed"] = sealed
+    return out
+
+
+def project_audit_entries(
+    entries: Iterable[Any],
+    *,
+    profile: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Project a batch of entries and report what the projection cost."""
+    rules = audit_view_profile(profile)
+    rows = [project_audit_entry(entry, profile=rules["profile"]) for entry in entries]
+    if limit is not None:
+        rows = rows[: max(0, int(limit))]
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "profile": rules["profile"],
+        "detail_mode": str(rules["detail"]),
+        "fields": list(rules["fields"]),
+        "max_summary_chars": rules.get("max_summary_chars"),
+        "include_seal": bool(rules.get("include_seal")),
+        "count": len(rows),
+        "redacted_count": sum(1 for row in rows if row.get("redacted")),
+        "truncated_count": sum(1 for row in rows if row.get("truncated")),
+        "sealed_count": sum(1 for row in rows if row.get("sealed")),
+        "entries": rows,
+        "note": "projection only; /audit/logs still returns the unprojected trail",
+    }
+
+
+def _number(value: Any) -> Optional[float]:
+    """Coerce to float, or None. Booleans are never numbers."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _op_holds(value: Any, op: str, threshold: Any) -> bool:
+    """Apply one gate operator. Fails closed on an unknown operator name."""
+    if op not in AUDIT_GATE_OPS:
+        return False
+    if op == "is_true":
+        return bool(value)
+    if op == "is_false":
+        return not value
+    if op == "is_none":
+        return value is None
+    if op == "present":
+        return value is not None
+    if op in {"in", "not_in"}:
+        options = threshold if isinstance(threshold, (list, tuple, set)) else [threshold]
+        inside = value in options
+        return inside if op == "in" else not inside
+    if op == "eq":
+        return value == threshold
+    if op == "neq":
+        return value != threshold
+    number = _number(value)
+    limit = _number(threshold)
+    if number is None or limit is None:
+        return False
+    if op == "gte":
+        return number >= limit
+    if op == "gt":
+        return number > limit
+    if op == "lte":
+        return number <= limit
+    if op == "lt":
+        return number < limit
+    return False
+
+
+def _carries_unredacted_credential(detail: Any) -> bool:
+    """True when ``redact_detail`` would still change this payload.
+
+    The write paths that go through :func:`record_auditable` always redact, so
+    this is a detector for entries that bypassed them.
+    """
+    if not isinstance(detail, (Mapping, list, tuple)):
+        return False
+    return redact_detail(detail) != detail
+
+
+def audit_integrity_metrics(entries: Iterable[Any]) -> dict[str, Any]:
+    """Derive the metrics :data:`AUDIT_INTEGRITY_GATES` reads from the trail."""
+    rows = list(entries)
+    payloads = [coerce_entry(entry) for entry in rows]
+    total = len(payloads)
+    chain = verify_entry_seal_chain(rows)
+    if not total:
+        return {
+            "entries": 0,
+            "sealed_entries": 0,
+            "sealed_ratio": None,
+            "unredacted_credential_entries": 0,
+            "unjustified_sensitive_entries": 0,
+            "sensitive_entries": 0,
+            "actor_attributed_entries": 0,
+            "actor_coverage": None,
+            "retention_expired_entries": 0,
+            # Nothing to break, so the chain is vacuously intact -- but it proves
+            # nothing either, which is what the coverage gates are for.
+            "chain_valid": bool(chain.get("valid")),
+            "verified_entries": 0,
+            "broken_at": chain.get("broken_at"),
+            "broken_reason": chain.get("broken_reason"),
+        }
+    sealed = 0
+    unredacted = 0
+    unjustified = 0
+    sensitive = 0
+    attributed = 0
+    expired = 0
+    now = datetime.now(timezone.utc)
+    for payload in payloads:
+        detail = payload.get("detail") or {}
+        if isinstance(detail, Mapping) and SEAL_DETAIL_KEY in detail:
+            sealed += 1
+        if _carries_unredacted_credential(detail):
+            unredacted += 1
+        action = str(payload.get("action") or "")
+        if _is_sensitive_action(action, specs=AUDIT_ACTION_SPECS):
+            sensitive += 1
+            if not has_justification(detail):
+                unjustified += 1
+        if payload.get("actor_user_id") is not None:
+            attributed += 1
+        created = _as_datetime(payload.get("created_at"))
+        if created is not None:
+            age_days = (now - created).total_seconds() / 86400
+            if age_days > retention_days_for(
+                action, severity=str(payload.get("severity") or "info")
+            ):
+                expired += 1
+    return {
+        "entries": total,
+        "sealed_entries": sealed,
+        "sealed_ratio": round(sealed / total, 6),
+        "unredacted_credential_entries": unredacted,
+        "unjustified_sensitive_entries": unjustified,
+        "sensitive_entries": sensitive,
+        "actor_attributed_entries": attributed,
+        "actor_coverage": round(attributed / total, 6),
+        "retention_expired_entries": expired,
+        "chain_valid": bool(chain.get("valid")),
+        "verified_entries": int(chain.get("verified_entries") or 0),
+        "broken_at": chain.get("broken_at"),
+        "broken_reason": chain.get("broken_reason"),
+    }
+
+
+def evaluate_audit_gates(
+    metrics: Mapping[str, Any],
+    *,
+    gates: Iterable[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Evaluate the integrity gates, strongest severity first."""
+    results: list[dict[str, Any]] = []
+    for row in gates or AUDIT_INTEGRITY_GATES:
+        metric = str(row.get("metric", ""))
+        op = str(row.get("op", ""))
+        threshold = row.get("threshold")
+        observed = metric in metrics and metrics[metric] is not None
+        actual = metrics.get(metric)
+        if not observed:
+            holds = False
+            reason = "metric_missing"
+        else:
+            holds = _op_holds(actual, op, threshold)
+            reason = "ok" if holds else "threshold_not_met"
+        severity = str(row.get("severity", "advisory"))
+        if severity not in AUDIT_GATE_SEVERITY_RANK:
+            severity = "advisory"
+        results.append(
+            {
+                "gate_id": row.get("gate_id"),
+                "metric": metric,
+                "op": op,
+                "op_meaning": AUDIT_GATE_OPS.get(op, "unknown operator"),
+                "threshold": threshold,
+                "actual": actual,
+                "observed": observed,
+                "severity": severity,
+                "holds": holds,
+                "reason": reason,
+                "rationale": row.get("rationale", ""),
+            }
+        )
+    results.sort(
+        key=lambda result: (
+            -AUDIT_GATE_SEVERITY_RANK.get(str(result["severity"]), 0),
+            str(result["gate_id"]),
+        )
+    )
+    return results
+
+
+def audit_integrity_report(
+    entries: Iterable[Any],
+    *,
+    gates: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Is this trail trustworthy right now, and which gate says otherwise.
+
+    ``reject`` means the trail has a problem worth stopping for (a broken chain,
+    a credential still in a payload, a sensitive action with no reason). It is a
+    *report*, not an enforcement point: the read endpoints keep answering.
+    """
+    rows = list(entries)
+    metrics = audit_integrity_metrics(rows)
+    results = evaluate_audit_gates(metrics, gates=gates)
+    failed = [result for result in results if not result["holds"]]
+    rejected = [str(r["gate_id"]) for r in failed if r["severity"] == "reject"]
+    review = [str(r["gate_id"]) for r in failed if r["severity"] == "review"]
+    advisory = [str(r["gate_id"]) for r in failed if r["severity"] == "advisory"]
+    if rejected:
+        verdict = "reject"
+    elif review or advisory:
+        verdict = "review"
+    else:
+        verdict = "clean"
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "verdict": verdict,
+        "rejected_by": rejected,
+        "needs_review_by": review,
+        "advisory_by": advisory,
+        "metrics": metrics,
+        "gates": results,
+        "gates_evaluated": len(results),
+        "summary": (
+            f"{metrics['entries']} entries, seal chain "
+            f"{'valid' if metrics['chain_valid'] else 'BROKEN at ' + str(metrics['broken_at'])}"
+            f"{' (' + str(metrics['broken_reason']) + ')' if metrics['broken_reason'] else ''}, "
+            f"{metrics['sealed_entries']} sealed, "
+            f"{metrics['unredacted_credential_entries']} with unredacted credentials, "
+            f"{metrics['unjustified_sensitive_entries']} unjustified sensitive actions "
+            f"-> {verdict}"
+        ),
+    }
+
+
 def build_audit_log_catalog() -> dict[str, object]:
-    """Introspectable catalog for metadata endpoints (config-only additions)."""
     return {
         "severities": list(ALLOWED_SEVERITIES),
         "actions": AUDIT_ACTION_CATALOG,
@@ -1164,6 +1715,32 @@ def build_audit_log_catalog() -> dict[str, object]:
         "export": {
             "formats": list(EXPORT_FORMATS),
             "columns": list(AUDIT_EXPORT_COLUMNS),
+        },
+        "view_profiles": {
+            "table": [dict(row) for row in AUDIT_VIEW_PROFILES],
+            "default": DEFAULT_AUDIT_VIEW_PROFILE,
+            "detail_modes": list(AUDIT_DETAIL_MODES),
+            "shape_max_depth": AUDIT_VIEW_SHAPE_MAX_DEPTH,
+            "note": (
+                "/audit/logs is unchanged; a profile is an explicit projection "
+                "requested through the view endpoint"
+            ),
+            "helpers": ["audit_view_profile", "project_audit_entry", "project_audit_entries"],
+        },
+        "integrity_gates": {
+            "table": [dict(row) for row in AUDIT_INTEGRITY_GATES],
+            "operators": dict(AUDIT_GATE_OPS),
+            "severities": list(AUDIT_GATE_SEVERITIES),
+            "seal_failure_reasons": dict(AUDIT_SEAL_FAILURE_REASONS),
+            "verdict": "clean | review | reject",
+            "verdict_rule": "any reject failure -> reject; any review/advisory failure -> review; else clean",
+            "missing_metric": "fails the gate closed (reason=metric_missing)",
+            "advisory": "a report, not an enforcement point: the read endpoints keep answering",
+            "notable_gate": (
+                "no_unredacted_credentials finds entries written through the ungated "
+                "/audit/log path, which does not run redact_detail"
+            ),
+            "helpers": ["audit_integrity_metrics", "evaluate_audit_gates", "audit_integrity_report"],
         },
         "note": (
             "action specs are composed from family defaults so a new verb is a "

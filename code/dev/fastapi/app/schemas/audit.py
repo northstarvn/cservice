@@ -311,3 +311,210 @@ class TransactionLogReport(BaseModel):
 
 class TransactionSpecReport(BaseModel):
     spec: Dict[str, Any]
+
+
+# --- Read-side projections & integrity gates -----------------------------------
+#
+# `/audit/logs` is unchanged and still returns whole entries. These contracts
+# back the additive read surface: a profile projection (`/audit/logs/view`) and
+# the config-driven gate table over the trail (`/audit/integrity/gates`).
+
+
+class AuditProjectedEntryOut(BaseModel):
+    """One entry as a view profile renders it.
+
+    Which fields appear is decided by the profile, so the model allows for
+    exactly that set and no more. ``detail`` is ``None`` in ``omit`` mode, a
+    type-only shape in ``shape`` mode, and a redacted payload in ``full`` mode.
+    """
+
+    profile: str
+    detail_mode: str
+    detail_keys: List[str] = Field(default_factory=list)
+    redacted: bool = False
+    truncated: bool = False
+    id: Optional[int] = None
+    action: str = ""
+    severity: str = "info"
+    entity_type: str = ""
+    entity_id: str = ""
+    actor_user_id: Optional[int] = None
+    source: Optional[str] = None
+    summary: Optional[str] = None
+    detail: Optional[Any] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    sealed: Optional[bool] = None
+
+
+class AuditViewReport(BaseModel):
+    """A batch of entries projected through one profile."""
+
+    generated_at: datetime
+    profile: str
+    detail_mode: str
+    fields: List[str] = Field(default_factory=list)
+    max_summary_chars: Optional[int] = None
+    include_seal: bool = False
+    count: int
+    redacted_count: int = 0
+    truncated_count: int = 0
+    sealed_count: int = 0
+    entries: List[AuditProjectedEntryOut] = Field(default_factory=list)
+    note: str = ""
+
+
+class AuditIntegrityGateOut(BaseModel):
+    """One evaluated row of the integrity gate table."""
+
+    gate_id: str
+    metric: str
+    op: str
+    op_meaning: str = ""
+    threshold: Optional[Any] = None
+    actual: Optional[Any] = None
+    observed: bool = False
+    severity: str = "advisory"  # advisory | review | reject
+    holds: bool = False
+    reason: str = ""  # ok | threshold_not_met | metric_missing
+    rationale: str = ""
+
+
+class AuditGateIntegrityReport(BaseModel):
+    """Is this trail trustworthy right now, and which gate says otherwise."""
+
+    generated_at: datetime
+    verdict: str = "clean"  # clean | review | reject
+    rejected_by: List[str] = Field(default_factory=list)
+    needs_review_by: List[str] = Field(default_factory=list)
+    advisory_by: List[str] = Field(default_factory=list)
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    gates: List[AuditIntegrityGateOut] = Field(default_factory=list)
+    gates_evaluated: int = 0
+    summary: str = ""
+
+
+# --- Dead-letter inspection & replay -------------------------------------------
+#
+# `/audit/pipeline/event` and `/audit/pipeline/stats` are unchanged. The ring is
+# inspectable and drainable now; the report and the replay result are separate
+# contracts because one is a read and one is a mutation.
+
+
+class PipelineDeadLetterEntryOut(BaseModel):
+    event_id: str
+    kind: str
+    occurred_at: Optional[str] = None
+    error: str = ""
+    severity: str = "info"
+    entity_type: str = "system"
+    entity_id: str = ""
+    actor_user_id: Optional[int] = None
+    tenant_id: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    route: str = ""
+    replayable: bool = True
+    attempts: int = 0
+    first_failed_at: Optional[str] = None
+    last_failed_at: Optional[str] = None
+
+
+class PipelineDeadLetterReport(BaseModel):
+    """Why the dead-letter ring is the size it is, without touching it."""
+
+    dead_lettered: int = 0
+    retained: int = 0
+    replayable: int = 0
+    policy: Dict[str, Any] = Field(default_factory=dict)
+    recent: List[PipelineDeadLetterEntryOut] = Field(default_factory=list)
+    generated_at: Optional[datetime] = None
+    ring_capacity: int = 0
+    evicted: int = 0
+    replayable_ratio: Optional[float] = None
+    blocked_by_policy: int = 0
+    max_attempts_seen: int = 0
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    by_error: Dict[str, int] = Field(default_factory=dict)
+    oldest_occurred_at: Optional[str] = None
+    newest_occurred_at: Optional[str] = None
+    drainable: bool = False
+    note: str = ""
+
+
+class PipelineReplayRequest(BaseModel):
+    """Replay bounds. Omitted means "use the configured policy"."""
+
+    max_attempts: Optional[int] = Field(default=None, ge=1, le=100)
+    backoff_seconds: Optional[float] = Field(default=None, ge=0.0, le=3600.0)
+    dry_run: bool = Field(
+        default=False,
+        description="Report what would be re-queued and leave the ring untouched",
+    )
+
+
+class PipelineReplayReport(BaseModel):
+    """What a replay did (or, with ``dry_run``, would have done)."""
+
+    generated_at: datetime
+    dry_run: bool = False
+    attempted: int = 0
+    requeued: List[str] = Field(default_factory=list)
+    exhausted: List[str] = Field(default_factory=list)
+    exhausted_count: int = 0
+    max_attempts: int = 0
+    backoff_seconds: float = 0.0
+    remaining: int = 0
+    policy: Dict[str, Any] = Field(default_factory=dict)
+    note: str = ""
+
+
+# --- Transaction query, integrity & export --------------------------------------
+#
+# `/audit/transactions` (tail + chain) and `/audit/transactions/spec` are
+# unchanged. These expose the query/integrity/export surface of the same log.
+
+
+class TransactionQueryReport(BaseModel):
+    """A filtered, sorted, paginated slice of the transaction log."""
+
+    generated_at: datetime
+    total: int
+    matched: int
+    offset: int
+    limit: int
+    order: str = "desc"
+    sort: str = "cursor"
+    view: str = "internal"
+    filters: List[Dict[str, Any]] = Field(default_factory=list)
+    results: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class TransactionIntegrityReport(BaseModel):
+    """Chain, checkpoint, schema and signing state of the transaction log."""
+
+    generated_at: datetime
+    chain: Dict[str, Any] = Field(default_factory=dict)
+    checkpoints: List[Dict[str, Any]] = Field(default_factory=list)
+    checkpoint_interval: int = 0
+    spec_versions: List[int] = Field(default_factory=list)
+    sampled: List[Dict[str, Any]] = Field(default_factory=list)
+    unsigned_but_required: List[str] = Field(default_factory=list)
+    append_only: bool = True
+    total: int = 0
+    verdict: str = "clean"  # clean | review | reject
+    findings: List[str] = Field(default_factory=list)
+
+
+class TransactionExportReport(BaseModel):
+    """A serialised export plus the parameters needed to reproduce it."""
+
+    generated_at: datetime
+    format: str
+    view: str
+    frame_count: int
+    filters: List[Dict[str, Any]] = Field(default_factory=list)
+    reimportable: bool = False
+    signature_survives: bool = False
+    bytes: int = 0
+    content: str
+    note: str = ""

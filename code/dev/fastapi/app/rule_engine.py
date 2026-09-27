@@ -41,13 +41,41 @@ plus math constants (``pi``/``e``) and an allow-list of callables
 Arbitrary code (imports, attributes, subscripts) is rejected at parse time —
 the AST walker only accepts constants, names, arithmetic/comparison/boolean
 operators, ternary ``x if c else y``, list literals, and the allow-listed calls.
+
+Expansion (thin-group pass)
+---------------------------
+The DSL above is *deliberately* small, and small is what makes it safe to run
+over tenant-authored config. It is also small enough that real rules hit its
+edges constantly: "starts with a prefix", "at least 3 of these tags", "is this
+field empty", "why did my rule not fire". None of those can be expressed today,
+and the usual workaround — computing a derived field upstream — puts rule
+logic back in Python where it cannot be reviewed or overridden.
+
+This module therefore grows *alongside* the v1 engine rather than inside it:
+
+- ``STRING_OPS`` / ``COLLECTION_OPS`` / ``NULL_OPS`` — three new operator
+  families, declared as tables. ``matches_field`` and ``evaluate_when`` are
+  **byte-for-byte unchanged** and still reject every one of these names; the
+  new operators are reachable only through ``evaluate_when_extended``, so no
+  pinned verdict can move and a typo can never silently become a passing rule.
+- ``explain_when`` — per-field trace with a human reason for each pass/fail,
+  including *which* field broke an ``any``/``all``/``not`` branch.
+- ``validate_when`` — static checking of a rule before it is saved: unknown
+  operators, reserved-key misuse, malformed thresholds, bad ``=`` expressions.
+- ``RULE_PACKS`` + ``merge_rule_packs`` / ``export_rule_pack`` / ``diff_when`` /
+  ``select_rules`` — promote a rule set from staging to production and see
+  exactly what changed, which is the operation that silently drops conditions.
 """
 
 from __future__ import annotations
 
 import ast
+import csv
+import io
+import json
 import math
 import operator
+import re
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
@@ -96,6 +124,176 @@ _COMPARE_OPS: dict[type, Any] = {
     ast.Gt: operator.gt,
     ast.GtE: operator.ge,
 }
+
+# ---------------------------------------------------------------------------
+# Expansion config tables
+#
+# These operator families are *not* consulted by `matches_field` /
+# `evaluate_when` — the v1 matchers keep rejecting any operator they do not
+# already know, which is what makes an unrecognised key a safe failure instead
+# of a silently-true condition. They are reachable via `evaluate_when_extended`.
+# ---------------------------------------------------------------------------
+
+STRING_OPS: list[dict[str, Any]] = [
+    {"op": "starts_with", "arity": "str, str", "description": "Value begins with the prefix (case-sensitive)."},
+    {"op": "ends_with", "arity": "str, str", "description": "Value ends with the suffix (case-sensitive)."},
+    {"op": "contains", "arity": "str, str", "description": "Substring anywhere in the value."},
+    {"op": "not_contains", "arity": "str, str", "description": "Substring appears nowhere in the value."},
+    {"op": "equals_ignore_case", "arity": "str, str", "description": "Case-insensitive equality after stripping."},
+    {"op": "starts_with_any", "arity": "str, [str]", "description": "Value begins with any listed prefix."},
+    {"op": "in_phrase", "arity": "str, [str]", "description": "Whole-word match of any listed phrase."},
+    {"op": "matches", "arity": "str, str", "description": "Regex match under REGEX_POLICY (search, then full)."},
+    {"op": "word_count_gte", "arity": "str, int", "description": "At least N whitespace-separated words."},
+    {"op": "length_between", "arity": "str, [int, int]", "description": "Character length inside the inclusive range."},
+    {"op": "slug_equals", "arity": "str, str", "description": "Casefolded, non-alphanumerics collapsed to '-'."},
+]
+
+COLLECTION_OPS: list[dict[str, Any]] = [
+    {"op": "len_eq", "arity": "list|str, int", "description": "Exactly N elements."},
+    {"op": "len_gte", "arity": "list|str, int", "description": "At least N elements."},
+    {"op": "len_lte", "arity": "list|str, int", "description": "At most N elements."},
+    {"op": "is_empty", "arity": "list|str", "description": "Empty container or empty/whitespace string."},
+    {"op": "intersects", "arity": "list, list", "description": "At least one element in common."},
+    {"op": "disjoint", "arity": "list, list", "description": "No elements in common."},
+    {"op": "contains_all", "arity": "list, list", "description": "Value contains every listed element."},
+    {"op": "contains_any", "arity": "list, list", "description": "Value contains at least one listed element."},
+    {"op": "subset_of", "arity": "list, list", "description": "Every element of the value is in the threshold."},
+    {"op": "distinct_count_gte", "arity": "list, int", "description": "At least N distinct elements."},
+    {"op": "sum_gte", "arity": "list, num", "description": "Sum of numeric elements is at least N."},
+    {"op": "avg_gte", "arity": "list, num", "description": "Mean of numeric elements is at least N (empty = False)."},
+    {"op": "max_lte", "arity": "list, num", "description": "Largest numeric element is at most N."},
+    {"op": "min_gte", "arity": "list, num", "description": "Smallest numeric element is at least N."},
+]
+
+NULL_OPS: list[dict[str, Any]] = [
+    {"op": "is_null", "arity": "any", "description": "Value is None."},
+    {"op": "not_null", "arity": "any", "description": "Value is not None."},
+    {"op": "is_blank", "arity": "any", "description": "None, empty string, or whitespace only."},
+    {"op": "not_blank", "arity": "any", "description": "Has a meaningful value."},
+    {"op": "coalesce_eq", "arity": "any, any", "description": "Equals the threshold after falling back through the `default` chain."},
+    {"op": "default_to", "arity": "any, any", "description": "The value the rule should treat as this when it is blank."},
+]
+
+OPERATOR_FAMILIES: dict[str, str] = {
+    **{entry["op"]: "string" for entry in STRING_OPS},
+    **{entry["op"]: "collection" for entry in COLLECTION_OPS},
+    **{entry["op"]: "null" for entry in NULL_OPS},
+    **{name: "numeric" for name in _NUMERIC_OPS},
+    **{name: "date" for name in _DATE_OPS},
+}
+
+# `matches` is the only operator that hands tenant config to the regex engine,
+# so it is fenced: bounded pattern length, no inline flags, a compiled-pattern
+# cache, and a step budget so a pathological pattern cannot hang a request.
+REGEX_POLICY: dict[str, Any] = {
+    "max_pattern_length": 256,
+    "max_subject_length": 4096,
+    "match_mode": "search",
+    "allow_inline_flags": False,
+    "reject_nested_quantifiers": True,
+    "cache_size": 128,
+    "step_budget": 20000,
+    "description": (
+        "A tenant regex is data, not code, but it is still the one place in this "
+        "module where a pathological pattern can cost real CPU. Patterns are "
+        "length-capped, stripped of inline flags, screened for catastrophic "
+        "backtracking, and scanned under a match-attempt budget. A full-string "
+        "match is expressed by anchoring the pattern with ^...$."
+    ),
+}
+_REGEX_CACHE: dict[str, Any] = {}
+
+# Rule packs: named, versioned bundles of `when` + `params` rules that are
+# promoted between environments as a unit. `priority` breaks ties; higher wins.
+RULE_PACKS: list[dict[str, Any]] = [
+    {
+        "pack": "loyalty_retention",
+        "version": 2,
+        "domain": "loyalty_journey",
+        "priority": 100,
+        "description": "Retention nudges: at-risk members and dormant accounts.",
+        "rules": [
+            {
+                "id": "retention_high_risk",
+                "enabled": True,
+                "priority": 90,
+                "effective_from": "2026-01-01",
+                "effective_to": None,
+                "when": {"churn_risk": "high", "stage": {"in": ["engaged", "at_risk"]}},
+                "params": {"nudge_channel": "email", "discount_pct": "=15 + 5 if stage == 'at_risk' else 0"},
+            },
+            {
+                "id": "retention_dormant",
+                "enabled": True,
+                "priority": 50,
+                "effective_from": "2026-01-01",
+                "effective_to": None,
+                "when": {"days_since_login": {"gte": 45}, "at_risk": True},
+                "params": {"nudge_channel": "sms", "discount_pct": 10},
+            },
+            {
+                "id": "retention_negative_sentiment",
+                "enabled": False,
+                "priority": 70,
+                "effective_from": "2026-04-01",
+                "effective_to": None,
+                "when": {"sentiment_label": "negative"},
+                "params": {"nudge_channel": "none", "discount_pct": 0},
+            },
+        ],
+    },
+    {
+        "pack": "communication_suppression",
+        "version": 1,
+        "domain": "communication_strategy",
+        "priority": 80,
+        "description": "Suppress outreach that would land badly.",
+        "rules": [
+            {
+                "id": "suppress_negative_sentiment",
+                "enabled": True,
+                "priority": 95,
+                "effective_from": "2026-01-01",
+                "effective_to": None,
+                "when": {"sentiment_label": "negative", "churn_risk": {"ne": "low"}},
+                "params": {"suppress": True, "reason": "recent negative sentiment"},
+            },
+            {
+                "id": "suppress_recent_complaint",
+                "enabled": True,
+                "priority": 85,
+                "effective_from": "2026-01-01",
+                "effective_to": None,
+                "when": {"complaints_last_30d": {"gte": 2}},
+                "params": {"suppress": True, "reason": "multiple recent complaints"},
+            },
+        ],
+    },
+    {
+        "pack": "seasonal_campaigns",
+        "version": 1,
+        "domain": "points_exchange",
+        "priority": 60,
+        "description": "Date-anchored campaign eligibility.",
+        "rules": [
+            {
+                "id": "summer_boost",
+                "enabled": True,
+                "priority": 70,
+                "effective_from": "2026-06-01",
+                "effective_to": "2026-08-31",
+                "when": {"_date": {"between_dates": ["2026-06-01", "2026-08-31"]}, "value_tier": "premium"},
+                "params": {"multiplier": 1.5},
+            },
+        ],
+    },
+]
+RULE_PACK_BY_NAME = {entry["pack"]: dict(entry) for entry in RULE_PACKS}
+
+# How a merge resolves two packs that define the same rule id. `error` refuses
+# the promotion outright: a colliding id is exactly how a rule gets lost.
+PACK_MERGE_STRATEGIES = ("later_wins", "first_wins", "union", "error")
+RULE_PACK_EXPORT_FORMATS = ("json", "jsonl", "csv", "python")
 
 
 def _json_safe(value: Any) -> Any:
@@ -414,6 +612,771 @@ def resolve_params(params: Optional[dict[str, Any]], context: Optional[dict[str,
 
 
 # ---------------------------------------------------------------------------
+# Expansion: extended operators, explanation, validation, rule packs
+# ---------------------------------------------------------------------------
+
+
+def _regex_risky(source: str) -> bool:
+    """Screen for catastrophic-backtracking shapes before compiling.
+
+    ``(a+)+`` and friends blow up exponentially on a non-matching input. Python's
+    ``re`` has no timeout, so the only defence available to a request handler is
+    to refuse the pattern outright.
+    """
+    return bool(
+        re.search(r"\((?:[^()]*[+*][^()]*)\)[+*]", source)          # (a+)+
+        or re.search(r"\((?:[^()|]*\|[^()|]*)\)[+*]", source)     # (a|a)+
+        or re.search(r"\{\d+,\d*\}\s*\{", source)                  # {n,}{m,}
+    )
+
+
+def _regex_search(pattern: str, subject: str) -> bool:
+    """Run a tenant regex under ``REGEX_POLICY`` (cached, length-capped, bounded).
+
+    Matching is a manual scan over start offsets rather than ``Pattern.search``,
+    purely so the number of match attempts is bounded by ``step_budget`` — the
+    dominant cost of a scan and the one an attacker can inflate with a long
+    subject. Exceeding the budget is reported as "no match", never as an error.
+    """
+    text = str(subject or "")
+    source = str(pattern or "")
+    if not source or len(source) > int(REGEX_POLICY["max_pattern_length"]):
+        return False
+    if len(text) > int(REGEX_POLICY["max_subject_length"]):
+        return False
+    if not REGEX_POLICY["allow_inline_flags"] and re.search(r"\(\?[aiLmsux]+\)", source):
+        return False
+    if _regex_risky(source):
+        return False
+    compiled = _REGEX_CACHE.get(source)
+    if compiled is None:
+        try:
+            compiled = re.compile(source)
+        except re.error:
+            _REGEX_CACHE[source] = False
+            return False
+        if len(_REGEX_CACHE) >= int(REGEX_POLICY["cache_size"]):
+            _REGEX_CACHE.clear()
+        _REGEX_CACHE[source] = compiled
+    if compiled is False:
+        return False
+    budget = int(REGEX_POLICY["step_budget"])
+    for offset in range(len(text) + 1):
+        budget -= 1
+        if budget <= 0:
+            return False
+        if compiled.match(text, offset) is not None:
+            return True
+    return False
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return list(value)
+    if value is None:
+        return []
+    return [value]
+
+
+def _numbers(value: Any) -> list[float]:
+    out: list[float] = []
+    for item in _as_list(value):
+        try:
+            out.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _slug(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _string_op_holds(op_name: str, value: Any, threshold: Any) -> bool:
+    text = "" if value is None else str(value)
+    if op_name == "starts_with":
+        return text.startswith(str(threshold))
+    if op_name == "ends_with":
+        return text.endswith(str(threshold))
+    if op_name == "contains":
+        return str(threshold) in text
+    if op_name == "not_contains":
+        return str(threshold) not in text
+    if op_name == "equals_ignore_case":
+        return text.strip().casefold() == str(threshold).strip().casefold()
+    if op_name == "starts_with_any":
+        return any(text.startswith(str(item)) for item in _as_list(threshold))
+    if op_name == "in_phrase":
+        needles = {str(item).strip().casefold() for item in _as_list(threshold)}
+        words = {word.strip(".,!?;:'\"()[]").casefold() for word in text.split()}
+        return bool(needles & words)
+    if op_name == "matches":
+        return _regex_search(str(threshold), text)
+    if op_name == "word_count_gte":
+        try:
+            return len(text.split()) >= int(threshold)
+        except (TypeError, ValueError):
+            return False
+    if op_name == "length_between":
+        bounds = _as_list(threshold)
+        if len(bounds) != 2:
+            return False
+        try:
+            return int(bounds[0]) <= len(text) <= int(bounds[1])
+        except (TypeError, ValueError):
+            return False
+    if op_name == "slug_equals":
+        return _slug(text) == _slug(threshold)
+    return False
+
+
+def _collection_op_holds(op_name: str, value: Any, threshold: Any) -> bool:
+    items = _as_list(value) if not isinstance(value, str) else list(value)
+    if op_name in ("len_eq", "len_gte", "len_lte"):
+        try:
+            size = len(items)
+            if op_name == "len_eq":
+                return size == int(threshold)
+            if op_name == "len_gte":
+                return size >= int(threshold)
+            return size <= int(threshold)
+        except (TypeError, ValueError):
+            return False
+    if op_name == "is_empty":
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        return len(_as_list(value)) == 0
+    if op_name in ("intersects", "disjoint", "contains_all", "contains_any", "subset_of"):
+        left = {_json_safe_key(item) for item in _as_list(value)}
+        right = {_json_safe_key(item) for item in _as_list(threshold)}
+        if op_name == "intersects":
+            return bool(left & right)
+        if op_name == "disjoint":
+            return not (left & right)
+        if op_name == "contains_all":
+            return right.issubset(left)
+        if op_name == "contains_any":
+            return bool(left & right)
+        return left.issubset(right)
+    if op_name == "distinct_count_gte":
+        try:
+            return len({_json_safe_key(item) for item in items}) >= int(threshold)
+        except (TypeError, ValueError):
+            return False
+    numbers = _numbers(value)
+    try:
+        if op_name == "sum_gte":
+            return bool(numbers) and sum(numbers) >= float(threshold)
+        if op_name == "avg_gte":
+            return bool(numbers) and (sum(numbers) / len(numbers)) >= float(threshold)
+        if op_name == "max_lte":
+            return bool(numbers) and max(numbers) <= float(threshold)
+        if op_name == "min_gte":
+            return bool(numbers) and min(numbers) >= float(threshold)
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+def _json_safe_key(value: Any) -> Any:
+    """Hashable projection of an element so set ops work on dicts too."""
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _null_op_holds(op_name: str, value: Any, threshold: Any) -> bool:
+    if op_name == "is_null":
+        return value is None
+    if op_name == "not_null":
+        return value is not None
+    if op_name == "is_blank":
+        return value is None or (isinstance(value, str) and not value.strip())
+    if op_name == "not_blank":
+        return not (value is None or (isinstance(value, str) and not value.strip()))
+    if op_name in ("coalesce_eq", "default_to"):
+        chain = _as_list(threshold)
+        for candidate in chain:
+            if candidate is not None and not (isinstance(candidate, str) and not candidate.strip()):
+                if op_name == "default_to":
+                    return _null_op_holds("is_blank", value, None)
+                return _json_safe_key(value) == _json_safe_key(candidate) if value is not None else False
+        return False
+    return False
+
+
+def matches_field_extended(
+    rule_value: Any,
+    context_value: Any,
+    *,
+    effective_date: Any = None,
+    now: Any = None,
+) -> bool:
+    """``matches_field`` plus the string/collection/null operator families.
+
+    Any operator dict is handled here: the v1 numeric/date operators keep their
+    exact semantics (this function delegates to ``matches_field`` for them), and
+    the new families are added alongside. A dict containing only unknown
+    operators still fails closed, because ``matches_field`` is still consulted.
+    """
+    if not isinstance(rule_value, dict):
+        return matches_field(rule_value, context_value, effective_date=effective_date, now=now)
+    legacy = {key: value for key, value in rule_value.items() if key not in OPERATOR_FAMILIES}
+    if legacy and not matches_field(legacy, context_value, effective_date=effective_date, now=now):
+        return False
+    for op_name, threshold in rule_value.items():
+        family = OPERATOR_FAMILIES.get(op_name)
+        if family == "string":
+            if not _string_op_holds(op_name, context_value, threshold):
+                return False
+        elif family == "collection":
+            if not _collection_op_holds(op_name, context_value, threshold):
+                return False
+        elif family == "null":
+            if not _null_op_holds(op_name, context_value, threshold):
+                return False
+    return True
+
+
+def evaluate_when_extended(
+    when: dict[str, object],
+    context: dict[str, Any],
+    *,
+    effective_date: Any = None,
+    now: Any = None,
+) -> tuple[bool, dict[str, Any]]:
+    """``evaluate_when`` with the extended operator families enabled.
+
+    Same ``(matched, matched_fields)`` contract, same AND-over-fields and
+    same ``_date`` / ``any`` / ``all`` / ``not`` semantics. The only difference
+    is that string/collection/null operators are recognised.
+    """
+    evaluation = _evaluation_date(effective_date=effective_date, now=now)
+    matched_fields: dict[str, Any] = {}
+    for field_name, rule_value in (when or {}).items():
+        if field_name in _COMBINATORS and field_name not in context:
+            ok, fields = _evaluate_combinator_extended(
+                field_name, rule_value, context, effective_date=effective_date, now=now
+            )
+            if not ok:
+                return False, {}
+            matched_fields[field_name] = fields
+            continue
+        if field_name == _RESERVED_DATE_KEY:
+            if evaluation is None or not matches_field_extended(
+                rule_value, evaluation, effective_date=effective_date, now=now
+            ):
+                return False, {}
+            matched_fields[field_name] = evaluation.isoformat()
+            continue
+        if field_name not in context:
+            return False, {}
+        if not matches_field_extended(
+            rule_value, context[field_name], effective_date=effective_date, now=now
+        ):
+            return False, {}
+        matched_fields[field_name] = _json_safe(context[field_name])
+    return True, matched_fields
+
+
+def _evaluate_combinator_extended(
+    name: str,
+    spec: Any,
+    context: dict[str, Any],
+    *,
+    effective_date: Any = None,
+    now: Any = None,
+) -> tuple[bool, dict[str, Any]]:
+    entries = spec if isinstance(spec, list) else [spec]
+    if name == "any":
+        merged: dict[str, Any] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            ok, fields = evaluate_when_extended(entry, context, effective_date=effective_date, now=now)
+            if ok:
+                merged.update(fields)
+                return True, merged
+        return False, {}
+    if name == "all":
+        merged = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return False, {}
+            ok, fields = evaluate_when_extended(entry, context, effective_date=effective_date, now=now)
+            if not ok:
+                return False, {}
+            merged.update(fields)
+        return True, merged
+    for entry in entries:
+        if isinstance(entry, dict):
+            ok, _fields = evaluate_when_extended(entry, context, effective_date=effective_date, now=now)
+            if ok:
+                return False, {}
+    return True, {}
+
+
+def explain_when(
+    when: dict[str, object],
+    context: dict[str, Any],
+    *,
+    effective_date: Any = None,
+    now: Any = None,
+    extended: bool = True,
+) -> dict[str, Any]:
+    """Why did this rule match or not? A per-field trace with reasons.
+
+    ``evaluate_when`` returns a bool and stops at the first failure, which is
+    fast but useless for a tenant asking "my rule stopped working". This walks
+    every field, records the actual value beside the expected one, and names the
+    first field that broke the rule. A rule with no failures reports the branch
+    that *would* have decided an ``any``.
+    """
+    evaluator = evaluate_when_extended if extended else evaluate_when
+    evaluation = _evaluation_date(effective_date=effective_date, now=now)
+    trace: list[dict[str, Any]] = []
+    failed_field: Optional[str] = None
+    for field_name, rule_value in (when or {}).items():
+        entry: dict[str, Any] = {"field": field_name, "expected": rule_value}
+        if field_name in _COMBINATORS and field_name not in context:
+            branch_results = []
+            branches = rule_value if isinstance(rule_value, list) else [rule_value]
+            for index, branch in enumerate(branches):
+                if not isinstance(branch, dict):
+                    branch_results.append({"index": index, "matched": False, "reason": "branch is not a rule dict"})
+                    continue
+                ok, _fields = evaluator(branch, context, effective_date=effective_date, now=now)
+                branch_results.append({"index": index, "matched": ok, "rule": branch})
+            if field_name == "not":
+                hits = [item["index"] for item in branch_results if item["matched"]]
+                entry.update(
+                    {
+                        "combinator": field_name,
+                        "matched": not hits,
+                        "reason": (
+                            f"no branch matched ({len(branches)} checked)"
+                            if not hits
+                            else f"branch(es) {hits} matched, which `not` forbids"
+                        ),
+                    }
+                )
+            else:
+                hits = [item["index"] for item in branch_results if item["matched"]]
+                entry.update(
+                    {
+                        "combinator": field_name,
+                        "matched": bool(hits),
+                        "reason": (
+                            f"branch(es) {hits} matched"
+                            if hits
+                            else f"no branch matched ({len(branches)} checked)"
+                        ),
+                        "branches": branch_results,
+                    }
+                )
+            trace.append(entry)
+            if not entry["matched"] and failed_field is None:
+                failed_field = field_name
+            continue
+        if field_name == _RESERVED_DATE_KEY:
+            actual = evaluation
+            ok = actual is not None and evaluator(
+                {field_name: rule_value}, {}, effective_date=effective_date, now=now
+            )[0]
+            entry.update(
+                {
+                    "actual": actual.isoformat() if actual else None,
+                    "matched": ok,
+                    "reason": "reserved evaluation date"
+                    if ok
+                    else f"evaluation date {actual} does not satisfy {rule_value}",
+                }
+            )
+            trace.append(entry)
+            if not ok and failed_field is None:
+                failed_field = field_name
+            continue
+        if field_name not in context:
+            entry.update(
+                {
+                    "actual": None,
+                    "matched": False,
+                    "reason": f"field {field_name!r} is absent from the context (unknown fields fail closed)",
+                }
+            )
+            trace.append(entry)
+            if failed_field is None:
+                failed_field = field_name
+            continue
+        actual = context[field_name]
+        ok = matches_field_extended(
+            rule_value, actual, effective_date=effective_date, now=now
+        )
+        entry.update(
+            {
+                "actual": _json_safe(actual),
+                "matched": ok,
+                "reason": "satisfied" if ok else f"{actual!r} does not satisfy {rule_value!r}",
+            }
+        )
+        trace.append(entry)
+        if not ok and failed_field is None:
+            failed_field = field_name
+    matched = failed_field is None
+    return {
+        "matched": matched,
+        "engine": "extended" if extended else "v1",
+        "evaluation_date": evaluation.isoformat() if evaluation else None,
+        "fields_checked": len(trace),
+        "failed_field": failed_field,
+        "reason": (
+            "all conditions satisfied"
+            if matched
+            else f"first failing condition: {failed_field!r}"
+        ),
+        "trace": trace,
+    }
+
+
+def validate_when(
+    when: Any,
+    *,
+    known_fields: Optional[set[str]] = None,
+    context_hint: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Statically check a `when` DSL before it is stored or promoted.
+
+    Catches the four failures that make a rule silently inert: an operator
+    nobody implements, a reserved key used as an ordinary field, a threshold of
+    the wrong shape, and a ``=expr`` that does not parse. Errors block; warnings
+    are advisory (an unknown *field* is a warning unless the caller declares
+    ``known_fields``, because field names are tenant-owned).
+    """
+    errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    operators_used: list[str] = []
+    fields_referenced: list[str] = []
+
+    def _walk(node: Any, path: str) -> None:
+        if not isinstance(node, dict):
+            errors.append({"path": path, "code": "not_a_dict", "message": f"expected a rule dict, got {type(node).__name__}"})
+            return
+        for field_name, rule_value in node.items():
+            here = f"{path}.{field_name}" if path else str(field_name)
+            if field_name in _COMBINATORS:
+                branches = rule_value if isinstance(rule_value, list) else [rule_value]
+                if not branches:
+                    errors.append({"path": here, "code": "empty_combinator", "message": f"{field_name!r} has no branches"})
+                for index, branch in enumerate(branches):
+                    _walk(branch, f"{here}[{index}]")
+                continue
+            fields_referenced.append(str(field_name))
+            if field_name == _RESERVED_DATE_KEY and not isinstance(rule_value, dict):
+                warnings.append({"path": here, "code": "date_key_scalar", "message": f"{_RESERVED_DATE_KEY!r} is a date; scalar rules should use a date operator dict"})
+            if isinstance(rule_value, dict):
+                if not rule_value:
+                    errors.append({"path": here, "code": "empty_operator_dict", "message": "operator dict is empty, so the condition is always true"})
+                for op_name, threshold in rule_value.items():
+                    operators_used.append(str(op_name))
+                    if op_name not in OPERATOR_FAMILIES:
+                        errors.append(
+                            {
+                                "path": f"{here}.{op_name}",
+                                "code": "unknown_operator",
+                                "message": f"{op_name!r} is not implemented by any operator family",
+                            }
+                        )
+                        continue
+                    for problem in _validate_threshold(str(op_name), threshold):
+                        problems = dict(problem)
+                        problems["path"] = f"{here}.{op_name}"
+                        errors.append(problems)
+            elif isinstance(rule_value, str) and rule_value.startswith("="):
+                try:
+                    evaluate_expression(rule_value[1:], dict(context_hint or {}))
+                except ValueError as exc:
+                    errors.append({"path": here, "code": "bad_expression", "message": str(exc)})
+    _walk(when, "")
+    for field_name in dict.fromkeys(fields_referenced):
+        if known_fields is not None and field_name not in known_fields and field_name != _RESERVED_DATE_KEY:
+            warnings.append(
+                {
+                    "path": field_name,
+                    "code": "unknown_field",
+                    "message": f"{field_name!r} is not in the declared context; it will fail closed at evaluation time",
+                }
+            )
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "operators_used": sorted(set(operators_used)),
+        "families_used": sorted({OPERATOR_FAMILIES[op] for op in operators_used if op in OPERATOR_FAMILIES}),
+        "fields_referenced": sorted(set(fields_referenced)),
+    }
+
+
+def _validate_threshold(op_name: str, threshold: Any) -> list[dict[str, str]]:
+    """Shape checks per operator; a wrong-shaped threshold is a silent False."""
+    problems: list[dict[str, str]] = []
+    if op_name in _NUMERIC_OPS:
+        try:
+            float(threshold)
+        except (TypeError, ValueError):
+            problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs a number, got {threshold!r}"})
+    if op_name in ("between_dates", "length_between"):
+        bounds = _as_list(threshold)
+        if len(bounds) != 2:
+            problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs exactly two bounds, got {threshold!r}"})
+    if op_name in _DATE_OPS and op_name in ("between_dates", "on_date"):
+        for item in (_as_list(threshold) if op_name == "between_dates" else [threshold]):
+            if _coerce_date(item) is None:
+                problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs ISO dates, got {item!r}"})
+    if op_name in ("intersects", "disjoint", "contains_all", "contains_any", "subset_of", "starts_with_any", "in_phrase"):
+        if not isinstance(threshold, (list, tuple, set, frozenset)):
+            problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs a list, got {threshold!r}"})
+    if op_name == "matches":
+        if not isinstance(threshold, str) or len(threshold) > int(REGEX_POLICY["max_pattern_length"]):
+            problems.append({"code": "bad_threshold", "message": f"pattern must be a string of at most {REGEX_POLICY['max_pattern_length']} characters"})
+        elif not _regex_search(threshold, ""):
+            try:
+                re.compile(threshold)
+            except re.error as exc:
+                problems.append({"code": "bad_threshold", "message": f"invalid regex: {exc}"})
+    if op_name in ("len_eq", "len_gte", "len_lte", "word_count_gte", "distinct_count_gte"):
+        try:
+            int(threshold)
+        except (TypeError, ValueError):
+            problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs an integer, got {threshold!r}"})
+    if op_name in ("sum_gte", "avg_gte", "max_lte", "min_gte"):
+        try:
+            float(threshold)
+        except (TypeError, ValueError):
+            problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs a number, got {threshold!r}"})
+    return problems
+
+
+# --- rule packs -------------------------------------------------------------
+
+
+def get_rule_pack(name: str) -> dict[str, Any]:
+    for entry in RULE_PACKS:
+        if str(entry["pack"]) == str(name):
+            return entry
+    raise KeyError(f"unknown rule pack {name!r} (known: {sorted(RULE_PACK_BY_NAME)})")
+
+
+def select_rules(
+    pack: Any,
+    context: dict[str, Any],
+    *,
+    effective_date: Any = None,
+    now: Any = None,
+    include_disabled: bool = False,
+) -> dict[str, Any]:
+    """Evaluate every rule in a pack and report which ones fired.
+
+    Rules are returned in firing order (priority descending, then pack order), so
+    the first entry is the one a caller should act on. Each fired rule carries
+    its resolved ``params`` and an explanation, which is what makes a pack
+    reviewable rather than a black box.
+    """
+    resolved = pack if isinstance(pack, dict) and "rules" in pack else get_rule_pack(pack)
+    anchor = _evaluation_date(effective_date=effective_date, now=now)
+    fired: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for index, rule in enumerate(resolved.get("rules", [])):
+        rule_id = str(rule.get("id", f"#{index}"))
+        if not rule.get("enabled", True) and not include_disabled:
+            skipped.append({"id": rule_id, "reason": "disabled"})
+            continue
+        if not _rule_in_window(rule, anchor):
+            skipped.append({"id": rule_id, "reason": "outside effective window"})
+            continue
+        verdict = explain_when(
+            rule.get("when", {}), context, effective_date=effective_date, now=now
+        )
+        if not verdict["matched"]:
+            skipped.append({"id": rule_id, "reason": verdict["reason"]})
+            continue
+        fired.append(
+            {
+                "id": rule_id,
+                "priority": int(rule.get("priority", 0) or 0),
+                "order": index,
+                "params": resolve_params(rule.get("params"), context),
+                "explanation": verdict,
+            }
+        )
+    fired.sort(key=lambda item: (-item["priority"], item["order"]))
+    return {
+        "pack": resolved.get("pack"),
+        "version": resolved.get("version"),
+        "domain": resolved.get("domain"),
+        "fired": fired,
+        "fired_ids": [item["id"] for item in fired],
+        "skipped": skipped,
+        "context_fields_used": sorted(
+            {str(name) for rule in resolved.get("rules", []) for name in (rule.get("when") or {})}
+        ),
+    }
+
+
+def _rule_in_window(rule: dict[str, Any], anchor: Optional[date]) -> bool:
+    if anchor is None:
+        return True
+    start = _coerce_date(rule.get("effective_from")) if rule.get("effective_from") else None
+    end = _coerce_date(rule.get("effective_to")) if rule.get("effective_to") else None
+    if start is not None and anchor < start:
+        return False
+    if end is not None and anchor > end:
+        return False
+    return True
+
+
+def merge_rule_packs(
+    packs: list[Any],
+    *,
+    strategy: str = "later_wins",
+) -> dict[str, Any]:
+    """Merge packs by rule id under a declared conflict strategy.
+
+    Promoting rules between environments is where conditions go missing, so the
+    merge is explicit about what it did: every rule it dropped or replaced is
+    listed in ``conflicts`` rather than being silently overwritten.
+    """
+    chosen = str(strategy)
+    if chosen not in PACK_MERGE_STRATEGIES:
+        raise ValueError(f"unknown merge strategy {strategy!r} (expected one of {list(PACK_MERGE_STRATEGIES)})")
+    resolved_packs = [pack if isinstance(pack, dict) and "rules" in pack else get_rule_pack(pack) for pack in packs]
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    conflicts: list[dict[str, Any]] = []
+    for pack in resolved_packs:
+        for index, rule in enumerate(pack.get("rules", [])):
+            rule_id = str(rule.get("id", f"#{index}"))
+            if rule_id not in merged:
+                merged[rule_id] = {**rule, "origin_pack": pack.get("pack")}
+                order.append(rule_id)
+                continue
+            existing = merged[rule_id]
+            if chosen == "error":
+                raise ValueError(
+                    f"rule id {rule_id!r} is defined in both "
+                    f"{existing.get('origin_pack')!r} and {pack.get('pack')!r}; "
+                    "resolve the collision or choose a different strategy"
+                )
+            if chosen == "first_wins":
+                conflicts.append({"id": rule_id, "resolution": "kept_first", "kept_from": existing.get("origin_pack")})
+                continue
+            if chosen == "union":
+                existing.setdefault("params", {})
+                existing["params"] = {**(rule.get("params") or {}), **existing.get("params", {})}
+                conflicts.append({"id": rule_id, "resolution": "union", "merged_from": [existing.get("origin_pack"), pack.get("pack")]})
+                continue
+            diff = diff_when(existing.get("when", {}), rule.get("when", {}))
+            conflicts.append(
+                {
+                    "id": rule_id,
+                    "resolution": "replaced",
+                    "replaced_from": existing.get("origin_pack"),
+                    "replaced_by": pack.get("pack"),
+                    "when_diff": diff,
+                }
+            )
+            merged[rule_id] = {**rule, "origin_pack": pack.get("pack")}
+    rules = [merged[rule_id] for rule_id in order]
+    return {
+        "strategy": chosen,
+        "packs": [pack.get("pack") for pack in resolved_packs],
+        "rules": rules,
+        "rule_ids": order,
+        "conflicts": conflicts,
+        "versions": {str(pack.get("pack")): pack.get("version") for pack in resolved_packs},
+    }
+
+
+def diff_when(left: Any, right: Any, *, path: str = "") -> dict[str, Any]:
+    """Structural diff of two `when` dicts.
+
+    Reports conditions added, removed, and changed at the leaf level, plus
+    changed operator thresholds. A diff that only compared whole fields would
+    call ``{"gte": 1}`` -> ``{"gte": 2}`` "changed" without saying which
+    condition moved, which is exactly the change reviewers need to see.
+    """
+    added: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    changed: list[dict[str, Any]] = []
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        if left != right:
+            changed.append({"path": path or "when", "from": left, "to": right})
+        return {"added": added, "removed": removed, "changed": changed, "identical": not (added or removed or changed)}
+    for key in right:
+        if key not in left:
+            added.append({"path": f"{path}.{key}" if path else str(key), "value": right[key]})
+        else:
+            here = f"{path}.{key}" if path else str(key)
+            if isinstance(left[key], dict) and isinstance(right[key], dict):
+                nested = diff_when(left[key], right[key], path=here)
+                added.extend(nested["added"])
+                removed.extend(nested["removed"])
+                changed.extend(nested["changed"])
+            elif left[key] != right[key]:
+                changed.append({"path": here, "from": left[key], "to": right[key]})
+    for key in left:
+        if key not in right:
+            removed.append({"path": f"{path}.{key}" if path else str(key), "value": left[key]})
+    return {"added": added, "removed": removed, "changed": changed, "identical": not (added or removed or changed)}
+
+
+def export_rule_pack(pack: Any, *, fmt: str = "json", include_explanations: bool = False) -> str:
+    """Serialise a pack for review, diffing, or a Git-tracked rules file."""
+    out_fmt = str(fmt)
+    if out_fmt not in RULE_PACK_EXPORT_FORMATS:
+        raise ValueError(f"unknown export format {fmt!r} (expected one of {list(RULE_PACK_EXPORT_FORMATS)})")
+    resolved = pack if isinstance(pack, dict) and "rules" in pack else get_rule_pack(pack)
+    if out_fmt == "json":
+        return json.dumps(resolved, indent=2, sort_keys=True, default=str)
+    if out_fmt == "jsonl":
+        lines = [json.dumps({"pack": resolved.get("pack"), "version": resolved.get("version"), "domain": resolved.get("domain")}, sort_keys=True)]
+        lines += [json.dumps(rule, sort_keys=True, default=str) for rule in resolved.get("rules", [])]
+        return "\n".join(lines) + "\n"
+    if out_fmt == "python":
+        body = ",\n".join(f"        {json.dumps(rule, sort_keys=True, default=str)}" for rule in resolved.get("rules", []))
+        return (
+            "RULE_PACKS.append(\n"
+            "    {\n"
+            f"        \"pack\": {json.dumps(resolved.get('pack'))},\n"
+            f"        \"version\": {json.dumps(resolved.get('version'))},\n"
+            f"        \"domain\": {json.dumps(resolved.get('domain'))},\n"
+            f"        \"priority\": {json.dumps(resolved.get('priority'))},\n"
+            "        \"rules\": [\n"
+            f"{body}\n"
+            "        ],\n"
+            "    }\n"
+            ")\n"
+        )
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["id", "enabled", "priority", "effective_from", "effective_to", "when", "params"])
+    for rule in resolved.get("rules", []):
+        writer.writerow(
+            [
+                rule.get("id", ""),
+                "true" if rule.get("enabled", True) else "false",
+                int(rule.get("priority", 0) or 0),
+                rule.get("effective_from") or "",
+                rule.get("effective_to") or "",
+                json.dumps(rule.get("when", {}), sort_keys=True, default=str),
+                json.dumps(rule.get("params", {}), sort_keys=True, default=str),
+            ]
+        )
+    return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # Catalog
 # ---------------------------------------------------------------------------
 
@@ -446,5 +1409,69 @@ def build_rule_engine_catalog() -> dict[str, Any]:
             {"_date": {"between_dates": ["2026-06-01", "2026-08-31"]}, "value_tier": {"ne": "new"}},
             {"not": {"churn_risk": "high"}},
             {"param": "=base * tier_multiplier * campaign_multiplier"},
+        ],
+        "extended_operators": {
+            "string": [dict(entry) for entry in STRING_OPS],
+            "collection": [dict(entry) for entry in COLLECTION_OPS],
+            "null": [dict(entry) for entry in NULL_OPS],
+            "families": {name: family for name, family in sorted(OPERATOR_FAMILIES.items())},
+            "opt_in": True,
+            "policy": (
+                "matches_field/evaluate_when do NOT implement these operators and still fail "
+                "closed on them; use evaluate_when_extended to enable them. An operator that no "
+                "family declares is never silently true."
+            ),
+            "entry_points": [
+                "matches_field_extended",
+                "evaluate_when_extended",
+                "explain_when",
+            ],
+        },
+        "regex_policy": dict(REGEX_POLICY),
+        "explanation": {
+            "helper": "explain_when(when, context, effective_date=None, now=None, extended=True)",
+            "returns": "per-field trace with actual vs expected, the first failing field, and combinator branch results",
+            "why": "evaluate_when stops at the first failure, which cannot answer 'why did my rule stop firing'",
+        },
+        "validation": {
+            "helper": "validate_when(when, known_fields=None, context_hint=None)",
+            "checks": [
+                "unknown operator (error)",
+                "empty operator dict, i.e. an always-true condition (error)",
+                "wrong-shaped threshold (error)",
+                "unparseable =expr (error)",
+                "unknown context field (warning unless known_fields is declared)",
+                "scalar _date (warning)",
+            ],
+            "blocking": "errors only; warnings are advisory",
+        },
+        "rule_packs": {
+            "table": [
+                {
+                    "pack": entry["pack"],
+                    "version": entry["version"],
+                    "domain": entry["domain"],
+                    "priority": entry["priority"],
+                    "rules": [str(rule.get("id")) for rule in entry.get("rules", [])],
+                    "description": entry.get("description", ""),
+                }
+                for entry in RULE_PACKS
+            ],
+            "merge_strategies": list(PACK_MERGE_STRATEGIES),
+            "export_formats": list(RULE_PACK_EXPORT_FORMATS),
+            "policy": "merge_rule_packs reports every dropped or replaced rule in `conflicts`",
+            "helpers": [
+                "get_rule_pack",
+                "select_rules",
+                "merge_rule_packs",
+                "diff_when",
+                "export_rule_pack",
+            ],
+        },
+        "advanced_examples": [
+            {"note": "string family", "when": {"email": {"ends_with": "@blocked.example"}}},
+            {"note": "collection family", "when": {"tags": {"contains_all": ["vip", "beta"]}}},
+            {"note": "null family", "when": {"consent_at": {"is_null": True}}},
+            {"note": "extended evaluator required", "when": {"days_since_login": {"gte": 45}, "tags": {"len_gte": 3}}},
         ],
     }

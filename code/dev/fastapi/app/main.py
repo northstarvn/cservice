@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import Base, engine, get_db
 from app import i18n
 from app.i18n import locale_payload
+from app import models
 from app.routers import audit, bookings, chat, topics, users
 from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks
 from app.services.efficiency_audit import build_efficiency_audit_catalog
@@ -298,8 +299,16 @@ async def app_ecosystem():
                     "/topics/workspace",
                     "/topics/overview",
                     "/topics/intelligence",
+                    "/topics/taxonomy",
+                    "/topics/ranked",
+                    "/topics/governance",
+                    "/topics/integrity",
+                    "/topics/match",
+                    "/topics/validate",
+                    "/topics/drift",
+                    "/topics/lifecycle",
                 ],
-                "purpose": "topic catalog search, ranked suggestions, workspace portfolio, and cross-service topic intelligence",
+                "purpose": "topic catalog search, ranked suggestions, workspace portfolio, selection governance, and cross-service topic intelligence",
                 "status": "ready",
             },
             "activity_monitoring": {
@@ -354,8 +363,10 @@ async def app_ecosystem():
                     "/audit/logs",
                     "/audit/logs/summary",
                     "/audit/trail-catalog",
+                    "/audit/logs/view",
+                    "/audit/integrity/gates",
                 ],
-                "purpose": "immutable operator/system action trail for explainability, with action/severity catalog and rollups",
+                "purpose": "immutable operator/system action trail for explainability, with action/severity catalog, rollups, per-audience read profiles, and a config-driven integrity gate table",
                 "status": "ready",
             },
             "localization": {
@@ -394,10 +405,15 @@ async def app_ecosystem():
                 "routes": [
                     "/audit/pipeline/event",
                     "/audit/pipeline/stats",
+                    "/audit/pipeline/dead-letters",
+                    "/audit/pipeline/replay",
                     "/audit/transactions",
                     "/audit/transactions/spec",
+                    "/audit/transactions/query",
+                    "/audit/transactions/integrity",
+                    "/audit/transactions/export",
                 ],
-                "purpose": "async high-throughput audit pipeline encoding immutable, append-only protobuf transactions for security signals",
+                "purpose": "async high-throughput audit pipeline encoding immutable, append-only protobuf transactions for security signals, with a bounded dead-letter ring that can be inspected and replayed",
                 "status": "ready",
                 "autostart": high_throughput_pipeline.PIPELINE_AUTOSTART,
             },
@@ -420,6 +436,18 @@ async def app_ecosystem():
                 ],
                 "purpose": "shared when-DSL rule engine core: unified condition evaluation (combinators, date-window operators, expression params) that the loyalty, communication, points, and arrears engines delegate to",
                 "status": "ready",
+            },
+            "data_model": {
+                "routes": [
+                    "/meta/schema",
+                ],
+                "purpose": "declarative catalog of the ORM schema: per-column sensitivity and redaction presets, the vocabularies string columns are meant to hold but do not enforce, per-table write mode and retention advisory, the relationship graph, and an advisory report of the constraints the schema does not have",
+                "status": "ready",
+                "advisory_sections": [
+                    "schema_gaps.check_constraint_coverage",
+                    "schema_gaps.referential_integrity_gaps",
+                    "schema_gaps.unbacked_enum_like_columns",
+                ],
             },
             "regional_policy": {
                 "routes": [
@@ -454,6 +482,7 @@ async def app_feature_summary():
             "metadata": "/meta",
             "ecosystem": "/meta/ecosystem",
             "scoring_catalog": "/meta/scoring-catalog",
+            "schema_catalog": "/meta/schema",
             "booking_analytics": "/bookings/analytics/summary",
             "booking_events": "/bookings/analytics/events",
             "booking_export": "/bookings/analytics/export",
@@ -489,6 +518,8 @@ async def app_feature_summary():
             "audit_log_anomalies": "/audit/logs/anomalies",
             "audit_log_retention": "/audit/logs/retention",
             "audit_log_export": "/audit/logs/export",
+            "audit_log_view": "/audit/logs/view",
+            "audit_integrity_gates": "/audit/integrity/gates",
             "audit_trail_catalog": "/audit/trail-catalog",
             "i18n_catalog": "/meta/i18n",
             "tenant_routing": "/meta/tenants",
@@ -497,8 +528,13 @@ async def app_feature_summary():
             "zero_trust": "/meta/zero-trust",
             "pipeline_event": "/audit/pipeline/event",
             "pipeline_stats": "/audit/pipeline/stats",
+            "pipeline_dead_letters": "/audit/pipeline/dead-letters",
+            "pipeline_replay": "/audit/pipeline/replay",
             "transactions": "/audit/transactions",
             "transactions_spec": "/audit/transactions/spec",
+            "transactions_query": "/audit/transactions/query",
+            "transactions_integrity": "/audit/transactions/integrity",
+            "transactions_export": "/audit/transactions/export",
             "decisions": "/meta/decisions",
             "decision_simulate": "/meta/decisions/simulate",
             "decision_canary_run": "/meta/decisions/canary/run",
@@ -571,6 +607,52 @@ async def scoring_catalog():
         "recovery_playbooks": recovery_playbooks.build_recovery_playbook_catalog(),
         "identity": users.build_users_catalog(),
     }
+
+
+@app.get("/meta/schema")
+async def schema_catalog(section: str | None = Query(default=None)):
+    """Describe the ORM schema and, more usefully, what it does not protect.
+
+    Everything here is derived from ``Base.metadata`` at call time plus a set of
+    config tables that add the judgments the DDL cannot express: which columns
+    are sensitive, which string columns are *supposed* to hold an enum value,
+    which tables are append-only, and which quantities are legitimately signed.
+
+    Two sections are advisory reports rather than plain descriptions:
+
+    * ``schema_gaps.check_constraint_coverage`` -- float columns with no
+      non-negative check, split into "guarded", "signed by design", and the
+      residual.
+    * ``schema_gaps.referential_integrity_gaps`` -- ``*_id`` columns with no
+      foreign key, split by whether the target table exists at all.
+
+    Both report; neither fixes. Closing either gap is new DDL and needs a
+    migration, so the answer here is a description an operator can act on, not a
+    silent change to a running schema.
+
+    Pass ``?section=`` for one part of the catalog (``sensitivity``,
+    ``json_columns``, ``enum_fields``, ``schema_gaps``, ``lifecycle``,
+    ``relationships``, ``columns``). An unknown section is a 422 rather than an
+    empty payload, so a typo in a script fails loudly.
+    """
+    catalog = models.build_model_catalog()
+    envelope = {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if section:
+        if section not in catalog:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"unknown schema section {section!r}; expected one of "
+                    f"{', '.join(sorted(catalog))}"
+                ),
+            )
+        return {**envelope, "section": section, "catalog": catalog[section]}
+    return {**envelope, **catalog}
 
 
 @app.get("/meta/i18n")

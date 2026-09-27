@@ -501,5 +501,176 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   `tests/test_risk_partition_expansion.py` (29),
   `tests/test_users_identity_expansion.py` (42) — suite 552 -> 700 passing.
 
+### Thin-group expansion, second pass (r5 leaf-level growth)
+- The twelve LOC-ranked thinnest function groups were grown into configurable,
+  introspectable surfaces. **All additive**: existing signatures, returned
+  payloads and pinned catalog key sets are untouched, and no existing table,
+  column, constraint or index changed — so no Alembic migration is required.
+  `app/models.py` was verified byte-identical above its expansion marker
+  (diffed against `r1`; the only delta is a 39-line docstring/import header and
+  one trailing newline).
+- `app/models.py` (363 -> 2158 LOC) gained a **metadata layer** below the DDL
+  layer: config tables (`SENSITIVITY_CLASSES`, `FIELD_SENSITIVITY` /
+  `TABLE_FIELD_SENSITIVITY`, `REDACTION_PRESETS`, `ENUM_FIELD_SPECS`,
+  `ENUM_VOCABULARY_ALIASES`, `OPEN_VOCABULARY_COLUMNS`, `OPEN_TEXT_COLUMNS`,
+  `TABLE_LIFECYCLE`, `SIGNED_QUANTITY_COLUMNS`,
+  `UNCONSTRAINED_REFERENCE_COLUMNS`) plus pure helpers over `Base.metadata`
+  (`sensitivity_of`, `projection_for`, `model_to_dict`, `redact_instance`,
+  `model_to_rows`, `loads_json` / `dumps_json`, `normalize_enum_value`,
+  `validate_enum_field`, `coerce_booking_status`, `coerce_service_type`,
+  `enum_field_report`, `unbacked_enum_like_columns`,
+  `check_constraint_coverage`, `referential_integrity_gaps`,
+  `build_relationship_catalog`, `build_table_lifecycle_catalog`,
+  `build_model_catalog`). **Keep-as-is decisions:** (a) the DDL layer is
+  unchanged and stays authoritative, so `create_all`/alembic emit the same
+  schema; (b) the module never imports `app.services.*` (the services import the
+  models, so a reverse import is a cycle) and therefore implements its own
+  redaction; (c) `check_constraint_coverage` and `referential_integrity_gaps`
+  **report and do not fix** — closing either gap is new DDL, so the output is
+  severity-`advisory`; (d) `retention_days` in `TABLE_LIFECYCLE` is
+  documentation for an operator writing a policy, nothing in the module deletes
+  a row; (e) an unknown redaction preset resolves to `internal` rather than
+  raising, because a redaction helper that throws gets bypassed.
+- `app/model_versioning.py` (483 -> 2299 LOC): `VERSION_STATES`, `GATE_OPS`,
+  `GATE_SEVERITIES`, `PROMOTION_GATES` (11), `ROLLBACK_POLICIES` (3),
+  `DEPRECATION_POLICIES` (3), `PRUNE_POLICIES` (3), `TRAFFIC_SPLITS` (2),
+  `LABEL_TEMPLATES`, `DIFF_FORMATS`, `NO_HISTORY_METRICS`, plus `weight_moves`,
+  `diff_versions`, `render_diff`, `version_changelog`, `promotion_verdict`,
+  `rollback_plan`, `deprecation_status`, `prune_plan`, `traffic_plan`,
+  `select_version`, `stage_progress`, `next_stage`, `render_label`,
+  `version_report`; the catalog gained `lifecycle`, `promotion_gates`,
+  `version_diff`, `rollback_policy`, `deprecation`, `prune`, `traffic_split`,
+  `label_templates`. **Keep-as-is decision:** the v1 `_ModelEntry` lifecycle is
+  byte-identical, and only *structurally wrong* promotion cases are `blocking` —
+  thin evidence, no rollback target, and auto-promote-off are `auto` and
+  resolve to verdict `manual`. A missing metric **fails closed**.
+  `unknown_rule_ids` compares against the live `effective_risk_rules()` ids, not
+  a pinned copy.
+- `app/rule_engine.py` (449 -> 1477), `app/regional_policy.py` (424 -> 1445),
+  `app/simulation_engine.py` (300 -> 911), `app/optimistic_locking.py`
+  (461 -> 1159), `app/explainability.py` (269 -> 946): config tables plus pure
+  helpers, all additive. `conflict_policy["expected_status"] == 409` and
+  `simulation["kinds"] == ["risk","retention"]` are pinned and unchanged.
+  **Keep-as-is decision:** the extended string/collection/null operator families
+  in `rule_engine` stay opt-in — an operator that no family declares is never
+  silently true, and `matches_field` / `evaluate_when` still fail closed on them.
+- `app/protobuf_transaction_spec.py` (379 -> 1392) gained
+  `TransactionLog.query` / `integrity_report` / `export` and the matching
+  catalog sections; `app/high_throughput_pipeline.py` (287 -> 780) gained
+  `REPLAY_POLICY` / `replay_dead_letters` and an additively enriched
+  `dead_letter_report` (`by_kind`, `by_error`, `evicted`, `replayable_ratio`,
+  `blocked_by_policy`, `max_attempts_seen`, `oldest` / `newest_occurred_at`,
+  `ring_capacity`, `drainable`, `generated_at`).
+- `services/audit_log.py`, `routers/audit.py` (394 -> 767) and
+  `schemas/audit.py` (312 -> 520): `AUDIT_VIEW_PROFILES` (digest / operations /
+  investigation), `AUDIT_INTEGRITY_GATES` (7), `verify_entry_seal_chain`, and the
+  routes `GET /logs/view`, `GET /integrity/gates`, `GET /pipeline/dead-letters`,
+  `POST /pipeline/replay` (with `dry_run`), `GET /transactions/query`,
+  `GET /transactions/integrity`, `GET /transactions/export`, plus an optional
+  `?section=` on `GET /transactions/spec`. **Keep-as-is decisions:** (a)
+  `AUDIT_GATE_OPS` is declared locally rather than imported from
+  `model_versioning`, to avoid a decision-intelligence dependency from the
+  audit service; (b) `verify_entry_seal_chain()` recomputes each entry's seal
+  from the persisted `detail["_integrity"]` block and compares, because the old
+  `chain_valid` (via `verify_seal_chain(entries)`) always read valid for real
+  entries — an empty trail now reports `chain_valid=True` with
+  `sealed_ratio=None` -> verdict `review` instead of a misleading `reject`;
+  (c) `GET /transactions/spec` still returns the full catalog by default and
+  `build_transaction_spec_catalog` stays imported at `app/routers/audit.py:9`.
+- `app/routers/topics.py` (190 -> 303) gained `/taxonomy`, `/governance`,
+  `/integrity`, `/match`, `/ranked`, `POST /validate`, `/drift`, `/lifecycle`,
+  backed by a governance block in `services/topics.py`.
+  **Keep-as-is decisions:** every new guard is **advisory** — `POST
+  /topics/validate` is pre-flight only and mutates nothing, known data defects
+  are reported by `/topics/integrity` rather than repaired, and `rank_topics` is
+  not guaranteed to match the built-in suggester's ordering.
+- Meta wiring: new `GET /meta/schema` (optional `?section=`, unknown section ->
+  422 so a script typo fails loudly), a `data_model` entry in the
+  `/meta/ecosystem` `subservices` map, and a `schema_catalog` key in
+  `/meta/features`; `audit_trail` / `high_velocity_audit` route lists and 7
+  `features` keys extended for the audit routes.
+- Bugs found and fixed while expanding (do not reintroduce): `TransactionLog.
+  query(sort=...)` raised `KeyError: 'field'` because the fallback sort spec
+  had no `field` key; `/audit/transactions/export` miscounted `frame_count` for
+  `json` (line-count returned 1) and for `csv` (the header row was counted as a
+  frame); `models.model_to_dict` dropped unset columns on a *transient* instance
+  (it now applies `skip_unloaded` only to persistent state, where reading an
+  unloaded attribute would emit a query); `_python_default` returned an enum
+  member, which is not JSON-serialisable, so the `/meta/schema` payload could
+  not be served; `prop.cascade` is a `CascadeOptions` object rather than a
+  string in SQLAlchemy 2.x; and `SIMULATION_MODIFIERS["short_retention"]` shipped
+  a dead retention override (see next entry).
+- **Two more bugs, found by auditing the audit.** The "all resolved" line at the
+  top of this file was not evidence of anything, so the tables were checked
+  against each other instead. Two real defects surfaced, both in `models.py`
+  metadata that I had written earlier in this same pass:
+  - `interaction_signals.source` was declared in `ENUM_FIELD_SPECS` as a *closed*
+    five-value vocabulary while `source` is simultaneously listed in
+    `OPEN_TEXT_COLUMNS` as open on purpose. `validate_enum_field()` therefore
+    rejected `slack_channel` for that one column and accepted it for the other
+    six `source` columns. Removed: all seven `source` columns are open channel
+    labels, and the name is already covered by `OPEN_TEXT_COLUMNS`.
+  - `unbacked_enum_like_columns()`'s docstring promised to exclude names listed
+    in `OPEN_TEXT_COLUMNS`; the code only checked `ENUM_FIELD_SPECS` /
+    `OPEN_VOCABULARY_COLUMNS`. The `source` exclusion was therefore being
+    supplied *by accident* by the entry above. Implementing the documented
+    exclusion left a residual of `note` and `summary` — unbounded `TEXT` prose
+    on three tables each — which are now declared open. **Keep-as-is
+    decision:** the residual is now empty, and that is the intended state, not a
+    disabled check. A name shared by three or more non-nullable `String` columns
+    that is in neither table still surfaces, verified by injecting a synthetic
+    `dispute_reason` column into three tables; declaring it open clears it.
+- **Resolved placeholder — `SIMULATION_MODIFIERS["short_retention"]`.** The pack
+  carried `retention_overrides = {"policy_id": "=retention_days"}`: the literal
+  string `"policy_id"` used as a key, where an override is looked up by real
+  policy id. The key matched no policy, so every lookup fell through to the
+  baseline and the `partition_cost_trim` scenario reported `changed_count: 0`
+  while advertising "partitions older than 30 days flip keep -> drop". Fixed by
+  **not** renaming the key. **Keep-as-is decision:** a rename to
+  `audit_log_monthly` would have fixed only one of the two real policies, still
+  contradicting the pack's own label ("Cuts *every* retention window to 30
+  days"), and would need hand-editing again the next time a policy is added to
+  `PARTITION_POLICIES` — the same silent-drift failure, one level up. Instead:
+  - `RETENTION_OVERRIDE_WILDCARD = "*"` makes "every policy" expressible.
+    `short_retention` is now `{"*": "=retention_days"}`.
+  - Precedence is **specific id > wildcard > the policy's own baseline**, applied
+    by one shared helper `_retention_override_for` used by *both*
+    `resolve_modifier` and `simulate_retention_whatif`, so the two cannot drift.
+    A wildcard that meant "every policy" in the expander but "nothing" in the
+    simulator would reintroduce the very no-op being fixed.
+  - An `=formula` override is evaluated with `base` bound to *that policy's* own
+    `retention_days`, so `=base` stays a per-policy no-op and
+    `=retention_days` applies one absolute window everywhere. A formula passed
+    straight to `simulate_retention_whatif` (no pack to supply `params`) raises
+    naming the remedy, instead of a bare `int()` failure.
+  - `unmatched_retention_overrides(overrides, policies)` reports override keys
+    that reach no policy. An unmatched key is **dropped silently** at lookup
+    time, which is precisely why a placeholder key is indistinguishable from a
+    working one at the call site; the reporter makes the config checkable
+    against the live policy set instead of trusted. **Keep-as-is decision:** it
+    reports and does not raise — an advisory what-if tool that hard-fails on a
+    stale key is a tool nobody runs.
+  - Fully backward compatible: an explicit `{"audit_log_monthly": N}` map
+    behaves exactly as before, and `kinds == ["risk","retention"]` plus every
+    other pinned `simulation` catalog key is unchanged.
+- **Keep-as-is fact:** `app/models.py` deliberately does not import
+  `app.services.*`, so any cross-module judgment (a sensitivity class, an enum
+  vocabulary) that two services would otherwise share is **declared twice** — the
+  audit-log gate ops live in `services/audit_log.py` as `AUDIT_GATE_OPS` rather
+  than being imported from `model_versioning`. A duplicate table can drift; a
+  cycle cannot be repaired without breaking the import graph, so the table is
+  the cheaper side of that trade.
+- Code map: leaf-level growth on `models` (new `metadata` internal node),
+  `model_versioning`, `simulation_engine`, `explainability`, `optimistic_locking`,
+  `rule_engine`, `regional_policy`, `high_throughput_pipeline`,
+  `protobuf_transaction_spec`, `routers.topics`, `routers.audit`,
+  `services.audit_log`, `schemas.schemas_audit`; regenerated via
+  `python3 scripts/build_code_map.py` to 498 leaves / 54 internal nodes
+  (was 428/53), with **zero leaves lost** (verified by diffing parsed leaf
+  paths, not by eye). Revision stays `r5` (no new layer / top-level domain).
+- Tests: unchanged by policy — no new test files. The suite was 700 passing
+  before and after every step of this pass; the new surfaces were verified with
+  scripted harnesses in `/tmp/opencode/` instead.
+
 ## Open blockages
 - None.
