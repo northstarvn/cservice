@@ -1181,6 +1181,47 @@ All 43 ranked function groups are now expanded. No further thin group remains;
 the next work is a decision about what to do with the uncommitted changes — commit
 them, or start a fresh ranking over the grown tree.
 
+### Thin-group expansion, final pass (uncommitted)
+- `app/models.py` 364 → **2554 LOC**: config-driven metadata layer (sensitivity
+  classes, enum field specs with aliases, table lifecycle, entity registry) +
+  pure helpers (`sensitivity_of`, `model_to_dict`, `project_row`, `enum_field_report`,
+  `check_constraint_coverage`, `referential_integrity_gaps`, `build_entity_registry`).
+  No DDL, no migration. Decorator auto-registers every ORM class in the module.
+- `app/services/audit_log.py` 1842 LOC: read-side `AUDIT_VIEW_PROFILES` (3),
+  `AUDIT_INTEGRITY_GATES` (7), recompute seal verifier, `audit_integrity_report`,
+  `project_audit_entries`. `verify_entry_seal_chain` replaces naive `verify_seal_chain`
+  for real entries.
+- `app/routers/audit.py` 767 LOC: 9 new endpoints — `/audit/logs/view` (3 profiles),
+  `/audit/integrity/gates`, `/audit/pipeline/dead-letters`, `/audit/pipeline/replay`
+  (dry-run), `/audit/transactions/query` (filters/sort/view/pagination),
+  `/audit/transactions/integrity` (chain/checkpoints/signing/versions verdict),
+  `/audit/transactions/export` (jsonl/json/csv/base64, forensic/public views),
+  `?section=` on `/audit/transactions/spec` (pinned default unchanged).
+- `app/schemas/audit.py` 520 → **3222 LOC**: 14 new Pydantic contracts for the
+  above surfaces (`AuditViewReport`, `AuditGateIntegrityReport`,
+  `PipelineDeadLetterReport`, `PipelineReplayReport`, `TransactionQueryReport`,
+  `TransactionIntegrityReport`, `TransactionExportReport` + support types).
+- `app/high_throughput_pipeline.py` 780 LOC: `dead_letter_report()` enriched with
+  by-kind/by-error, evicted count, replayable ratio, drainable flag, oldest/newest
+  timestamps. `replay_dead_letters` supports `dry_run`.
+- `app/protobuf_transaction_spec.py` 1383 LOC: fixed pre-existing `query(sort=...)`
+  KeyError by synthesizing a field spec for declared-but-undescribed sort fields.
+- `/meta/ecosystem` updated: `audit_trail` routes +2, `high_velocity_audit` routes +5,
+  `features` keys +6.
+- Code map: **560 leaves** / 54 internal nodes, revision stays **r5** (leaf-level
+  additions only, zero churn).
+- **Tests**: 1814 passing (whole suite). All pinned `/meta` contracts preserved
+  (`decision_intelligence` keys, `audit_log` fields, `topic_intelligence` routes,
+  `ecosystem.features`).
+
+#### Next target
+All 12 thinnest function groups expanded. The working tree has uncommitted
+changes across 10 files (`app/models.py`, `app/services/audit_log.py`,
+`app/routers/audit.py`, `app/schemas/audit.py`, `app/high_throughput_pipeline.py`,
+`app/protobuf_transaction_spec.py`, `app/main.py`, `app/routers/topics.py`,
+`app/services/topics.py`, `app/model_versioning.py` plus earlier 7). The next
+decision is whether to commit the full expansion or re-rank and iterate.
+
 ## Open blockages
 
 - None.

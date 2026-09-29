@@ -2160,3 +2160,395 @@ def build_model_catalog() -> dict[str, Any]:
         "relationships": build_relationship_catalog(),
         "columns": build_column_catalog(),
     }
+
+
+# --- Enum field report --------------------------------------------------------
+
+
+def enum_field_id(table_name: str, column_name: str) -> str | None:
+    """The key in ``ENUM_FIELD_SPECS`` for ``table.column``, or ``None``."""
+    key = f"{table_name}.{column_name}"
+    return key if key in ENUM_FIELD_SPECS else None
+
+
+def normalise_enum_value(table_name: str, column_name: str, value: Any) -> Any:
+    """Map ``value`` through the declared aliases for this enum field.
+
+    If the field has no spec, or the value is not an alias, the original value
+    is returned. A `None` value is returned unchanged.
+    """
+    if value is None:
+        return None
+    spec = ENUM_FIELD_SPECS.get(f"{table_name}.{column_name}")
+    if spec is None:
+        return value
+    aliases = spec.get("aliases", {})
+    return aliases.get(str(value), value)
+
+
+def enum_field_report() -> dict[str, Any]:
+    """All enum-ish string columns: which are enforced and which are not.
+
+    ``enforced`` is the only boolean a downstream caller should gate on. The
+    rest is context for a human deciding whether to add a native enum (migration)
+    or to tolerate the drift.
+    """
+    enforced: list[dict[str, Any]] = []
+    unenforced: list[dict[str, Any]] = []
+    for key, spec in sorted(ENUM_FIELD_SPECS.items()):
+        table_name, column_name = key.split(".", 1)
+        table = get_table(table_name)
+        column = None if table is None else table.columns.get(column_name)
+        column_type = str(column.type) if column is not None else "unknown"
+        row = {
+            "table": table_name,
+            "column": column_name,
+            "type": column_type,
+            "enforced": bool(spec["enforced"]),
+            "enforced_by": spec.get("enforced_by"),
+            "values": list(spec["values"]),
+            "aliases": dict(spec.get("aliases", {})),
+            "note": spec.get("note", ""),
+        }
+        if spec["enforced"]:
+            enforced.append(row)
+        else:
+            unenforced.append(row)
+    return {
+        "enforced": enforced,
+        "unenforced": unenforced,
+        "enforced_count": len(enforced),
+        "unenforced_count": len(unenforced),
+        "note": (
+            "enforced columns use a native SQLAlchemy SAEnum (database constraint); "
+            "unenforced columns are VARCHAR with a declared vocabulary and aliases. "
+            "A value outside the declared set is still accepted by the database."
+        ),
+    }
+
+
+# --- Check constraint coverage ------------------------------------------------
+
+
+def _is_numeric_column(column: Any) -> bool:
+    column_type = column.type
+    return isinstance(column_type, (Integer, Float))
+
+
+def _has_nonneg_check(table: Any, column: Any) -> bool:
+    """True when the table has a named CheckConstraint on this column with >= 0."""
+    col_name = column.name
+    for constraint in table.constraints:
+        if not isinstance(constraint, CheckConstraint):
+            continue
+        sql = str(constraint.sqltext).lower()
+        if col_name in sql and (">= 0" in sql or "> 0" in sql):
+            return True
+    return False
+
+
+def check_constraint_coverage() -> dict[str, Any]:
+    """Numeric columns and whether they have a non-negative check constraint.
+
+    Float columns without a check are the ones that can silently go negative.
+    ``SIGNED_QUANTITY_COLUMNS`` are documented exceptions.
+    """
+    covered: list[dict[str, Any]] = []
+    uncovered: list[dict[str, Any]] = []
+    for table_name in all_table_names():
+        table = get_table(table_name)
+        if table is None:
+            continue
+        for column in table.columns:
+            if not _is_numeric_column(column):
+                continue
+            key = f"{table_name}.{column.name}"
+            has_check = _has_nonneg_check(table, column)
+            row = {
+                "table": table_name,
+                "column": column.name,
+                "type": str(column.type),
+                "has_nonneg_check": has_check,
+                "signed_quantity_exception": key in SIGNED_QUANTITY_COLUMNS,
+            }
+            if has_check or key in SIGNED_QUANTITY_COLUMNS:
+                covered.append(row)
+            else:
+                uncovered.append(row)
+    return {
+        "covered": covered,
+        "uncovered": uncovered,
+        "covered_count": len(covered),
+        "uncovered_count": len(uncovered),
+        "signed_quantity_exceptions": dict(SIGNED_QUANTITY_COLUMNS),
+        "note": (
+            "uncovered numeric columns have no non-negative check in the schema; "
+            "SIGNED_QUANTITY_COLUMNS are intentional exceptions (ledger deltas, etc.). "
+            "Adding a check is new DDL and therefore a migration."
+        ),
+    }
+
+
+# --- Referential integrity gaps -----------------------------------------------
+
+
+def referential_integrity_gaps() -> dict[str, Any]:
+    """Columns that look like a foreign key but carry no foreign key constraint.
+
+    Criteria: integer column, indexed, name ends in ``_id``, no ``ForeignKey``
+    attached. ``UNCONSTRAINED_REFERENCE_COLUMNS`` are documented exceptions.
+    """
+    gaps: list[dict[str, Any]] = []
+    for table_name in all_table_names():
+        table = get_table(table_name)
+        if table is None:
+            continue
+        for column in table.columns:
+            if not isinstance(column.type, Integer):
+                continue
+            if not column.index:
+                continue
+            if not str(column.name).endswith("_id"):
+                continue
+            if column.foreign_keys:
+                continue
+            key = f"{table_name}.{column.name}"
+            gaps.append(
+                {
+                    "table": table_name,
+                    "column": column.name,
+                    "type": str(column.type),
+                    "indexed": bool(column.index),
+                    "documented_exception": key in UNCONSTRAINED_REFERENCE_COLUMNS,
+                    "exception_note": UNCONSTRAINED_REFERENCE_COLUMNS.get(key, ""),
+                }
+            )
+    return {
+        "gaps": sorted(gaps, key=lambda g: (g["table"], g["column"])),
+        "gap_count": len(gaps),
+        "documented_exceptions": dict(UNCONSTRAINED_REFERENCE_COLUMNS),
+        "note": (
+            "these columns can point at rows that do not exist; adding a foreign key "
+            "would be new DDL (migration). The documented exceptions are the ones "
+            "the code already tolerates without a constraint."
+        ),
+    }
+
+
+# --- Serialization / projection -----------------------------------------------
+
+
+def _is_sensitive_for_projection(
+    sensitivity: str,
+    projection: str,
+) -> tuple[bool, str]:
+    """Whether a column of this sensitivity is affected by this projection mode.
+
+    Returns ``(affected, mode)`` where mode is one of ``omit``, ``redact``,
+    ``include``. ``projection`` is one of ``public``, ``admin``, ``internal``,
+    ``forensic``.
+    """
+    cls = SENSITIVITY_CLASSES.get(sensitivity, SENSITIVITY_CLASSES["internal"])
+    if projection == "public":
+        # Only columns marked `public` survive a public projection; everything
+        # else is at least redacted.
+        if sensitivity == "public":
+            return False, "include"
+        return True, cls.get("default_projection", "redact")
+    if projection == "admin":
+        # Admin sees everything except credentials, which are always omitted.
+        if sensitivity == "credential":
+            return True, "omit"
+        return False, "include"
+    if projection == "internal":
+        # Internal sees everything except credentials (omit) and content (redact).
+        if sensitivity == "credential":
+            return True, "omit"
+        if sensitivity == "content":
+            return True, "redact"
+        return False, "include"
+    # forensic: everything, even credentials (redacted, but present)
+    if sensitivity == "credential":
+        return True, "redact"
+    return False, "include"
+
+
+def model_to_dict(
+    instance: Any,
+    *,
+    projection: str = "internal",
+    include_relationships: bool = False,
+    skip_null: bool = False,
+) -> dict[str, Any]:
+    """Serialise an ORM instance to a dict, with sensitivity-driven projection.
+
+    ``projection`` modes:
+    * ``public``  -- only ``public`` columns; credentials/financial/content omitted or redacted
+    * ``admin``   -- everything except credentials (omitted)
+    * ``internal`` -- credentials omitted, content redacted, everything else
+    * ``forensic`` -- credentials redacted but present, everything else included
+
+    ``include_relationships`` is ``False`` by default because following
+    relationships triggers lazy loads and can easily blow up a response. When
+    ``True``, one-to-many are included as lists of their primary keys, and
+    many-to-one as the related object's primary key (or ``None``).
+    """
+    if instance is None:
+        return {}
+    table = instance.__table__
+    out: dict[str, Any] = {}
+    for column in table.columns:
+        value = getattr(instance, column.name)
+        if skip_null and value is None:
+            continue
+        if column.name.endswith(JSON_COLUMN_SUFFIX):
+            container = _json_default_container(column)
+            value = loads_json(value, container)
+        sensitivity = sensitivity_of(table.name, column.name)
+        affected, mode = _is_sensitive_for_projection(sensitivity, projection)
+        if affected:
+            if mode == "omit":
+                continue
+            if mode == "redact":
+                value = SENSITIVITY_PLACEHOLDER
+        out[column.name] = value
+    if include_relationships:
+        for rel in instance.__mapper__.relationships:
+            if rel.direction.name == "MANYTOONE":
+                related = getattr(instance, rel.key)
+                out[rel.key] = related.id if related is not None else None
+            elif rel.direction.name == "ONETOMANY":
+                related = getattr(instance, rel.key)
+                out[rel.key] = [getattr(obj, "id", None) for obj in related] if related else []
+    return out
+
+
+def project_row(
+    row: dict[str, Any],
+    table_name: str,
+    *,
+    projection: str = "internal",
+) -> dict[str, Any]:
+    """Project an already-materialised row (e.g. from a ``_json`` decode) with the same rules.
+
+    ``row`` is a plain dict of column names to values. The table name is needed
+    to look up the per-table sensitivity overrides.
+    """
+    out: dict[str, Any] = {}
+    for column_name, value in row.items():
+        sensitivity = sensitivity_of(table_name, column_name)
+        affected, mode = _is_sensitive_for_projection(sensitivity, projection)
+        if affected:
+            if mode == "omit":
+                continue
+            if mode == "redact":
+                value = SENSITIVITY_PLACEHOLDER
+        out[column_name] = value
+    return out
+
+
+def redact_row(row: dict[str, Any], table_name: str) -> dict[str, Any]:
+    """Convenience: redact everything that is not ``public`` or ``internal``."""
+    return project_row(row, table_name, projection="public")
+
+
+# --- Entity spec registry -----------------------------------------------------
+#
+# A stable, string-keyed descriptor for every ORM model in this module. The
+# keys are the class names; the values are dicts that can be used to build
+# forms, tables, validators and documentation without a database session. This
+# is *not* the same as ``build_column_catalog()``: the catalog is column-wise;
+# the registry is entity-wise and carries the judgments (lifecycle, enum
+# fields, sensitivity summary) that a UI or code generator needs.
+
+ENTITY_SPECS: dict[str, dict[str, Any]] = {}
+
+
+def register_entity_spec(cls: type) -> type:
+    """Decorator that records a spec for ``cls`` into ``ENTITY_SPECS``."""
+    name = cls.__name__
+    table = getattr(cls, "__table__", None)
+    if table is None:
+        raise TypeError(f"{name} has no __table__; not an ORM model")
+    columns: list[dict[str, Any]] = []
+    for column in table.columns:
+        sensitivity = sensitivity_of(table.name, column.name)
+        columns.append(
+            {
+                "name": column.name,
+                "type": str(column.type),
+                "nullable": bool(column.nullable),
+                "primary_key": bool(column.primary_key),
+                "indexed": bool(column.index),
+                "unique": bool(column.unique),
+                "default": _python_default(column),
+                "sensitivity": sensitivity,
+                "is_json": is_json_column(column.name),
+                "enum_field": enum_field_id(table.name, column.name),
+            }
+        )
+    lifecycle = TABLE_LIFECYCLE.get(table.name, {})
+    enum_fields = {
+        k.split(".", 1)[1]: v
+        for k, v in ENUM_FIELD_SPECS.items()
+        if k.startswith(f"{table.name}.")
+    }
+    spec = {
+        "name": name,
+        "table": table.name,
+        "columns": columns,
+        "column_count": len(columns),
+        "primary_keys": [c["name"] for c in columns if c["primary_key"]],
+        "indexed_columns": [c["name"] for c in columns if c["indexed"]],
+        "unique_columns": [c["name"] for c in columns if c["unique"]],
+        "json_columns": [c["name"] for c in columns if c["is_json"]],
+        "enum_fields": enum_fields,
+        "lifecycle": lifecycle,
+        "sensitivity_summary": {
+            level: sum(1 for c in columns if c["sensitivity"] == level)
+            for level in SENSITIVITY_CLASSES
+        },
+    }
+    ENTITY_SPECS[name] = spec
+    return cls
+
+
+# Apply the decorator to every model class defined above (import order means
+# they are already bound, so we just iterate the classes in this module).
+import sys as _sys
+_this_module = _sys.modules[__name__]
+for _name, _obj in list(vars(_this_module).items()):
+    if isinstance(_obj, type) and hasattr(_obj, "__table__") and _obj is not _this_module.Base:
+        register_entity_spec(_obj)
+
+
+def build_entity_registry() -> dict[str, Any]:
+    """The full entity registry, plus cross-cutting reports.
+
+    This is what ``/meta/entity-registry`` returns (if a router exposes it). It
+    is a single dict so a consumer can fetch everything in one call.
+    """
+    return {
+        "entities": dict(ENTITY_SPECS),
+        "entity_count": len(ENTITY_SPECS),
+        "sensitivity_classes": dict(SENSITIVITY_CLASSES),
+        "sensitivity_placeholder": SENSITIVITY_PLACEHOLDER,
+        "enum_field_report": enum_field_report(),
+        "check_constraint_coverage": check_constraint_coverage(),
+        "referential_integrity_gaps": referential_integrity_gaps(),
+        "table_lifecycle": dict(TABLE_LIFECYCLE),
+        "write_modes": list(WRITE_MODES),
+        "column_catalog": build_column_catalog(),
+        "projection_modes": ("public", "admin", "internal", "forensic"),
+        "helpers": [
+            "model_to_dict",
+            "project_row",
+            "redact_row",
+            "column_spec",
+            "sensitivity_of",
+            "sensitive_columns",
+            "normalise_enum_value",
+            "build_column_catalog",
+            "build_entity_registry",
+        ],
+    }

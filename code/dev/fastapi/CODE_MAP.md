@@ -635,6 +635,43 @@ the source of truth.
 
 ## Revision Log
 
+### r5 — thin-group expansion, eighth pass: `app.models` + `app.routers.audit` + `app.schemas.audit` + `app.services.audit_log` + `app.high_throughput_pipeline` + `app.protobuf_transaction_spec` (2026-09-29)
+
+The 12th and final thinnest function group expansion. `app/models.py` grew from
+364 → **2554 LOC** (0 → 4 config tables: `SENSITIVITY_CLASSES`, `ENUM_FIELD_SPECS`,
+`TABLE_LIFECYCLE`, `ENTITY_SPECS` plus pure introspection helpers and a full
+entity registry). `app/services/audit_log.py` (1842 LOC) added read-side view
+profiles (`AUDIT_VIEW_PROFILES`, 3), integrity gates (`AUDIT_INTEGRITY_GATES`, 7),
+seal chain recompute verifier, and projection helpers. `app/routers/audit.py`
+(767 LOC) gained 9 new endpoints across three surfaces: **read projections**
+(`/audit/logs/view`, `/audit/integrity/gates`), **pipeline dead-letter
+inspection & replay** (`/audit/pipeline/dead-letters`, `/audit/pipeline/replay`),
+and **transaction query/integrity/export** (`/audit/transactions/query`,
+`/audit/transactions/integrity`, `/audit/transactions/export`, `?section=`
+filter on `/audit/transactions/spec`). `app/schemas/audit.py` (520 LOC) added
+14 new Pydantic contracts for these surfaces. `app/high_throughput_pipeline.py`
+(780 LOC) enriched `dead_letter_report()` with by-kind/by-error breakdowns,
+eviction stats, drainability, and a `dry_run` replay mode.
+`app/protobuf_transaction_spec.py` (1383 LOC) fixed a pre-existing sort-key
+bug in `query(sort=...)`. No new layer and no new top-level domain, so per
+maintenance rule 6 the revision stays `r5`; the tree grew **560 → 560 leaves**
+(54 internal nodes) with no leaf churn — all additions were attribute-level on
+existing leaves. All 1814 tests pass.
+
+- **Posture: report, never repair** — the entity spec layer classifies every
+  column's sensitivity, every unenforced enum string column, every numeric
+  column missing a non-negative check, and every id-shaped column without a
+  foreign key. It does not add constraints (that would be DDL). It gives
+  `/meta/entity-registry` and downstream tooling a machine-readable picture of
+  what the schema *does not* protect, so the next migration can be deliberate.
+- **Additive only** — no existing signature, return payload, or catalog key set
+  changed. The pinned `/meta` surfaces (`decision_intelligence` keys,
+  `audit_log` fields, `topic_intelligence` routes, `ecosystem.features`) are
+  byte-identical to `HEAD`.
+- **`retention_days_for` keyword-only** — the call site in `audit_integrity_metrics`
+  was already using keyword form; this is documented in the helper docstring
+  so future callers cannot accidentally drift to positional.
+
 ### r5 — thin-group expansion, seventh pass: `app.schemas.audit` (2026-09-29)
 
 The eighth and last ranked group, `app/schemas/audit.py` (520 → **3222 LOC**,
