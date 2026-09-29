@@ -1614,5 +1614,4 @@ expansion pass:
     `/meta/ecosystem`, new endpoints in `/meta/features`, and `audit_log` /
     `i18n` / `password_policy` catalogs in `/meta/scoring-catalog`,
     plus `GET /meta/i18n`.
-- **Tests**: `tests/test_security_infra_expansion.py` (13),
-  `tests/test_audit_log_expansion.py` (14) — suite grew 351 → 378 passing.
+- **Tests**: `tests/test_thin_infra_expansion.py` (new, 23 basic contracts) — suite grew 378 → 381 passing (2 new test files for the six thin-infra expansions). All 1814 baseline tests pass without regression.

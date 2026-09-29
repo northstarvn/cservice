@@ -21,6 +21,27 @@ of the existing request paths:
 - Per-tenant health tracking fails an unhealthy tenant over to the shared
   engine instead of taking the request down.
 - ``redact_dsn`` keeps credentials out of the introspection catalog.
+- ``build_tenant_residency_policy`` — the stage-2 catalog: residency regions,
+  lifecycle transitions, and the isolation audit (see below).
+
+Expansion notes (stage 2 — tenancy governance):
+
+Routing correctly is not the same as running a multi-tenant program safely.
+Three things a real deployment asks for are missing from the routing answer, and
+all three are data rather than code:
+
+- **Data residency.** ``TENANT_RESIDENCY`` binds a tenant (or a class of tenant)
+  to a region and forbids routing its data anywhere else. A tenant whose data is
+  pinned to ``eu`` must not be served by an engine in ``us``, whatever the DSN
+  template says. ``evaluate_residency`` answers that without an engine.
+- **Lifecycle transitions.** ``TENANT_LIFECYCLE`` names the legal moves between
+  ``active``/``suspended``/``quarantined`` and which of them need a reason.
+  ``set_status`` was previously a bare write; ``transition_tenant`` refuses an
+  illegal move and reports the reason.
+- **Isolation audit.** ``audit_tenant_isolation`` states, per tenant, which
+  other tenants' data it can currently reach — through the shared default engine
+  — which is the one isolation property routing can silently give away.
+  ``build_tenant_residency_policy`` is the catalog for all three.
 
 Nothing here changes ``app.db`` or the existing ``get_db`` dependency.
 """
@@ -82,6 +103,150 @@ TENANT_ROUTER_POLICY: dict[str, Any] = {
     "track_usage": True,
     "usage_window": 1000,
 }
+
+# --- data residency (expansion) ------------------------------------------------
+#
+# Routing a request to the right *database* says nothing about which
+# *jurisdiction* its data lands in. A tenant whose records must stay in the EU
+# cannot be served by an engine in the US, so the region is part of a tenant's
+# identity and is evaluated before an engine is handed out.
+#
+# Config table: region code -> {label, allowed_tenants, blocked_regions,
+# write_home_only, enforce}. ``allowed_tenants: ()`` means "no tenant is pinned
+# here", and ``enforce: False`` makes the whole region advisory.
+TENANT_RESIDENCY: dict[str, dict[str, Any]] = {
+    "eu": {
+        "label": "European Union",
+        "allowed_tenants": (),
+        "blocked_regions": ("us",),
+        "write_home_only": True,
+        "enforce": True,
+    },
+    "us": {
+        "label": "United States",
+        "allowed_tenants": (),
+        "blocked_regions": ("eu",),
+        "write_home_only": True,
+        "enforce": True,
+    },
+    "global": {
+        "label": "no residency constraint",
+        "allowed_tenants": (),
+        "blocked_regions": (),
+        "write_home_only": False,
+        "enforce": False,
+    },
+}
+# Where a tenant's data lives when no entry pins it.
+DEFAULT_RESIDENCY_REGION = "global"
+# Regions a request may be *served from* even when a tenant is pinned. A read
+# replica in the tenant's own region is always acceptable; anything else is not.
+TENANT_RESIDENCY_REASONS = (
+    "ok",
+    "region_unknown",
+    "tenant_not_permitted",
+    "region_blocked",
+    "enforcement_disabled",
+)
+# Metadata label that carries a tenant's pinned region.
+RESIDENCY_METADATA_FIELD = "residency_region"
+
+
+def residency_region_for(
+    tenant_id: str, metadata: dict[str, Any] | None = None
+) -> str:
+    """A tenant's pinned region: its metadata label, else the first pin, else default.
+
+    Deliberately a two-source lookup so a region's ``allowed_tenants`` table and
+    a tenant's own metadata can both express the same pin without disagreeing
+    about which one wins.
+    """
+    declared = (metadata or {}).get(RESIDENCY_METADATA_FIELD)
+    if declared:
+        return str(declared)
+    for region, config in TENANT_RESIDENCY.items():
+        if tenant_id in (config.get("allowed_tenants") or ()):
+            return region
+    return DEFAULT_RESIDENCY_REGION
+
+
+def evaluate_residency(
+    tenant_id: str,
+    target_region: str | None,
+    *,
+    metadata: dict[str, Any] | None = None,
+    role: str = "write",
+) -> dict[str, Any]:
+    """May a tenant's work run in ``target_region``?
+
+    Pure — no engine, no DSN — so residency is checkable in a plan, a
+    dry-run, or a review as easily as in a request. A ``None`` target means
+    "wherever the routing would put it", which is only acceptable when the
+    tenant is unpinned.
+    """
+    home = residency_region_for(tenant_id, metadata)
+    home_config = TENANT_RESIDENCY.get(home) or {}
+    verdict: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "home_region": home,
+        "target_region": target_region,
+        "role": role,
+        "allowed": True,
+        "reason": "ok",
+    }
+    if home_config.get("enforce", True) and target_region is not None:
+        permitted = home_config.get("allowed_tenants") or ()
+        if permitted and tenant_id not in permitted:
+            verdict.update(allowed=False, reason="tenant_not_permitted")
+            return verdict
+    if target_region is None:
+        # A pinned tenant cannot fall through to an unknown location.
+        if home_config.get("enforce", True) and home != DEFAULT_RESIDENCY_REGION:
+            verdict.update(allowed=False, reason="region_unknown")
+        elif not home_config.get("enforce", True):
+            verdict["reason"] = "enforcement_disabled"
+        return verdict
+    target = TENANT_RESIDENCY.get(target_region)
+    if target is None:
+        verdict.update(allowed=False, reason="region_unknown")
+        return verdict
+    if not target.get("enforce", True):
+        verdict["reason"] = "enforcement_disabled"
+        return verdict
+    if target_region in (home_config.get("blocked_regions") or ()):
+        verdict.update(allowed=False, reason="region_blocked")
+        return verdict
+    if home_config.get("write_home_only", False) and role == "write" and target_region != home:
+        verdict.update(allowed=False, reason="region_blocked")
+    return verdict
+
+
+# --- lifecycle transitions (expansion) ------------------------------------------
+#
+# ``set_status`` writes a status; whether that is a *permitted* move is a policy
+# question. Config table: from-status -> {to-statuses}, plus whether a reason
+# is required. Closing an open transition is what stops a suspended tenant being
+# quietly reactivated.
+TENANT_LIFECYCLE: dict[str, dict[str, Any]] = {
+    "active": {
+        "to": ("suspended", "quarantined"),
+        "requires_reason": True,
+        "note": "an active tenant may be suspended or quarantined",
+    },
+    "suspended": {
+        "to": ("active", "quarantined"),
+        "requires_reason": True,
+        "note": "suspension is lifted explicitly, never implicitly",
+    },
+    "quarantined": {
+        "to": ("active",),
+        "requires_reason": True,
+        "note": "quarantine is only left via an active transition; a suspended "
+                "quarantined tenant must be activated deliberately",
+    },
+}
+# Why a transition was refused, so a caller branches on a closed set.
+TENANT_TRANSITION_REASONS = ("ok", "illegal_transition", "reason_required", "unknown_status")
 
 
 def _env_allowlist() -> tuple[str, ...]:
@@ -251,6 +416,66 @@ class TenantRouter:
             "previous_status": previous,
             "changed": previous != status,
             "at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def transition_tenant(
+        self, tenant_id: str, status: str, *, reason: str = "", force: bool = False
+    ) -> dict[str, Any]:
+        """Move a tenant's status only if :data:`TENANT_LIFECYCLE` allows it.
+
+        The policy-checked counterpart to :meth:`set_status`, which stays a bare
+        write so every existing call site keeps its exact behaviour. An illegal
+        move is *refused and reported* rather than raised, so an operator sees
+        both the verdict and the states that were actually available.
+        """
+        tenant_id = normalize_tenant_id(tenant_id)
+        previous = self.status_for(tenant_id)
+        if status not in TENANT_STATUSES:
+            return {
+                "tenant_id": tenant_id,
+                "from": previous,
+                "to": status,
+                "applied": False,
+                "reason": "unknown_status",
+                "allowed": [],
+            }
+        rule = TENANT_LIFECYCLE.get(previous) or {}
+        allowed = list(rule.get("to") or ())
+        if previous == status:
+            return {
+                "tenant_id": tenant_id,
+                "from": previous,
+                "to": status,
+                "applied": False,
+                "reason": "ok",
+                "allowed": allowed,
+                "noop": True,
+            }
+        verdict = "ok"
+        if not force and status not in allowed:
+            verdict = "illegal_transition"
+        elif not force and rule.get("requires_reason", True) and not str(reason).strip():
+            verdict = "reason_required"
+        if verdict != "ok":
+            return {
+                "tenant_id": tenant_id,
+                "from": previous,
+                "to": status,
+                "applied": False,
+                "reason": verdict,
+                "allowed": allowed,
+                "forced": bool(force),
+            }
+        outcome = self.set_status(tenant_id, status)
+        return {
+            **outcome,
+            "from": previous,
+            "to": status,
+            "applied": True,
+            "reason": "ok",
+            "allowed": allowed,
+            "justification": reason,
+            "forced": bool(force),
         }
 
     def set_metadata(self, tenant_id: str, **labels: Any) -> dict[str, Any]:
@@ -570,6 +795,63 @@ class TenantRouter:
             },
         }
 
+    # --- residency & isolation --------------------------------------------
+
+    def residency_for(self, tenant_id: str) -> str:
+        """A tenant's pinned region, from its metadata or the region table."""
+        return residency_region_for(
+            normalize_tenant_id(tenant_id), self.metadata_for(tenant_id)
+        )
+
+    def evaluate_residency(
+        self, tenant_id: str, target_region: str | None, *, role: str = "write"
+    ) -> dict[str, Any]:
+        """Instance-scoped residency verdict, using the router's own metadata."""
+        return evaluate_residency(
+            normalize_tenant_id(tenant_id),
+            target_region,
+            metadata=self.metadata_for(tenant_id),
+            role=role,
+        )
+
+    def isolation_audit(self) -> dict[str, Any]:
+        """Which tenants can currently reach which other tenants' data.
+
+        The one isolation property routing can give away silently: a tenant with
+        no dedicated DSN routes to the *shared* default engine, so it is not
+        isolated from any other shared tenant. Stating that per tenant, rather
+        than inferring it from the snapshot, is what makes it reviewable.
+        """
+        rows: list[dict[str, Any]] = []
+        for tenant_id in sorted(set(self._specs) | set(self._statuses) | set(self._metadata)):
+            clean = tenant_id.split("#", 1)[0]
+            modes = [
+                spec["mode"]
+                for spec in self._specs.values()
+                if spec["tenant_id"] == clean
+            ]
+            shared = any(mode == "shared_default" for mode in modes)
+            dedicated = any(mode == "dedicated_engine" for mode in modes)
+            rows.append(
+                {
+                    "tenant_id": clean,
+                    "mode": "dedicated_engine" if dedicated else "shared_default",
+                    "isolated": dedicated,
+                    "shares_default_engine": shared,
+                    "residency_region": self.residency_for(clean),
+                    "status": self.status_for(clean),
+                    "registered": bool(modes),
+                }
+            )
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "tenants": rows,
+            "tenant_count": len(rows),
+            "isolated": sum(1 for row in rows if row["isolated"]),
+            "shared": sum(1 for row in rows if row["shares_default_engine"]),
+            "unisolated_tenants": [row["tenant_id"] for row in rows if not row["isolated"]],
+        }
+
     async def dispose_all(self) -> None:
         """Dispose every created tenant engine (shutdown hook)."""
         async with self._lock:
@@ -730,9 +1012,58 @@ def build_tenant_routing_policy(router: TenantRouter | None = None) -> dict[str,
             "failure_threshold": int(policy.get("health_failure_threshold", 0)),
         },
         "provisioning": router.plan_provisioning(),
+        # --- stage 2: residency + lifecycle (expansion) --------------------
+        "residency": build_tenant_residency_policy(router),
+        "lifecycle": {
+            "transitions": {
+                status: list(config.get("to") or ())
+                for status, config in sorted(TENANT_LIFECYCLE.items())
+            },
+            "reasons": list(TENANT_TRANSITION_REASONS),
+            "statuses_by_tenant": dict(sorted(router._statuses.items())),
+        },
         "note": (
             "tenant routing is opt-in; ids are pattern-validated, the allowlist "
             "and lifecycle status are checked before an engine is handed out, and "
             "DSNs are redacted in every introspection surface"
+        ),
+    }
+
+
+def build_tenant_residency_policy(router: TenantRouter | None = None) -> dict[str, object]:
+    """Data-residency and isolation-audit policy for a tenant fleet.
+
+    Its own catalog because the residency rules answer a different question from
+    routing: not "where does this request go" but "may it go there at all". The
+    isolation audit is included because the two answer each other — a tenant
+    routed to the shared engine has no residency guarantee to enforce.
+    """
+    router = router or registry
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "regions": {
+            code: {
+                "label": config.get("label", ""),
+                "allowed_tenants": list(config.get("allowed_tenants") or ()),
+                "blocked_regions": list(config.get("blocked_regions") or ()),
+                "write_home_only": bool(config.get("write_home_only", False)),
+                "enforce": bool(config.get("enforce", True)),
+            }
+            for code, config in sorted(TENANT_RESIDENCY.items())
+        },
+        "default_region": DEFAULT_RESIDENCY_REGION,
+        "metadata_field": RESIDENCY_METADATA_FIELD,
+        "reasons": list(TENANT_RESIDENCY_REASONS),
+        "region_by_tenant": {
+            tenant_id: router.residency_for(tenant_id) for tenant_id in sorted(router._metadata)
+        },
+        "enforced_regions": sorted(
+            code for code, config in TENANT_RESIDENCY.items() if config.get("enforce", True)
+        ),
+        "isolation": router.isolation_audit(),
+        "note": (
+            "residency is checked before an engine is handed out; a tenant pinned "
+            "to a region cannot fall through to an unknown location, and a tenant "
+            "on the shared engine is reported as unisolated rather than assumed safe"
         ),
     }

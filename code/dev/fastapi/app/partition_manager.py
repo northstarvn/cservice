@@ -29,6 +29,22 @@ Expansion notes (additive):
 - Legal hold. A partition under hold is never dropped, however old it is.
 - Reconciliation. ``parse_partition_rows`` / :meth:`adopt_partitions` rehydrate
   the in-process registry from ``pg_class`` after a restart.
+
+Expansion notes (tiered lifecycle):
+
+- Named retention tiers. ``PARTITION_RETENTION_TIERS`` gives every volume the
+  same three-stage shape — attached, then detached+archived, then dropped — with
+  the numbers in one table instead of per policy.
+- Guard bands. ``PARTITION_GUARD_BANDS`` pins the newest N periods per interval
+  so a misconfigured retention (or a clock jump) cannot delete the partition
+  currently being written to.
+- Batched, reversible destruction. ``PARTITION_DROP_POLICY`` caps how much a
+  single cycle may archive or drop, so a bad cycle is a reviewable event rather
+  than an unrecoverable one. :meth:`PartitionManager.plan_retirement` is the
+  pure preview; :meth:`PartitionManager.retire_expired` is the executor.
+- Inventory findings. ``inventory_findings`` compares a live ``pg_class``
+  inventory against the policy table and names the gaps: a missing current
+  partition, an orphan nobody manages, an archive past its drop age.
 """
 from __future__ import annotations
 
@@ -221,12 +237,16 @@ def build_drop_sql(partition: str) -> str:
 
 
 # Policies: which volumes are partitioned, how often, and how long to keep.
+# ``retention_tier`` is an optional annotation on top of ``retention_days``: it
+# names a lifecycle in ``PARTITION_RETENTION_TIERS`` instead of carrying its own
+# archive/drop ages, so tuning the shape of a lifecycle is a data change.
 PARTITION_POLICIES: list[dict[str, Any]] = [
     {
         "policy_id": "audit_log_monthly",
         "table": "audit_log_entries",
         "interval": "monthly",
         "retention_days": 90,
+        "retention_tier": "warm",
         "enabled": True,
         "note": "immutable audit trail — keep 90 days hot, drop the rest",
     },
@@ -235,10 +255,78 @@ PARTITION_POLICIES: list[dict[str, Any]] = [
         "table": "security_events",
         "interval": "monthly",
         "retention_days": 180,
+        "retention_tier": "cold",
         "enabled": True,
         "note": "zero-trust security signals — keep for forensics, then drop",
     },
 ]
+
+# --- tiered lifecycle (expansion) ---------------------------------------------
+#
+# Almost every append-only volume has the same three stages: recent periods stay
+# attached and serving reads, older ones are detached and renamed out of the way,
+# and the oldest are finally dropped. Naming that shape once means an operator
+# changes a lifecycle in one place and every policy bound to it moves together.
+#
+# Recognised keys per tier:
+#
+# - ``archive_after_days``  days after the period ends before it is detached and
+#   archived. ``None`` keeps the period attached until it is dropped.
+# - ``drop_after_days``     days after the period ends before it is dropped.
+#   ``None`` inherits the policy's own ``retention_days``, so a tier never has
+#   to restate a number the policy already carries.
+# - ``drop_enabled``        ``False`` makes the tier archive-only: the worker
+#   will never drop a partition bound to it.
+PARTITION_RETENTION_TIERS: dict[str, dict[str, Any]] = {
+    "hot": {
+        "description": "stay attached until the policy retention lapses, then drop",
+        "archive_after_days": None,
+        "drop_after_days": None,
+        "drop_enabled": True,
+    },
+    "warm": {
+        "description": "detached and archived after a hot window, dropped at the tier age",
+        "archive_after_days": 30,
+        "drop_after_days": 180,
+        "drop_enabled": True,
+    },
+    "cold": {
+        "description": "archived almost immediately, kept a long time for forensics",
+        "archive_after_days": 1,
+        "drop_after_days": 365,
+        "drop_enabled": True,
+    },
+    "retain_only": {
+        "description": "archived and never dropped by the worker; a hold break is the only exit",
+        "archive_after_days": 30,
+        "drop_after_days": None,
+        "drop_enabled": False,
+    },
+}
+# Used when a policy names no tier, so ``retention_days`` alone keeps its exact
+# historical meaning.
+DEFAULT_RETENTION_TIER = "hot"
+
+# Guard bands: the newest N periods per interval are never retired, whatever
+# their age. "The last three months" is a property of the calendar, not of one
+# volume, so the band is keyed by interval and applies to every policy on it.
+PARTITION_GUARD_BANDS: dict[str, dict[str, Any]] = {
+    "daily": {"retain_periods": 7},
+    "weekly": {"retain_periods": 4},
+    "monthly": {"retain_periods": 3},
+}
+
+# Blast-radius control for the destructive pass. A cycle that would delete a
+# thousand partitions should be a cycle an operator saw coming, so each stage is
+# capped independently and archiving is a separate, reversible step from
+# dropping.
+PARTITION_DROP_POLICY: dict[str, Any] = {
+    "max_archives_per_cycle": 25,
+    "max_drops_per_cycle": 25,
+    "archive_enabled": True,
+    "drop_enabled": True,
+    "guard_enabled": True,
+}
 
 
 def build_partition_policy(
@@ -249,6 +337,7 @@ def build_partition_policy(
     retention_days: int = 90,
     enabled: bool = True,
     note: str = "",
+    retention_tier: str | None = None,
 ) -> dict[str, Any]:
     """Build a validated policy row.
 
@@ -262,7 +351,7 @@ def build_partition_policy(
     days = int(retention_days)
     if days < 0:
         raise ValueError(f"retention_days must be >= 0: {retention_days}")
-    return {
+    policy = {
         "policy_id": str(policy_id),
         "table": str(table),
         "interval": str(interval),
@@ -270,6 +359,21 @@ def build_partition_policy(
         "enabled": bool(enabled),
         "note": note,
     }
+    # Only added when asked for, so the historical field set is unchanged.
+    if retention_tier is not None:
+        policy["retention_tier"] = validate_retention_tier(retention_tier)
+    return policy
+
+
+def validate_retention_tier(name: Any) -> str:
+    """Tier names are data; a typo must fail loudly rather than fall back."""
+    candidate = str(name)
+    if candidate not in PARTITION_RETENTION_TIERS:
+        raise ValueError(
+            f"unknown partition retention tier: {candidate} "
+            f"(known: {', '.join(sorted(PARTITION_RETENTION_TIERS))})"
+        )
+    return candidate
 
 
 def validate_policies(policies: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -295,7 +399,84 @@ def validate_policies(policies: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 f"retention_days must be >= 0: {policy['retention_days']} "
                 f"(policy {policy['policy_id']})"
             )
+        if policy.get("retention_tier") is not None:
+            try:
+                validate_retention_tier(policy["retention_tier"])
+            except ValueError as exc:
+                raise ValueError(f"{exc} (policy {policy['policy_id']})") from exc
     return [dict(policy) for policy in policies or []]
+
+
+# --- tiered lifecycle helpers (expansion) ------------------------------------
+
+
+def retention_tier(policy: dict[str, Any]) -> dict[str, Any]:
+    """A policy's effective lifecycle, resolved from its named tier.
+
+    Pure, so the executor and the preview can never disagree about what a tier
+    means. A policy that names no tier resolves to ``hot``, which restates the
+    pre-existing behaviour exactly: stay attached, drop when ``retention_days``
+    lapses.
+    """
+    name = validate_retention_tier(policy.get("retention_tier") or DEFAULT_RETENTION_TIER)
+    tier = PARTITION_RETENTION_TIERS[name]
+    policy_days = int(policy.get("retention_days", 90))
+    archive_after = tier.get("archive_after_days")
+    tier_drop = tier.get("drop_after_days")
+    return {
+        "tier": name,
+        "description": tier.get("description", ""),
+        "archive_after_days": None if archive_after is None else int(archive_after),
+        "drop_after_days": policy_days if tier_drop is None else int(tier_drop),
+        "drop_enabled": bool(tier.get("drop_enabled", True)),
+        "policy_retention_days": policy_days,
+        "inherits_policy_retention": tier_drop is None,
+    }
+
+
+def guard_band(interval: str) -> int:
+    """Newest periods of ``interval`` that retirement must leave alone."""
+    band = PARTITION_GUARD_BANDS.get(str(interval)) or {}
+    return max(0, int(band.get("retain_periods", 0) or 0))
+
+
+def batch_rows(
+    rows: list[dict[str, Any]], limit: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split ``rows`` into the batch a cycle may act on and what it defers.
+
+    The oldest partition is retired first — a partition that has been eligible
+    longest is the one whose marginal value is lowest — and a ``limit`` of zero
+    or less means "no cap", which is how an operator opts out of batching.
+    """
+    ordered = sorted(rows, key=lambda row: (row.get("age_days", 0.0), row["partition"]))
+    if limit and limit > 0:
+        return ordered[:limit], ordered[limit:]
+    return ordered, []
+
+
+def guarded_keys(policy: dict[str, Any], keys: Any) -> set[str]:
+    """Which of ``keys`` the guard band protects, newest first.
+
+    The band is compared on the *end* of each period rather than on the key
+    text, so ``2026-9`` and ``2026-10`` order correctly for every interval.
+    """
+    if not PARTITION_DROP_POLICY.get("guard_enabled", True):
+        return set()
+    band = guard_band(policy.get("interval", ""))
+    if band <= 0:
+        return set()
+    interval = policy["interval"]
+    ordered = sorted(keys, key=lambda key: period_end(interval, key), reverse=True)
+    return set(ordered[:band])
+
+
+def period_age_days(interval: str, key: str, moment: datetime | None = None) -> float:
+    """Days between the end of a period and ``moment`` (negative while open)."""
+    reference = moment or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return round((reference - period_end(interval, key)).total_seconds() / 86400.0, 6)
 
 
 class PartitionManager:
@@ -306,6 +487,7 @@ class PartitionManager:
         self._active: dict[str, dict[str, Any]] = {}
         self._legal_holds: set[str] = set()
         self._last_plan: dict[str, Any] | None = None
+        self._last_retirement: dict[str, Any] | None = None
 
     def policies(self) -> list[dict[str, Any]]:
         return [dict(p) for p in self._policies]
@@ -410,6 +592,95 @@ class PartitionManager:
 
     def last_plan(self) -> dict[str, Any] | None:
         return self._last_plan
+
+    # --- tiered retirement --------------------------------------------------
+
+    def _tier_rows(
+        self, policy: dict[str, Any], record: dict[str, Any], moment: datetime
+    ) -> dict[str, Any]:
+        """One active partition resolved against its tier's ages."""
+        tier = retention_tier(policy)
+        age = period_age_days(policy["interval"], record["key"], moment)
+        archive_after = tier["archive_after_days"]
+        drop_after = tier["drop_after_days"]
+        return {
+            "policy_id": policy["policy_id"],
+            "partition": partition_name(record["table"], record["key"]),
+            "table": record["table"],
+            "key": record["key"],
+            "tier": tier["tier"],
+            "age_days": age,
+            "archive_due": archive_after is not None and age >= archive_after,
+            "drop_due": tier["drop_enabled"] and age >= drop_after,
+        }
+
+    def plan_retirement(self, moment: datetime | None = None) -> dict[str, Any]:
+        """What the *tiered* pass would archive, drop, defer and protect.
+
+        :meth:`plan_lifecycle` is the historical plan and is unchanged. This one
+        layers the three things a destructive pass needs on top of it: the
+        named tier's archive stage, the guard band that protects the newest
+        periods, and the per-cycle batch cap. Like its predecessor it is pure —
+        a review of a retirement is the only safe way to approve one.
+        """
+        reference = moment or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        archive: list[dict[str, Any]] = []
+        drop: list[dict[str, Any]] = []
+        held: list[dict[str, Any]] = []
+        guarded: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        retained: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
+        for pname, record in sorted(self._active.items()):
+            policy = self.policy(record["policy_id"])
+            if policy is None or not policy.get("enabled", True):
+                skipped.append({"partition": pname, "reason": "policy_unavailable_or_disabled"})
+                continue
+            rows.append(self._tier_rows(policy, record, reference))
+        # The guard band is per policy, so it is resolved per policy over the
+        # rows that policy actually owns.
+        for policy in self._policies:
+            owned = [row for row in rows if row["policy_id"] == policy["policy_id"]]
+            protected = guarded_keys(policy, [row["key"] for row in owned])
+            for row in owned:
+                if row["drop_due"] and row["key"] in protected:
+                    guarded.append({**row, "reason": "guard_band"})
+                    continue
+                if row["drop_due"]:
+                    drop.append(row)
+                elif row["archive_due"]:
+                    archive.append(row)
+                elif not retention_tier(policy)["drop_enabled"]:
+                    retained.append({**row, "reason": "tier_disables_drop"})
+        for row in rows:
+            if row["partition"] in self._legal_holds:
+                held.append({**row, "reason": "legal_hold"})
+
+        archive_cap = int(PARTITION_DROP_POLICY.get("max_archives_per_cycle", 0) or 0)
+        drop_cap = int(PARTITION_DROP_POLICY.get("max_drops_per_cycle", 0) or 0)
+        archive_batch, archive_deferred = batch_rows(archive, archive_cap)
+        drop_batch, drop_deferred = batch_rows(drop, drop_cap)
+        return {
+            "reference": reference,
+            "tiers": sorted({row["tier"] for row in rows}),
+            "archive": archive_batch,
+            "drop": drop_batch,
+            "held": held,
+            "guarded": guarded,
+            "retained": retained,
+            "skipped": skipped,
+            "archive_count": len(archive_batch),
+            "drop_count": len(drop_batch),
+            "deferred_archive_count": len(archive_deferred),
+            "deferred_drop_count": len(drop_deferred),
+            "held_count": len(held),
+            "guarded_count": len(guarded),
+        }
+
+    def last_retirement(self) -> dict[str, Any] | None:
+        return self._last_retirement
 
     # --- reconciliation -----------------------------------------------------
 
@@ -557,6 +828,77 @@ class PartitionManager:
                 )
         return dropped
 
+    async def retire_expired(
+        self,
+        engine,
+        moment: datetime | None = None,
+        *,
+        honor_holds: bool = True,
+        archive: bool | None = None,
+        drop: bool | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Execute the tiered plan: detach+archive what is due, drop what is due.
+
+        Distinct from :meth:`run_cycle` on purpose. A cycle *creates* the current
+        period and clears the *historical* tail under one retention number; a
+        retirement walks the named tier's stages and is separately gated, so an
+        operator can archive without ever dropping, or dry-run either.
+
+        Both stages are batched by ``PARTITION_DROP_POLICY`` and the guard band
+        always wins, so the newest periods survive even with ``retention_days``
+        mis-set. With ``dry_run=True`` no statement is issued.
+        """
+        do_archive = (
+            bool(PARTITION_DROP_POLICY.get("archive_enabled", True))
+            if archive is None
+            else bool(archive)
+        )
+        do_drop = (
+            bool(PARTITION_DROP_POLICY.get("drop_enabled", True))
+            if drop is None
+            else bool(drop)
+        )
+        plan = self.plan_retirement(moment)
+        # A held partition is removed from both stages, which is what makes a
+        # hold outrank a tier.
+        held_names = {row["partition"] for row in plan["held"]}
+        if honor_holds:
+            archive_rows = [row for row in plan["archive"] if row["partition"] not in held_names]
+        else:
+            archive_rows = list(plan["archive"])
+        drop_rows = [row for row in plan["drop"] if not (honor_holds and row["partition"] in held_names)]
+
+        archived: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        for row in archive_rows if do_archive else []:
+            if not dry_run:
+                await self.archive_partition(engine, row["table"], row["key"])
+            archived.append({**row, "archived": True, "dry_run": dry_run})
+        for row in drop_rows if do_drop else []:
+            if not dry_run:
+                async with engine.begin() as conn:
+                    await conn.execute(text(build_drop_sql(row["partition"])))
+                self._active.pop(row["partition"], None)
+            dropped.append({**row, "dropped": True, "dry_run": dry_run})
+        result = {
+            "archived": archived,
+            "dropped": dropped,
+            "held": plan["held"],
+            "guarded": plan["guarded"],
+            "retained": plan["retained"],
+            "skipped": plan["skipped"],
+            "deferred_archives": plan["deferred_archive_count"],
+            "deferred_drops": plan["deferred_drop_count"],
+            "archive_stage": do_archive,
+            "drop_stage": do_drop,
+            "honor_holds": honor_holds,
+            "dry_run": dry_run,
+        }
+        if not dry_run:
+            self._last_retirement = result
+        return result
+
     def list_partitions(self) -> list[dict[str, Any]]:
         return [
             {
@@ -680,6 +1022,121 @@ def build_partition_manager_catalog(manager: PartitionManager | None = None) -> 
             "drop_count": manager.plan_lifecycle()["drop_count"],
             "held_count": manager.plan_lifecycle()["held_count"],
         },
+    }
+
+
+def inventory_findings(
+    records: Any, policies: list[dict[str, Any]] | None = None, *, moment: datetime | None = None
+) -> dict[str, Any]:
+    """Compare a live partition inventory against the policy table.
+
+    The reconciliation gap, stated as findings rather than as a guess: a
+    partition the manager believes it created but the database does not have, a
+    partition in the database that no policy manages, and an archive that has
+    outlived even its tier. Pure, so the same answer is reachable from a
+    dry-run, a report and a test.
+    """
+    reference = moment or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    table = [dict(p) for p in (PARTITION_POLICIES if policies is None else policies)]
+    by_table = {policy["table"]: policy for policy in table}
+    rows = list(records or [])
+    # Accept either a live ``pg_class`` result or the output of
+    # ``parse_partition_rows``, which is already normalised.
+    already_parsed = bool(rows) and isinstance(rows[0], dict) and "archived" in rows[0]
+    parsed = [dict(row) for row in rows] if already_parsed else parse_partition_rows(rows)
+
+    missing_current: list[dict[str, Any]] = []
+    for policy in table:
+        if not policy.get("enabled", True):
+            continue
+        key = period_key(policy["interval"], reference)
+        pname = partition_name(policy["table"], key)
+        if not any(row["partition"] == pname for row in parsed):
+            missing_current.append(
+                {
+                    "policy_id": policy["policy_id"],
+                    "partition": pname,
+                    "interval": policy["interval"],
+                    "reason": "current_period_absent",
+                }
+            )
+
+    orphans = [
+        {"partition": row["partition"], "table": row["table"], "reason": "no_matching_policy"}
+        for row in parsed
+        if row["table"] not in by_table
+    ]
+    stale_archives: list[dict[str, Any]] = []
+    for row in parsed:
+        if not row["archived"] or row["table"] not in by_table:
+            continue
+        policy = by_table[row["table"]]
+        tier = retention_tier(policy)
+        age = period_age_days(policy["interval"], row["key"], reference)
+        if tier["drop_enabled"] and age >= tier["drop_after_days"]:
+            stale_archives.append(
+                {
+                    "partition": row["partition"],
+                    "policy_id": policy["policy_id"],
+                    "age_days": age,
+                    "drop_after_days": tier["drop_after_days"],
+                    "reason": "archived_past_drop_age",
+                }
+            )
+    findings = missing_current + orphans + stale_archives
+    return {
+        "generated_at": reference.isoformat(),
+        "reference": reference,
+        "policies": len(table),
+        "partitions": len(parsed),
+        "archived": sum(1 for row in parsed if row["archived"]),
+        "missing_current": missing_current,
+        "orphans": orphans,
+        "stale_archives": stale_archives,
+        "findings": findings,
+        "finding_count": len(findings),
+        "healthy": not findings,
+    }
+
+
+def build_partition_lifecycle_policy(manager: PartitionManager | None = None) -> dict[str, object]:
+    """The tiered lifecycle that governs :meth:`PartitionManager.retire_expired`.
+
+    Kept out of :func:`build_partition_manager_catalog` because that catalog's
+    key set is a pinned contract; this is the surface for the tier table, the
+    guard bands, the batch caps and the inventory findings.
+    """
+    manager = manager or get_default_manager()
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tiers": {
+            name: dict(config) for name, config in sorted(PARTITION_RETENTION_TIERS.items())
+        },
+        "default_tier": DEFAULT_RETENTION_TIER,
+        "resolved": {
+            policy["policy_id"]: retention_tier(policy) for policy in manager.policies()
+        },
+        "guard_bands": {
+            interval: int(band.get("retain_periods", 0) or 0)
+            for interval, band in sorted(PARTITION_GUARD_BANDS.items())
+        },
+        "drop_policy": dict(PARTITION_DROP_POLICY),
+        "age_days": {
+            policy["policy_id"]: {
+                record["key"]: period_age_days(policy["interval"], record["key"])
+                for record in manager.list_partitions()
+                if record["policy_id"] == policy["policy_id"]
+            }
+            for policy in manager.policies()
+        },
+        "last_retirement": manager.last_retirement(),
+        "note": (
+            "tiers name a lifecycle (attached -> archived -> dropped) so the shape "
+            "is one data change; the guard band always outranks a tier, and both "
+            "stages are batched by PARTITION_DROP_POLICY"
+        ),
     }
 
 

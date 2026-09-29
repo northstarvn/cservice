@@ -27,6 +27,23 @@ Surfaces:
 - ``sign_multi`` / ``verify_multi`` — N-of-M co-signature for workflows that
   need more than one authority.
 - ``signer_self_test`` / ``build_signer_health`` — round-trip + tamper probes.
+
+Expansion notes (key governance):
+
+Rotation is currently a two-step data change with no guard on the *result*:
+nothing checks that a newly activated key is actually stronger than the one it
+replaces, that a retiring key has passed its overlap window, or that a key
+scheduled for rotation was rotated at all. The governance layer adds:
+
+- ``KEY_STRENGTH_RANKS`` / ``rank_key`` — a total order over algorithms, so
+  "downgrade" is a fact rather than an opinion.
+- ``KEY_ROTATION_SCHEDULE`` — per-key ``rotate_after_days`` and
+  ``overlap_days``; ``plan_key_rotation`` is a pure overdue/upcoming report.
+- ``KEY_RETIREMENT_RULES`` — what must hold before a key may be retired
+  (overlap elapsed, not active, envelopes still outstanding).
+- ``can_retire_key`` / ``retire_key_guarded`` — the enforcement behind those
+  rules, so a rotation cannot quietly orphan un-verifiable envelopes.
+- ``build_signer_governance`` — the catalog for all of it.
 """
 from __future__ import annotations
 
@@ -82,6 +99,222 @@ SIGNATURE_POLICY_DEFAULTS: dict[str, Any] = {
 }
 
 SIGNATURE_KEY_STATUSES = ("active", "previous", "retired")
+
+# --- key governance (expansion) -------------------------------------------------
+#
+# A ring tells you which keys verify. It does not tell you whether the *set* of
+# keys is sound, and a rotation that nobody checks is indistinguishable from no
+# rotation at all. These tables make the rotation policy data.
+
+# Total order over signature strengths. Higher is stronger, so a downgrade is a
+# comparison rather than a judgement call. Unlisted algorithms rank 0 — a
+# backend that registers a new algorithm is not silently treated as strongest.
+KEY_STRENGTH_RANKS: dict[str, int] = {
+    "HSM-MOCK": 0,
+    "HSM-HS256": 1,
+    "HSM-ED25519": 2,
+}
+
+# Config table: key id -> {rotate_after_days, overlap_days, note}. A key absent
+# from the table is never scheduled for rotation, which is the right default for
+# a deployment that has not adopted rotation yet.
+KEY_ROTATION_SCHEDULE: dict[str, dict[str, Any]] = {
+    "cservice-hsm-key-001": {
+        "rotate_after_days": 90,
+        "overlap_days": 14,
+        "note": "shipped default key; rotate on a 90-day cadence with a 14-day overlap",
+    },
+}
+
+# What must hold before a key may be retired. ``require_overlap_elapsed`` means
+# the key must already have been superseded for at least its overlap window, so
+# an envelope signed just before a cutover still verifies.
+KEY_RETIREMENT_RULES: dict[str, Any] = {
+    "require_overlap_elapsed": True,
+    "require_not_active": True,
+    "allow_retiring_unknown_keys": True,
+}
+# Why a retirement was refused; a closed set so a caller branches exhaustively.
+RETIREMENT_REASONS = (
+    "ok",
+    "unknown_key",
+    "still_active",
+    "overlap_not_elapsed",
+    "refused_by_policy",
+)
+
+
+def rank_key(algorithm: str) -> int:
+    """Strength rank of an algorithm (higher is stronger; unlisted is 0)."""
+    return int(KEY_STRENGTH_RANKS.get(str(algorithm), 0))
+
+
+def key_overlap_days(key_id: str) -> int:
+    """Days a superseded key must stay verifiable, from its rotation schedule."""
+    return int((KEY_ROTATION_SCHEDULE.get(str(key_id)) or {}).get("overlap_days", 0) or 0)
+
+
+def key_age_days(key_id: str, now: datetime | None = None) -> float | None:
+    """Days since a key entered the ring, or ``None`` if it is not in the ring.
+
+    ``age`` rather than ``created_at`` because a key imported with its original
+    ``created_at`` is exactly the key whose rotation is most overdue.
+    """
+    key = SIGNER_KEY_RING.get(key_id)
+    if key is None:
+        return None
+    created = _parse_ts(key.created_at)
+    if created is None:
+        return None
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return round((moment - created).total_seconds() / 86400.0, 3)
+
+
+def plan_key_rotation(now: datetime | None = None) -> dict[str, Any]:
+    """Which scheduled keys are overdue, due soon, or fine — with no mutation.
+
+    Pure, so a rotation dashboard, a pre-flight check and a test all reach the
+    same verdict. ``overdue_by_days`` is negative while a key is still inside
+    its window, so the sign answers "before or after" without a comparison.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    rows: list[dict[str, Any]] = []
+    for key in SIGNER_KEY_RING.catalog()["keys"]:
+        schedule = KEY_ROTATION_SCHEDULE.get(key["key_id"]) or {}
+        rotate_after = schedule.get("rotate_after_days")
+        created = _parse_ts(key["created_at"]) if key["created_at"] else None
+        age = round((moment - created).total_seconds() / 86400.0, 3) if created else None
+        overdue_by = None if rotate_after is None or age is None else round(age - float(rotate_after), 3)
+        if overdue_by is None:
+            verdict = "unscheduled"
+        elif overdue_by > 0:
+            verdict = "overdue"
+        elif overdue_by > -7:
+            verdict = "due_soon"
+        else:
+            verdict = "ok"
+        rows.append(
+            {
+                "key_id": key["key_id"],
+                "status": key["status"],
+                "algorithm": key["algorithm"],
+                "fingerprint": key["fingerprint"],
+                "age_days": age,
+                "rotate_after_days": rotate_after,
+                "overdue_by_days": overdue_by,
+                "verdict": verdict,
+            }
+        )
+    return {
+        "generated_at": moment.isoformat(),
+        "schedule": {kid: dict(cfg) for kid, cfg in sorted(KEY_ROTATION_SCHEDULE.items())},
+        "keys": rows,
+        "overdue": [row["key_id"] for row in rows if row["verdict"] == "overdue"],
+        "due_soon": [row["key_id"] for row in rows if row["verdict"] == "due_soon"],
+        "rotatable": bool(SIGNER_KEY_RING.previous_key_ids()),
+    }
+
+
+def can_retire_key(key_id: str, now: datetime | None = None) -> dict[str, Any]:
+    """Whether a key may be retired, and which rule says so.
+
+    Pure and advisory. :meth:`SigningKeyRing.retire` keeps its historical
+    behaviour (it only refuses the active key); this is the stricter check an
+    operator runs *before* deciding to retire one.
+    """
+    key = SIGNER_KEY_RING.get(key_id)
+    if key is None:
+        return {
+            "key_id": key_id,
+            "retirable": bool(KEY_RETIREMENT_RULES.get("allow_retiring_unknown_keys", True)),
+            "reason": "ok" if KEY_RETIREMENT_RULES.get("allow_retiring_unknown_keys", True) else "unknown_key",
+        }
+    if KEY_RETIREMENT_RULES.get("require_not_active", True) and key.status == "active":
+        return {"key_id": key_id, "retirable": False, "reason": "still_active",
+                "status": key.status}
+    if KEY_RETIREMENT_RULES.get("require_overlap_elapsed", True):
+        overlap = key_overlap_days(key_id)
+        if overlap > 0 and key.status == "previous":
+            activated = _parse_ts(SIGNER_KEY_RING.active().created_at) if SIGNER_KEY_RING.active() else None
+            superseded_at = _parse_ts(key.created_at)
+            moment = now or datetime.now(timezone.utc)
+            # The overlap runs from the *active* key's creation, which is the
+            # instant the previous key stopped being the signing key.
+            started = activated or superseded_at
+            if started is not None:
+                if moment.tzinfo is None:
+                    moment = moment.replace(tzinfo=timezone.utc)
+                elapsed = (moment - started).total_seconds() / 86400.0
+                if elapsed < overlap:
+                    return {
+                        "key_id": key_id,
+                        "retirable": False,
+                        "reason": "overlap_not_elapsed",
+                        "overlap_days": overlap,
+                        "elapsed_days": round(elapsed, 3),
+                        "remaining_days": round(overlap - elapsed, 3),
+                    }
+    return {"key_id": key_id, "retirable": True, "reason": "ok", "status": key.status}
+
+
+def build_signer_governance(now: datetime | None = None) -> dict[str, object]:
+    """Rotation and retirement governance for the key ring.
+
+    Kept out of :func:`build_hsm_signer_catalog` because that catalog's key set
+    is a pinned contract.
+    """
+    ring = SIGNER_KEY_RING.catalog()
+    rotation = plan_key_rotation(now)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "strength_ranks": dict(sorted(KEY_STRENGTH_RANKS.items())),
+        "active_rank": rank_key(ring["keys"][0]["algorithm"]) if ring["keys"] else 0,
+        "rotation": rotation,
+        "retirement_rules": dict(KEY_RETIREMENT_RULES),
+        "retirement_reasons": list(RETIREMENT_REASONS),
+        "retirement": {
+            key["key_id"]: can_retire_key(key["key_id"], now) for key in ring["keys"]
+        },
+        "overlap_days": {
+            key["key_id"]: key_overlap_days(key["key_id"]) for key in ring["keys"]
+        },
+        "downgrade_check": _downgrade_report(),
+        "note": (
+            "rotation is scheduled in data (KEY_ROTATION_SCHEDULE) and strength is "
+            "a total order (KEY_STRENGTH_RANKS), so a downgrade is a reported fact; "
+            "retirement requires the overlap window to have elapsed"
+        ),
+    }
+
+
+def _downgrade_report() -> dict[str, Any]:
+    """Does any verifiable key rank below the active one?
+
+    True is a reportable condition, not an error: an overlap that keeps a
+    weaker key verifiable is legitimate, it just has to be a decision.
+    """
+    keys = SIGNER_KEY_RING.catalog()["keys"]
+    active = next((key for key in keys if key["status"] == "active"), None)
+    if active is None:
+        return {"checked": 0, "downgraded": False, "weaker_key_ids": []}
+    active_rank = rank_key(active["algorithm"])
+    weaker = [
+        key["key_id"]
+        for key in keys
+        if key["status"] != "retired" and rank_key(key["algorithm"]) < active_rank
+    ]
+    return {
+        "checked": len(keys),
+        "active_key_id": active["key_id"],
+        "active_algorithm": active["algorithm"],
+        "active_rank": active_rank,
+        "weaker_key_ids": weaker,
+        "downgraded": bool(weaker),
+    }
 
 
 class HsmSigner(Protocol):
@@ -343,6 +576,37 @@ class SigningKeyRing:
         )
         self._keys[key_id] = retired
         return retired
+
+    def retire_guarded(
+        self, key_id: str, *, now: datetime | None = None, force: bool = False
+    ) -> dict[str, Any]:
+        """Retire a key only if :func:`can_retire_key` allows it.
+
+        :meth:`retire` keeps its historical rule (never the active key) so every
+        existing call site behaves identically. This one adds the governance
+        rules: the overlap window must have elapsed, so retiring a key cannot
+        orphan an envelope that was signed while it was still current. A refusal
+        is reported rather than raised, because "why not" is the answer an
+        operator needs.
+        """
+        verdict = can_retire_key(key_id, now)
+        if not verdict["retirable"] and not force:
+            return {
+                "key_id": key_id,
+                "retired": False,
+                "forced": False,
+                **{k: v for k, v in verdict.items() if k != "key_id"},
+            }
+        if verdict["reason"] == "unknown_key":
+            raise KeyError(f"unknown key id {key_id!r}")
+        retired = self.retire(key_id)
+        return {
+            "key_id": key_id,
+            "retired": True,
+            "forced": bool(force),
+            "reason": "ok",
+            "status": retired.status,
+        }
 
     def get(self, key_id: str | None) -> SigningKey | None:
         if key_id is None:
@@ -824,6 +1088,12 @@ def build_hsm_signer_catalog() -> dict[str, object]:
             "remembered": REPLAY_GUARD.size(),
         },
         "self_test": self_test,
+        # Governance lives in its own catalog because this key set is pinned.
+        "governance": {
+            "catalog": "build_signer_governance",
+            "retirement_reasons": list(RETIREMENT_REASONS),
+            "strength_ranks": dict(sorted(KEY_STRENGTH_RANKS.items())),
+        },
         "note": (
             "backends register through SIGNER_BACKENDS; rotation is data (the key "
             "ring), and verification is opt-in via ring= so legacy single-key "

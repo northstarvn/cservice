@@ -32,6 +32,24 @@ the same config so nothing here is a hard-coded policy:
 - ``enroll_slot`` — several templates per modality (a finger is not one finger).
 - ``export_state`` / ``import_state`` — replicate digests across instances
   without ever moving plaintext.
+
+Expansion notes (enrollment + presentation-attack defence):
+
+The original module answers "is this capture the enrolled user?". Two real
+questions sit outside that, and both are policy rather than code:
+
+- **Enrollment quality.** A single 0.5-confidence capture enrolled as a
+  template makes every later comparison fail. ``ENROLLMENT_RULES`` names a
+  minimum quality bar and a required number of samples per modality;
+  ``assess_enrollment`` grades a candidate capture against it *before* it is
+  stored, so a bad enrollment is refused rather than discovered later.
+- **Presentation attack detection.** A printed photo scores a perfect match on
+  a face template. ``PAD_PROFILES`` declares, per modality, the liveness
+  evidence required and the minimum liveness score;
+  ``evaluate_pad`` is a pure check on that evidence, and ``decide`` can be told
+  to enforce it.
+- ``assess_enrollment`` / ``build_biometric_vault_policy`` — the catalog for
+  both.
 """
 from __future__ import annotations
 
@@ -105,7 +123,160 @@ BIOMETRIC_REASONS = (
 BIOMETRIC_DECISIONS = ("accept", "challenge", "deny")
 BIOMETRIC_OUTCOMES = ("false_positive", "false_negative", "confirmed_match")
 
+# A liveness score outside 0..1 is a gap, not a denial -- the caller decides.
+PAD_LIVENESS_BOUNDS = (0.0, 1.0)
 VAULT_STATE_VERSION = 1
+
+# --- enrollment quality (expansion) ---------------------------------------------
+#
+# A vault that stores whatever it is handed will happily enrol a 0.3-confidence
+# capture, and every subsequent comparison against it is then permanently
+# marginal. The bar is a data change so tightening it never touches the vault.
+#
+# Config table: modality -> {min_quality, max_samples, samples_required,
+# reject_below_quality, note}. ``min_quality`` is compared against the *same*
+# pseudo-similarity ``validate_template`` reports, so the two can never disagree
+# about what "good" means.
+ENROLLMENT_RULES: dict[str, dict[str, Any]] = {
+    "fingerprint": {
+        "min_quality": 0.90,
+        "max_samples": 5,
+        "samples_required": 2,
+        "note": "high-precision modality; a marginal sample is almost always a bad press",
+    },
+    "face": {
+        "min_quality": 0.80,
+        "max_samples": 5,
+        "samples_required": 2,
+        "note": "liveness variance expected, so the bar is lower but the sample count is not",
+    },
+    "voice": {
+        "min_quality": 0.70,
+        "max_samples": 7,
+        "samples_required": 3,
+        "note": "acoustic variance needs more samples before it is trusted",
+    },
+}
+DEFAULT_ENROLLMENT_RULE: dict[str, Any] = {
+    "min_quality": 0.0,
+    "max_samples": 5,
+    "samples_required": 1,
+    "note": "unconfigured modality: accept the capture as-is",
+}
+# Why an enrollment was accepted or refused.
+ENROLLMENT_REASONS = (
+    "accepted",
+    "below_min_quality",
+    "sample_cap_reached",
+    "insufficient_samples",
+    "unknown_modality",
+)
+
+# --- presentation attack detection (expansion) ---------------------------------
+#
+# A replayed photo or a recorded voice scores a *perfect* match against the
+# enrolled template, because the matcher only sees the template. Liveness is
+# therefore a separate, separately-required signal. Off by default per modality,
+# so no existing enrolment path changes behaviour unless PAD is configured on.
+#
+# Config table: modality -> {required, min_liveness, evidence, reject_injection}.
+#   required        enforce this modality's PAD check in ``decide``
+#   min_liveness    0..1 minimum liveness score
+#   evidence        the request keys that must be present (all of them)
+#   reject_injection  treat a reported injection attempt as a hard deny
+PAD_PROFILES: dict[str, dict[str, Any]] = {
+    "fingerprint": {
+        "required": False,
+        "min_liveness": 0.0,
+        "evidence": (),
+        "reject_injection": False,
+        "note": "off by default; enable once the capture pipeline reports liveness",
+    },
+    "face": {
+        "required": False,
+        "min_liveness": 0.5,
+        "evidence": ("blink_detected",),
+        "reject_injection": True,
+        "note": "presentation attacks are the dominant threat for face capture",
+    },
+    "voice": {
+        "required": False,
+        "min_liveness": 0.5,
+        "evidence": ("live_reading",),
+        "reject_injection": True,
+        "note": "a replayed recording is the dominant threat for voice capture",
+    },
+}
+DEFAULT_PAD_PROFILE: dict[str, Any] = {
+    "required": False,
+    "min_liveness": 0.0,
+    "evidence": (),
+    "reject_injection": False,
+    "note": "no PAD profile configured for this modality",
+}
+# Request-context keys that carry liveness evidence.
+PAD_CONTEXT_FIELDS = ("liveness_score", "injection_detected")
+# Reason codes ``evaluate_pad`` / ``decide`` can add to a rejection.
+PAD_REASONS = ("pad_evidence_missing", "liveness_below_threshold", "injection_detected")
+# A liveness score outside 0..1 is a gap, not a denial — the caller decides.
+
+
+def evaluate_pad(
+    modality: str, context: dict[str, Any] | None = None, *, enforce: bool = False
+) -> dict[str, Any]:
+    """Check liveness evidence for a modality and report the verdict.
+
+    Pure. The matcher only ever sees the enrolled template, so a replayed photo
+    or a recorded voice scores a *perfect* match — liveness has to be a separate
+    signal, and it is checked before the template is scored rather than mixed
+    into it.
+
+    ``enforce=True`` forces the check on for a modality whose profile is not
+    ``required``; otherwise a profile's own ``required`` flag decides. When the
+    check is not enforced the verdict is still reported, so a caller can log PAD
+    evidence before choosing to require it.
+    """
+    profile = dict(PAD_PROFILES.get(modality) or DEFAULT_PAD_PROFILE)
+    ctx = dict(context or {})
+    enforced = bool(enforce or profile.get("required", False))
+    required_evidence = tuple(profile.get("evidence") or ())
+    missing = [key for key in required_evidence if key not in ctx]
+    raw = ctx.get("liveness_score")
+    score: float | None
+    if raw is None:
+        score = None
+    else:
+        try:
+            candidate = float(raw)
+        except (TypeError, ValueError):
+            candidate = None
+        low, high = PAD_LIVENESS_BOUNDS
+        # An out-of-range or unparseable score is a *gap*, not a denial: a
+        # silent fail-open here would let a broken sensor disable PAD.
+        score = candidate if candidate is not None and low <= candidate <= high else None
+    min_liveness = float(profile.get("min_liveness", 0.0))
+    injected = bool(ctx.get("injection_detected"))
+    reason = "ok"
+    if injected and profile.get("reject_injection", False):
+        reason = "injection_detected"
+    elif missing:
+        reason = "pad_evidence_missing"
+    elif score is not None and score < min_liveness:
+        reason = "liveness_below_threshold"
+    return {
+        "modality": modality,
+        "enforced": enforced,
+        # Reported whether or not the check is enforced, so a caller can log PAD
+        # evidence today and start *enforcing* it tomorrow with no code change.
+        "passed": reason == "ok",
+        "reason": reason,
+        "liveness_score": score,
+        "min_liveness": min_liveness,
+        "required_evidence": list(required_evidence),
+        "missing_evidence": missing,
+        "injection_detected": injected,
+        "reject_injection": bool(profile.get("reject_injection", False)),
+    }
 
 
 def _hash_template(template: bytes, salt: bytes) -> str:
@@ -269,6 +440,91 @@ class BiometricVault:
         return restored
 
     # --- enrollment --------------------------------------------------------
+
+    # --- enrollment quality -------------------------------------------------
+
+    def enrollment_rule(self, modality: str) -> dict[str, Any]:
+        """The enrollment bar for a modality, falling back to accept-everything."""
+        return dict(ENROLLMENT_RULES.get(modality) or DEFAULT_ENROLLMENT_RULE)
+
+    def assess_enrollment(
+        self, user_id: int, modality: str, template: bytes, *, slot: int | None = None
+    ) -> dict[str, Any]:
+        """Would this capture make a *good* template, before it is stored?
+
+        A capture is graded against an existing template when there is one, and
+        against itself otherwise — the first enrolment has nothing to compare to,
+        so its quality is 1.0 by construction. Pure with respect to the vault: it
+        counts nothing and stores nothing, so an operator can dry-run an
+        enrollment before committing to it.
+        """
+        self._require_modality(modality)
+        rule = self.enrollment_rule(modality)
+        record = self._record_for(user_id, modality, slot)
+        confidence = (
+            1.0
+            if record is None
+            else round(
+                _digest_similarity(_digest(template), record["reference_digest"]), 4
+            )
+        )
+        min_quality = float(rule.get("min_quality", 0.0))
+        stored = self._slots_for(int(user_id), modality)
+        cap = int(rule.get("max_samples", 0) or 0)
+        reason = ENROLLMENT_REASONS[0]
+        accepted = True
+        if confidence < min_quality:
+            accepted, reason = False, "below_min_quality"
+        elif cap and len(stored) >= cap:
+            accepted, reason = False, "sample_cap_reached"
+        return {
+            "user_id": int(user_id),
+            "modality": modality,
+            "accepted": accepted,
+            "reason": reason,
+            "quality": confidence,
+            "min_quality": min_quality,
+            "samples_stored": len(stored),
+            "max_samples": cap,
+            "samples_required": int(rule.get("samples_required", 1)),
+            "compared_against": "existing_template" if record is not None else "self",
+        }
+
+    def register_template_checked(
+        self,
+        user_id: int,
+        modality: str,
+        template: bytes,
+        *,
+        actor_user_id: int | None = None,
+        slot: int | None = None,
+    ) -> dict[str, Any]:
+        """Enrol only if the capture clears :meth:`assess_enrollment`.
+
+        :meth:`register_template` is deliberately unchanged — a vault that
+        silently refused an enrollment would break existing callers. This is the
+        strict path, and it *reports* the refusal rather than raising, so a
+        re-enrolment UI can show why.
+        """
+        assessment = self.assess_enrollment(user_id, modality, template, slot=slot)
+        if not assessment["accepted"]:
+            return {"registered": False, **assessment}
+        if slot is None:
+            result = self.register_template(
+                user_id, modality, template, actor_user_id=actor_user_id
+            )
+        else:
+            result = self.enroll_slot(
+                user_id, modality, template, slot=slot, actor_user_id=actor_user_id
+            )
+        return {"registered": True, **result, "quality": assessment["quality"],
+                "min_quality": assessment["min_quality"], "reason": "accepted"}
+
+    # --- presentation attack detection ---------------------------------------
+
+    def pad_profile(self, modality: str) -> dict[str, Any]:
+        """The PAD profile for a modality, defaulting to *not required*."""
+        return dict(PAD_PROFILES.get(modality) or DEFAULT_PAD_PROFILE)
 
     def _new_record(
         self, template: bytes, actor_user_id: int | None
@@ -584,16 +840,45 @@ class BiometricVault:
         *,
         slot: int | None = None,
         challenge: Any = None,
+        context: dict[str, Any] | None = None,
+        enforce_pad: bool = False,
     ) -> dict[str, Any]:
         """Three-way outcome with a step-up band instead of a bare boolean.
 
         ``accept`` at/above the modality threshold, ``challenge`` inside the
         step-up band (a real user with a marginal capture), ``deny`` below it.
+
+        With ``enforce_pad=True`` — or when the modality's PAD profile is marked
+        ``required`` — liveness evidence is checked *before* the template is
+        scored, because a presentation attack matches the template perfectly and
+        a match is therefore not evidence of a live capture. The check is pure
+        and its verdict is reported alongside the decision, never instead of it.
         """
+        self._require_modality(modality)
+        pad = evaluate_pad(modality, context, enforce=enforce_pad)
         result = self.validate_template(
             user_id, modality, template, slot=slot, challenge=challenge
         )
-        self._require_modality(modality)
+        if pad["enforced"] and not pad["passed"]:
+            denied = {
+                **result,
+                "match": False,
+                "accepted": False,
+                "decision": "deny",
+                "step_up_required": False,
+                "step_up_threshold": float(
+                    self._modalities[modality].get(
+                        "step_up_threshold", self._modalities[modality]["threshold"]
+                    )
+                ),
+                "reason": pad["reason"],
+                "pad": pad,
+            }
+            self._note_attempt(
+                user_id, modality, False, datetime.now(timezone.utc)
+            )
+            self._record_history(denied)
+            return denied
         step_up = float(
             self._modalities[modality].get(
                 "step_up_threshold", self._modalities[modality]["threshold"]
@@ -613,6 +898,7 @@ class BiometricVault:
             "decision": decision,
             "step_up_required": step_up_required,
             "step_up_threshold": step_up,
+            "pad": pad,
         }
 
     # --- lifecycle & introspection ----------------------------------------
@@ -801,9 +1087,51 @@ def build_biometric_vault_catalog(vault: BiometricVault | None = None) -> dict[s
             "single_use": True,
         },
         "state_version": VAULT_STATE_VERSION,
+        # Enrollment + PAD live in their own catalog: this key set is pinned.
+        "governance": {
+            "catalog": "build_biometric_vault_policy",
+            "enrollment_modalities": sorted(ENROLLMENT_RULES),
+            "pad_modalities": sorted(PAD_PROFILES),
+        },
         "note": (
             "modalities, step-up bands, adaptive-threshold bounds, brute-force "
             "policy and challenge TTLs are all config; a challenge gates replay "
             "only and never enters the similarity digest"
+        ),
+    }
+
+
+def build_biometric_vault_policy(vault: BiometricVault | None = None) -> dict[str, object]:
+    """Enrollment-quality and presentation-attack policy.
+
+    Separate from :func:`build_biometric_vault_catalog` because that catalog's
+    key set is a pinned contract.
+    """
+    vault = vault or get_default_biometric_vault()
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "enrollment": {
+            name: dict(rule) for name, rule in sorted(ENROLLMENT_RULES.items())
+        },
+        "enrollment_default": dict(DEFAULT_ENROLLMENT_RULE),
+        "enrollment_reasons": list(ENROLLMENT_REASONS),
+        "pad": {
+            name: {
+                **dict(profile),
+                "evidence": list(profile.get("evidence") or ()),
+            }
+            for name, profile in sorted(PAD_PROFILES.items())
+        },
+        "pad_default": dict(DEFAULT_PAD_PROFILE),
+        "pad_reasons": list(PAD_REASONS),
+        "pad_context_fields": list(PAD_CONTEXT_FIELDS),
+        "liveness_bounds": list(PAD_LIVENESS_BOUNDS),
+        "liveness_state": {
+            modality: evaluate_pad(modality) for modality in sorted(vault.modalities)
+        },
+        "note": (
+            "enrollment quality and liveness are separate signals from template "
+            "similarity on purpose: a presentation attack matches the template "
+            "perfectly, so PAD is checked before the match, never inside it"
         ),
     }

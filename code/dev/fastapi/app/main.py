@@ -226,6 +226,7 @@ async def app_metadata():
             "authz_governance",
             "i18n_governance",
             "contract_governance",
+            "thin_infra_governance",
         ],
     }
 
@@ -474,6 +475,7 @@ async def app_ecosystem():
             "tenant_routing": {
                 "routes": [
                     "/meta/tenants",
+                    "/meta/tenants/policy",
                 ],
                 "purpose": "runtime multi-tenant database connection routing: per-tenant pooled engines, registration/deregistration, header-driven tenant scope",
                 "status": "ready",
@@ -482,6 +484,7 @@ async def app_ecosystem():
             "partition_management": {
                 "routes": [
                     "/meta/partitions",
+                    "/meta/partitions/policy",
                 ],
                 "purpose": "dynamic data partition lifecycle: config-driven partition creation, archival, and retention-based expiry for append-only volumes",
                 "status": "ready",
@@ -490,10 +493,57 @@ async def app_ecosystem():
             "zero_trust": {
                 "routes": [
                     "/meta/zero-trust",
+                    "/meta/zero-trust/policy",
                 ],
                 "purpose": "cryptographic security & zero-trust access: HSM signing abstractions, biometric validation vaults, contextual risk evaluation, and data-cell access matrices",
                 "status": "ready",
                 "signer_algorithm": hsm_signer.build_hsm_signer_catalog()["algorithm"],
+            },
+            "thin_infra_governance": {
+                "routes": [
+                    "/meta/partitions/policy",
+                    "/meta/tenants/policy",
+                    "/meta/zero-trust/policy",
+                ],
+                "purpose": (
+                    "the policy layer over the five thinnest infrastructure "
+                    "modules: a named retention tier and guard band per "
+                    "partitioned table, a legal-transition state machine and a "
+                    "data-residency allowlist per tenant, a total order on key "
+                    "strength with scheduled rotation and overlap-gated "
+                    "retirement, enrollment-quality and presentation-attack "
+                    "bounds, explicit risk composition with escalation and "
+                    "expiring suppression, and a narrowing-only access layer of "
+                    "purpose tags, read budgets and masking profiles"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "PARTITION_RETENTION_TIERS",
+                    "PARTITION_GUARD_BANDS",
+                    "PARTITION_DROP_POLICY",
+                    "TENANT_RESIDENCY",
+                    "TENANT_LIFECYCLE",
+                    "KEY_STRENGTH_RANKS",
+                    "KEY_ROTATION_SCHEDULE",
+                    "KEY_RETIREMENT_RULES",
+                    "ENROLLMENT_RULES",
+                    "PAD_PROFILES",
+                    "RISK_COMPOSERS",
+                    "RISK_LEVEL_OVERRIDES",
+                    "RISK_ESCALATION",
+                    "RISK_SUPPRESSION",
+                    "CELL_PURPOSES",
+                    "CELL_BUDGETS",
+                    "MASKING_PROFILES",
+                ],
+                "notes": (
+                    "no new module and no new table. Every capability is a "
+                    "module-level config table plus a pure helper plus a sibling "
+                    "policy catalog, so the pre-existing catalogs keep their "
+                    "exact key sets and a rule is a data change. The six "
+                    "expanded modules previously reported only what existed; "
+                    "they now also report the rule that bounds it"
+                ),
             },
             "high_velocity_audit": {
                 "routes": [
@@ -827,7 +877,9 @@ async def app_feature_summary():
             "tenant_routing": "/meta/tenants",
             "tenant_routing_policy": "/meta/tenants/policy",
             "partition_management": "/meta/partitions",
+            "partition_lifecycle_policy": "/meta/partitions/policy",
             "zero_trust": "/meta/zero-trust",
+            "zero_trust_policy": "/meta/zero-trust/policy",
             "pipeline_event": "/audit/pipeline/event",
             "pipeline_stats": "/audit/pipeline/stats",
             "pipeline_dead_letters": "/audit/pipeline/dead-letters",
@@ -1301,6 +1353,18 @@ async def partitions_metadata():
     return partition_manager.build_partition_manager_catalog()
 
 
+@app.get("/meta/partitions/policy")
+async def partition_lifecycle_policy_metadata():
+    """Expose the tiered retention lifecycle behind the partition catalog.
+
+    A sibling of ``/meta/partitions``, not a key inside it: that catalog's key
+    set is a pinned contract. This is where the retention tiers, the guard
+    bands that outrank them, the batch caps and the last retirement are
+    introspected.
+    """
+    return partition_manager.build_partition_lifecycle_policy()
+
+
 @app.get("/meta/zero-trust")
 async def zero_trust_metadata():
     """Expose the zero-trust surfaces: HSM signing, biometrics, risk, cell access."""
@@ -1313,6 +1377,33 @@ async def zero_trust_metadata():
         "biometric_vault": biometric_vault.build_biometric_vault_catalog(),
         "risk_evaluator": risk_evaluator.build_risk_evaluator_catalog(),
         "cell_matrix": cell_matrix.build_cell_matrix_catalog(),
+    }
+
+
+@app.get("/meta/zero-trust/policy")
+async def zero_trust_policy_metadata():
+    """Expose the governance layer over the zero-trust primitives.
+
+    ``/meta/zero-trust`` reports what exists -- which keys are loaded, which
+    templates are enrolled, which cells are guarded. This reports the policy
+    that constrains them: key rotation and retirement rules, enrollment quality
+    and presentation-attack bounds, risk composition / escalation / suppression,
+    and the layer-5 access narrowing (purposes, read budgets, masking profiles).
+    """
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "hsm_signer": hsm_signer.build_signer_governance(),
+        "biometric_vault": biometric_vault.build_biometric_vault_policy(),
+        "risk_evaluator": risk_evaluator.build_risk_evaluator_policy(),
+        "cell_matrix": cell_matrix.build_cell_matrix_policy(),
+        "note": (
+            "each section is the sibling policy catalog of the matching entry in "
+            "/meta/zero-trust; the observable catalogs there are unchanged, so a "
+            "consumer can read state from one and constraints from the other"
+        ),
     }
 
 

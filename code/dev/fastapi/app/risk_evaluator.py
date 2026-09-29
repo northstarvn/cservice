@@ -25,6 +25,24 @@ Design (deliberately config-driven, not rigid):
   (fraud / granted / false_positive) arrive, ``adapt_risk_weight`` nudges a
   rule's weight within ``ADAPTIVE_PARAMS`` bounds and bumps the weight version
   consumed by the pipeline. Rules stay explainable at every step.
+
+Expansion notes (composability, not just scoring):
+
+The scorer answers "how risky is this context". A real zero-trust program also
+has to ask how that score *combines* with the rest of a decision, and that
+composition is where policies normally get hardcoded. Three additive layers:
+
+- ``RISK_COMPOSITION`` — how multiple scored dimensions combine into one
+  decision (``max`` / ``weighted_mean`` / ``veto`` / ``all_of``). One dimension
+  is the historical single-dimension answer, unchanged.
+- ``RISK_LEVEL_OVERRIDES`` — per-tenant/per-environment level remapping, so a
+  stricter tenant can demand a higher bar without forking the rule table.
+  ``evaluate_composed_risk`` is the config-parameterized entry point.
+- ``RISK_ESCALATION`` — what happens to a decision *over time* (a
+  ``high`` that is never actioned escalates; a cleared one decays), and
+  ``RISK_SUPPRESSION`` — a time-boxed, justified waiver on a named dimension,
+  which is the escape hatch every real programme ends up needing.
+- ``build_risk_evaluator_policy`` — the catalog for all of it.
 """
 from __future__ import annotations
 
@@ -716,6 +734,336 @@ class RiskDecisionStore:
 
 RISK_DECISIONS = RiskDecisionStore()
 
+# --- composition (expansion) ----------------------------------------------------
+#
+# One request usually has more than one risk dimension: the request itself, the
+# tenant it touches, the account it acts on. How those combine into a single
+# decision is a policy, and hardcoding it is how a second dimension ends up
+# silently ignored. The operators below are the whole vocabulary.
+#
+#   max           the worst dimension wins (fail-secure: never average a risk away)
+#   weighted_mean dimensions are averaged by their declared weights
+#   veto          a non-low dimension decides, regardless of the others
+#   all_of        every dimension must be at or below ``low``
+RISK_COMPOSERS: dict[str, Any] = {
+    "max": {
+        "description": "the highest dimension score wins",
+        "weights": None,
+        "fail_secure": True,
+    },
+    "weighted_mean": {
+        "description": "dimensions are averaged by their declared weights",
+        "weights": None,
+        "fail_secure": False,
+    },
+    "veto": {
+        "description": "any dimension above `low` decides",
+        "veto_level": "moderate",
+        "fail_secure": True,
+    },
+    "all_of": {
+        "description": "every dimension must be at or below `low`",
+        "fail_secure": True,
+    },
+}
+# A single dimension is the historical answer and is stated as such.
+DEFAULT_RISK_COMPOSER = "max"
+
+# Per-tenant / per-environment level remapping. A remap only ever *raises* the
+# bar (``min`` over the mapped thresholds), so a config typo cannot make a
+# tenant's policy more permissive than the default.
+#
+# Config table: key (e.g. "tenant:acme" or "env:staging") -> {offset, levels}.
+#   offset  points added to every level threshold (never negative)
+#   levels  a per-level maximum-score override
+RISK_LEVEL_OVERRIDES: dict[str, dict[str, Any]] = {
+    "tenant:regulated": {
+        "offset": 15,
+        "note": "regulated tenant: every threshold is 15 points stricter",
+    },
+    "env:staging": {
+        "offset": 30,
+        "note": "staging: a much higher bar, so noisy test traffic never looks clean",
+    },
+}
+
+# Escalation: a decision that is not acted on does not stay where it is.
+# Config table: level -> {escalate_after_seconds, escalate_to, auto_action}.
+RISK_ESCALATION: dict[str, dict[str, Any]] = {
+    "low": {
+        "escalate_after_seconds": None,
+        "escalate_to": None,
+        "auto_action": None,
+        "note": "nothing escalates out of `low`",
+    },
+    "moderate": {
+        "escalate_after_seconds": 900,
+        "escalate_to": "high",
+        "auto_action": "step_up",
+        "note": "an unconfirmed step-up becomes a review",
+    },
+    "high": {
+        "escalate_after_seconds": 300,
+        "escalate_to": "critical",
+        "auto_action": "review",
+        "note": "an un-actioned review becomes a deny",
+    },
+    "critical": {
+        "escalate_after_seconds": None,
+        "escalate_to": None,
+        "auto_action": "deny",
+        "note": "already terminal",
+    },
+}
+RISK_ESCALATION_REASONS = ("ok", "not_escalated", "terminal_level", "unknown_level")
+
+# Suppression: a time-boxed, justified waiver on one named dimension. Every real
+# programme needs an escape hatch; what it must not be is a silent one, so a
+# suppression is scoped, expiring, attributed and reported.
+#
+# Config table: suppression_id -> {dimension, max_duration_seconds, requires
+# justification, allowed_levels, enabled}.
+RISK_SUPPRESSION: dict[str, dict[str, Any]] = {
+    "maintenance_window": {
+        "dimension": "tenant",
+        "max_duration_seconds": 3600,
+        "requires_justification": True,
+        "allowed_levels": ("moderate",),
+        "enabled": True,
+        "note": "a known-noisy integration during a scheduled window",
+    },
+    "migrated_tenant": {
+        "dimension": "tenant",
+        "max_duration_seconds": 86400,
+        "requires_justification": True,
+        "allowed_levels": ("moderate", "high"),
+        "enabled": False,
+        "note": "off by default; enabling it is an explicit decision",
+    },
+}
+SUPPRESSION_REASONS = (
+    "ok",
+    "unknown_suppression",
+    "suppression_disabled",
+    "justification_required",
+    "duration_exceeded",
+    "level_not_suppressible",
+)
+
+
+def levels_with_override(key: str | None, levels: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Level buckets after applying a named override, or unchanged.
+
+    Overrides only ever raise a threshold, so a stale or mistyped override
+    cannot silently loosen a tenant's bar. Pure.
+    """
+    buckets = [dict(bucket) for bucket in (levels if levels is not None else RISK_LEVELS)]
+    override = RISK_LEVEL_OVERRIDES.get(str(key)) if key else None
+    if not override:
+        return buckets
+    offset = max(0, int(override.get("offset", 0) or 0))
+    per_level = {str(k): int(v) for k, v in (override.get("levels") or {}).items()}
+    for bucket in buckets:
+        level = str(bucket["level"])
+        base = int(bucket["max"])
+        if level in per_level:
+            bucket["max"] = min(100, max(base, per_level[level]))
+        elif offset:
+            bucket["max"] = min(100, base + offset)
+    return buckets
+
+
+def compose_risk(
+    dimensions: dict[str, dict[str, Any]],
+    *,
+    composer: str = DEFAULT_RISK_COMPOSER,
+    weights: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Combine per-dimension scores into one decision.
+
+    Every dimension is a mapping with at least ``score`` (and normally ``level``),
+    so the same composition works for request/tenant/account risks. The chosen
+    composer is reported back with the result, because "why was this a high?"
+    is answered by "the account dimension was a high under ``max``".
+
+    Unknown dimensions are kept in the output with a ``missing`` marker rather
+    than dropped, so a caller that misspells a dimension sees it.
+    """
+    name = str(composer or DEFAULT_RISK_COMPOSER)
+    if name not in RISK_COMPOSERS:
+        raise ValueError(
+            f"unknown risk composer: {composer} (known: {', '.join(sorted(RISK_COMPOSERS))})"
+        )
+    rows: list[dict[str, Any]] = []
+    for dim, payload in sorted((dimensions or {}).items()):
+        raw = (payload or {}).get("score")
+        try:
+            score = int(raw)
+        except (TypeError, ValueError):
+            score = None
+        rows.append(
+            {
+                "dimension": dim,
+                "score": score,
+                "level": (payload or {}).get("level"),
+                "weight": float((weights or {}).get(dim, 1.0)),
+                "missing": score is None,
+            }
+        )
+    scored = [row for row in rows if not row["missing"]]
+    if not scored:
+        return {
+            "composer": name,
+            "score": 0,
+            "level": RISK_LEVELS[0]["level"],
+            "dimensions": rows,
+            "decided_by": None,
+            "fail_secure": bool(RISK_COMPOSERS[name].get("fail_secure", True)),
+        }
+    decided_by: str | None
+    if name == "max":
+        winner = max(scored, key=lambda row: (row["score"], row["dimension"]))
+        score, decided_by = int(winner["score"]), winner["dimension"]
+    elif name == "veto":
+        veto_level = str(RISK_COMPOSERS[name].get("veto_level", "moderate"))
+        rank = {bucket["level"]: index for index, bucket in enumerate(RISK_LEVELS)}
+        threshold = rank.get(veto_level, 1)
+        hitting = [row for row in scored if rank.get(str(row["level"]), 0) >= threshold]
+        winner = max(hitting or scored, key=lambda row: (row["score"], row["dimension"]))
+        score, decided_by = int(winner["score"]), winner["dimension"]
+    elif name == "all_of":
+        worst = max(scored, key=lambda row: (row["score"], row["dimension"]))
+        score, decided_by = int(worst["score"]), worst["dimension"]
+    else:  # weighted_mean
+        total_weight = sum(row["weight"] for row in scored) or 1.0
+        score = int(round(sum(row["score"] * row["weight"] for row in scored) / total_weight))
+        decided_by = None
+    return {
+        "composer": name,
+        "score": max(0, min(100, score)),
+        "level": level_for_score(max(0, min(100, score))),
+        "dimensions": rows,
+        "decided_by": decided_by,
+        "fail_secure": bool(RISK_COMPOSERS[name].get("fail_secure", True)),
+    }
+
+
+def evaluate_composed_risk(
+    contexts: dict[str, dict[str, Any]],
+    *,
+    composer: str = DEFAULT_RISK_COMPOSER,
+    weights: dict[str, float] | None = None,
+    override: str | None = None,
+    levels: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Score each dimension with the real rules, then compose them.
+
+    The config-parameterized sibling of :func:`evaluate_risk`: one dimension is
+    the historical answer (a single context, no composition), and this is what a
+    multi-signal request should call. Pure with respect to the learned weights
+    in the sense that it reads them and never writes them.
+    """
+    buckets = levels_with_override(override, levels)
+    scored = {
+        dim: score_with_config(effective_risk_rules(), dict(ctx or {}), levels=buckets)
+        for dim, ctx in (contexts or {}).items()
+    }
+    result = compose_risk(scored, composer=composer, weights=weights)
+    level = result["level"]
+    action = RISK_ACTIONS.get(level, RISK_ACTIONS[RISK_LEVELS[0]["level"]])
+    return {
+        **result,
+        "override": override,
+        "levels": buckets,
+        "action": action["action"],
+        "required_controls": list(action["required_controls"]),
+        "rationale": action["rationale"],
+        "per_dimension": {
+            dim: {**payload, "level": level_for_score(payload["score"])}
+            for dim, payload in sorted(scored.items())
+        },
+    }
+
+
+def escalation_for(level: str, *, waiting_seconds: int) -> dict[str, Any]:
+    """Where a decision at ``level`` should be after ``waiting_seconds``.
+
+    Pure, so "this review has been open too long" is answerable without a store,
+    a clock, or a side effect.
+    """
+    if level not in RISK_ESCALATION:
+        return {"level": level, "escalated": False, "reason": "unknown_level",
+                "escalate_to": None, "auto_action": None}
+    rule = RISK_ESCALATION[level]
+    after = rule.get("escalate_after_seconds")
+    if after is None:
+        reason = "terminal_level" if rule.get("auto_action") == "deny" else "not_escalated"
+        return {"level": level, "escalated": False, "reason": reason,
+                "escalate_to": None, "auto_action": rule.get("auto_action")}
+    if int(waiting_seconds) < int(after):
+        return {"level": level, "escalated": False, "reason": "not_escalated",
+                "escalate_to": None, "auto_action": rule.get("auto_action"),
+                "escalate_after_seconds": int(after),
+                "remaining_seconds": int(after) - int(waiting_seconds)}
+    return {"level": level, "escalated": True, "reason": "ok",
+            "escalate_to": rule.get("escalate_to"),
+            "auto_action": rule.get("auto_action"),
+            "escalate_after_seconds": int(after)}
+
+
+def evaluate_suppression(
+    suppression_id: str,
+    *,
+    dimension: str | None = None,
+    level: str | None = None,
+    duration_seconds: int | None = None,
+    justification: str = "",
+) -> dict[str, Any]:
+    """May a named suppression waive this decision?
+
+    Every check is reported, not just the first failure, so an operator applying
+    for a waiver sees the whole set of conditions it has to satisfy. Pure.
+    """
+    rule = RISK_SUPPRESSION.get(str(suppression_id))
+    if rule is None:
+        return {"suppression_id": suppression_id, "suppressed": False,
+                "reason": "unknown_suppression", "checks": {}}
+    checks: dict[str, Any] = {}
+    reason = "ok"
+    if not rule.get("enabled", True):
+        reason = "suppression_disabled"
+    checks["enabled"] = rule.get("enabled", True)
+    if rule.get("requires_justification", True) and not str(justification).strip():
+        checks["justification"] = False
+        reason = reason if reason != "ok" else "justification_required"
+    else:
+        checks["justification"] = True
+    max_duration = int(rule.get("max_duration_seconds", 0) or 0)
+    if duration_seconds is not None and max_duration and int(duration_seconds) > max_duration:
+        checks["duration"] = False
+        reason = reason if reason != "ok" else "duration_exceeded"
+    else:
+        checks["duration"] = True
+    if level is not None and level not in (rule.get("allowed_levels") or ()):
+        checks["level"] = False
+        reason = reason if reason != "ok" else "level_not_suppressible"
+    else:
+        checks["level"] = True
+    if dimension is not None and dimension != rule.get("dimension"):
+        checks["dimension"] = False
+        reason = reason if reason != "ok" else "level_not_suppressible"
+    else:
+        checks["dimension"] = True
+    return {
+        "suppression_id": suppression_id,
+        "suppressed": reason == "ok",
+        "reason": reason,
+        "checks": checks,
+        "dimension": rule.get("dimension"),
+        "max_duration_seconds": max_duration,
+        "allowed_levels": list(rule.get("allowed_levels") or ()),
+    }
+
 
 def record_risk_decision(
     context: dict[str, Any] | None,
@@ -769,4 +1117,47 @@ def build_risk_evaluator_catalog() -> dict[str, object]:
             "versions": [row["version"] for row in _WEIGHT_HISTORY],
         },
         "decision_store": RISK_DECISIONS.stats(),
+        # Composition lives in its own catalog: this key set is pinned.
+        "policy": {
+            "catalog": "build_risk_evaluator_policy",
+            "composers": sorted(RISK_COMPOSERS),
+            "escalation_levels": sorted(RISK_ESCALATION),
+            "suppression_ids": sorted(RISK_SUPPRESSION),
+        },
+    }
+
+
+def build_risk_evaluator_policy() -> dict[str, object]:
+    """Composition, level overrides, escalation and suppression.
+
+    Separate from :func:`build_risk_evaluator_catalog` because that catalog's
+    key set is a pinned contract.
+    """
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "composers": {
+            name: dict(config) for name, config in sorted(RISK_COMPOSERS.items())
+        },
+        "default_composer": DEFAULT_RISK_COMPOSER,
+        "level_overrides": {
+            key: dict(config) for key, config in sorted(RISK_LEVEL_OVERRIDES.items())
+        },
+        "overridden_levels": {
+            key: [bucket["max"] for bucket in levels_with_override(key)]
+            for key in sorted(RISK_LEVEL_OVERRIDES)
+        },
+        "baseline_levels": [bucket["max"] for bucket in RISK_LEVELS],
+        "escalation": {
+            level: dict(config) for level, config in sorted(RISK_ESCALATION.items())
+        },
+        "escalation_reasons": list(RISK_ESCALATION_REASONS),
+        "suppression": {
+            name: dict(config) for name, config in sorted(RISK_SUPPRESSION.items())
+        },
+        "suppression_reasons": list(SUPPRESSION_REASONS),
+        "note": (
+            "composition is explicit rather than hardcoded; level overrides can "
+            "only raise a threshold, escalation moves an un-actioned decision "
+            "forward, and a suppression is scoped, expiring and justified"
+        ),
     }

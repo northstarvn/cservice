@@ -45,11 +45,33 @@ Public surfaces:
 
 The tables are config: tightening or loosening a cell is a data change, not a
 code change.
+
+Expansion notes (layer 5 — obligations, and the second matrix):
+
+The layers above answer *may this actor touch this cell, right now*. A program
+that has to defend an access decision needs three more things, all of which are
+policy questions rather than permission questions:
+
+- *May they do it for this reason?* ``CELL_PURPOSES`` / ``CELL_PURPOSE_TAGS``
+  bind a cell to the purposes it may be read for. A support agent with a
+  legitimate ``read`` grant still cannot read a government id without a
+  ``fraud_investigation`` purpose. This is layer 5 and it is narrowing-only.
+- *How often?* ``CELL_BUDGETS`` caps reads of a sensitive cell per role per
+  window, so a compromised credential cannot exfiltrate a whole column.
+- *Is the masking still right?* ``MASKING_PROFILES`` makes redaction a named
+  strategy per cell rather than one hardcoded function.
+- *Which cells does nobody look after?* ``CELL_SENSITIVITY`` classifies cells
+  so a review can ask "which sensitive cells have no owner and no purpose tag".
+- ``review_access_programs`` — the standing-question report across all of it.
+- ``build_cell_matrix_policy`` — the layer-5 catalog, kept separate from
+  ``build_cell_matrix_catalog`` whose key set is a pinned contract.
 """
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
+import hashlib
 import threading
 import uuid
 
@@ -181,6 +203,194 @@ KNOWN_CONTEXT_FIELDS = (
 # Postures that satisfy a "trusted actor" condition out of the box.
 TRUSTED_POSTURES = ("high_trust", "customer_trusted")
 
+# --- Layer 5: purpose limitation ------------------------------------------------
+#
+# ``read`` answers "may this role see this field". It does not answer "may they
+# see it *for this*". A support agent who may read ``government_id`` still may
+# not read it while servicing a billing question, and the difference is only
+# expressible if the request declares a purpose.
+#
+# Config table: purpose name -> {description, requires_justification}.
+CELL_PURPOSES: dict[str, dict[str, Any]] = {
+    "service_delivery": {
+        "description": "performing the booking the customer asked for",
+        "requires_justification": False,
+    },
+    "billing": {
+        "description": "invoicing, payment collection, arrears handling",
+        "requires_justification": False,
+    },
+    "support": {
+        "description": "answering a customer support request",
+        "requires_justification": False,
+    },
+    "fraud_investigation": {
+        "description": "investigating a fraud or security signal",
+        "requires_justification": True,
+    },
+    "statutory_audit": {
+        "description": "meeting a regulatory or internal audit obligation",
+        "requires_justification": True,
+    },
+    "incident_response": {
+        "description": "responding to a live security incident",
+        "requires_justification": True,
+    },
+}
+
+# Config table: resource -> cell -> allowed purposes. A missing cell entry means
+# "any purpose" (the pre-layer-5 behaviour). ``"*"`` inside a list means the same
+# thing, for a cell that otherwise enumerates.
+CELL_PURPOSE_TAGS: dict[str, dict[str, list[str]]] = {
+    "customer_profile": {
+        "government_id": ["statutory_audit", "fraud_investigation"],
+        "biometric_status": ["incident_response", "fraud_investigation", "statutory_audit"],
+        "risk_score": ["support", "fraud_investigation", "statutory_audit"],
+    },
+    "payments": {
+        "full_instrument": ["billing", "fraud_investigation", "incident_response"],
+        "arrears_terms": ["billing", "support"],
+    },
+    "booking": {
+        "internal_notes": ["support", "fraud_investigation"],
+    },
+}
+
+# Request-context key that carries the declared purpose.
+PURPOSE_CONTEXT_FIELD = "purpose"
+# The reason codes purpose evaluation can return, so a caller branches on a
+# closed set rather than on a string it re-derives.
+PURPOSE_REASONS = ("ok", "purpose_not_declared", "purpose_unknown", "purpose_not_permitted")
+
+# --- Layer 5: read budgets -----------------------------------------------------
+#
+# An RBAC grant answers "may", never "how often". A single stolen credential with
+# a legitimate grant can read a whole column before anyone notices. Budgets cap
+# it: a role may read a sensitive cell at most N times per window.
+#
+# Config table: each row is {roles, resource, cell, max_reads, window_seconds,
+# enabled}. ``cell: "*"`` budgets the whole resource.
+CELL_BUDGETS: list[dict[str, Any]] = [
+    {
+        "budget_id": "agent_government_id",
+        "roles": ["agent"],
+        "resource": "customer_profile",
+        "cell": "government_id",
+        "max_reads": 20,
+        "window_seconds": 3600,
+        "enabled": True,
+    },
+    {
+        "budget_id": "agent_full_instrument",
+        "roles": ["agent"],
+        "resource": "payments",
+        "cell": "full_instrument",
+        "max_reads": 10,
+        "window_seconds": 3600,
+        "enabled": True,
+    },
+    {
+        "budget_id": "auditor_audit_trail",
+        "roles": ["auditor"],
+        "resource": "audit_trail",
+        "cell": "*",
+        "max_reads": 500,
+        "window_seconds": 3600,
+        "enabled": True,
+    },
+]
+
+BUDGET_REASONS = ("ok", "budget_exhausted")
+
+# --- Layer 5: masking profiles -------------------------------------------------
+#
+# ``_mask_value`` is one strategy applied to every cell. Masking is a data-
+# classification decision, so it lives in a table: which strategy a cell uses,
+# and what each strategy means.
+#
+# Recognised strategy keys:
+#   last4        keep the trailing 4 characters (the historical behaviour)
+#   first1       keep the leading character
+#   email_domain keep the domain, redact the local part
+#   hash         stable non-reversible token for correlation
+#   drop         omit the value entirely
+#   fixed        a constant, for a cell whose shape must never be inferred
+MASKING_PROFILES: dict[str, dict[str, Any]] = {
+    "last4": {"strategy": "last4", "description": "trailing four characters"},
+    "first1": {"strategy": "first1", "description": "leading character only"},
+    "email_domain": {"strategy": "email_domain", "description": "local part redacted"},
+    "hash": {"strategy": "hash", "description": "stable sha256 prefix for correlation"},
+    "drop": {"strategy": "drop", "description": "value withheld entirely"},
+    "fixed": {"strategy": "fixed", "description": "constant placeholder"},
+}
+DEFAULT_MASKING_PROFILE = "last4"
+# Config table: resource -> cell -> profile name. Absent means
+# ``DEFAULT_MASKING_PROFILE``, which reproduces the historical masking exactly.
+CELL_MASKING_PROFILES: dict[str, dict[str, str]] = {
+    "customer_profile": {
+        "email": "email_domain",
+        "phone": "last4",
+        "government_id": "fixed",
+    },
+    "payments": {
+        "full_instrument": "last4",
+    },
+}
+
+# --- Layer 5: cell sensitivity classification ----------------------------------
+#
+# Lets a review ask questions the matrix cannot: which cells are sensitive, which
+# sensitive cells have no purpose tag (so *any* reason will do), and which have
+# no budget at all.
+CELL_SENSITIVITY: dict[str, dict[str, str]] = {
+    "customer_profile": {
+        "full_name": "pii",
+        "email": "pii",
+        "phone": "pii",
+        "preferred_language": "internal",
+        "risk_score": "derived_sensitive",
+        "biometric_status": "biometric",
+        "government_id": "restricted_pii",
+    },
+    "booking": {
+        "id": "internal",
+        "service_type": "internal",
+        "scheduled_date": "internal",
+        "details": "pii",
+        "internal_notes": "confidential",
+        "assignment_history": "internal",
+    },
+    "payments": {
+        "amount": "financial",
+        "instrument_last4": "financial",
+        "full_instrument": "restricted_financial",
+        "arrears_terms": "financial",
+        "refund_eligibility": "financial",
+    },
+    "audit_trail": {
+        "actor": "confidential",
+        "action": "confidential",
+        "detail_json": "confidential",
+        "source": "internal",
+    },
+}
+# Sensitivities above this rank are "restricted" and are expected to carry a
+# purpose tag; a cell at or below it is expected to carry a budget.
+SENSITIVITY_RANK: dict[str, int] = {
+    "public": 0,
+    "internal": 1,
+    "pii": 2,
+    "financial": 3,
+    "confidential": 3,
+    "derived_sensitive": 3,
+    "biometric": 4,
+    "restricted_pii": 5,
+    "restricted_financial": 5,
+}
+# Budgets are only required at or above this rank — an internal code needs no
+# rate limit to be safe to read.
+BUDGET_REQUIRED_FROM = 2
+
 
 # --- Role resolution ------------------------------------------------------------
 
@@ -287,22 +497,53 @@ def _scope_matches(scope: dict[str, Any], record: dict[str, Any] | None) -> bool
     return True
 
 
-def _mask_value(value: Any, cell: str) -> Any:
-    """Redact a value for a masked read.
+def masking_profile_for(resource: str | None, cell: str) -> str:
+    """The masking profile configured for a cell, defaulting to ``last4``."""
+    profile = (
+        CELL_MASKING_PROFILES.get(str(resource), {}).get(str(cell))
+        if resource is not None
+        else None
+    ) or DEFAULT_MASKING_PROFILE
+    # An unknown profile name falls back rather than raising: a typo in config
+    # must not turn every masked read in a request path into an error.
+    return profile if profile in MASKING_PROFILES else DEFAULT_MASKING_PROFILE
 
-    Strings keep only the last 4 characters, digits keep the last 4, everything
-    else is replaced wholesale — a masked read should never leak more than the
-    minimum needed to correlate a record.
+
+def apply_masking(value: Any, profile: str) -> Any:
+    """Apply a named masking profile to a value.
+
+    Every strategy returns ``None`` for a non-scalar, because a masked read of a
+    list must never leak its length or contents. An unrecognised profile name
+    degrades to ``last4`` rather than raising.
     """
-    if isinstance(value, bool) or value is None:
+    strategy = (MASKING_PROFILES.get(str(profile)) or {}).get("strategy") or "last4"
+    if value is None or isinstance(value, (bool, list, tuple, dict, set)):
         return None
-    if isinstance(value, str):
-        return f"***{value[-4:]}" if len(value) > 4 else "***"
-    if isinstance(value, int):
-        return int(str(value)[-4:]) if len(str(value)) > 4 else 0
-    if isinstance(value, (list, tuple, dict, set)):
+    text = value if isinstance(value, str) else str(value)
+    if strategy == "drop":
         return None
-    return "***"
+    if strategy == "fixed":
+        return "***"
+    if strategy == "hash":
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    if strategy == "first1":
+        return f"{text[:1]}***" if text else "***"
+    if strategy == "email_domain":
+        if "@" in text:
+            return f"***@{text.partition('@')[2]}"
+        return f"***{text[-4:]}" if len(text) > 4 else "***"
+    # ``last4`` -- the historical default, kept character-for-character.
+    return f"***{text[-4:]}" if len(text) > 4 else "***"
+
+
+def _mask_value(value: Any, cell: str, resource: str | None = None) -> Any:
+    """Redact a value for a masked read using the cell's configured profile.
+
+    With no profile configured this is exactly the historical ``last4``
+    behaviour. A profile can only ever redact *more* than that, so configuring
+    one tightens a cell and never widens it.
+    """
+    return apply_masking(value, masking_profile_for(resource, cell))
 
 
 def mask_payload(resource: str, roles: Any, payload: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -320,10 +561,313 @@ def mask_payload(resource: str, roles: Any, payload: dict[str, Any], context: di
         if level == "none":
             continue  # hidden: omit from the response entirely
         if level == MASK_LEVEL:
-            result[cell] = _mask_value(value, cell)
+            result[cell] = _mask_value(value, cell, resource)
         else:
             result[cell] = value
     return result
+
+
+# --- Layer 5: purpose limitation ------------------------------------------------
+
+
+def purposes_for(resource: str, cell: str) -> list[str] | None:
+    """Purposes a cell may be read for, or ``None`` for "any purpose".
+
+    A missing tag is the pre-layer-5 answer (no purpose check at all) and is
+    reported as ``None`` rather than as an empty list, so a caller can tell
+    "unrestricted" apart from "restricted to nothing".
+    """
+    return CELL_PURPOSE_TAGS.get(str(resource), {}).get(str(cell))
+
+
+def check_purpose(
+    resource: str,
+    cell: str,
+    purpose: str | None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Whether a declared purpose permits reading one cell.
+
+    Pure, and deliberately *narrowing only*: it can withhold a read that the
+    matrix allowed, never grant one. An undeclared purpose on an untagged cell
+    is ``ok`` — that is the historical behaviour — while an undeclared purpose
+    on a tagged cell is ``purpose_not_declared``.
+    """
+    allowed = purposes_for(resource, cell)
+    declared = str(purpose) if purpose not in (None, "") else None
+    if declared is None and context is not None:
+        raw = context.get(PURPOSE_CONTEXT_FIELD)
+        declared = str(raw) if raw not in (None, "") else None
+    if allowed is None:
+        return {"resource": resource, "cell": cell, "permitted": True, "reason": "ok",
+                "purpose": declared, "allowed_purposes": None}
+    if "*" in allowed:
+        return {"resource": resource, "cell": cell, "permitted": True, "reason": "ok",
+                "purpose": declared, "allowed_purposes": list(allowed)}
+    if declared is None:
+        return {"resource": resource, "cell": cell, "permitted": False,
+                "reason": "purpose_not_declared", "purpose": None,
+                "allowed_purposes": list(allowed)}
+    if declared not in CELL_PURPOSES:
+        return {"resource": resource, "cell": cell, "permitted": False,
+                "reason": "purpose_unknown", "purpose": declared,
+                "allowed_purposes": list(allowed)}
+    if declared not in allowed:
+        return {"resource": resource, "cell": cell, "permitted": False,
+                "reason": "purpose_not_permitted", "purpose": declared,
+                "allowed_purposes": list(allowed)}
+    return {"resource": resource, "cell": cell, "permitted": True, "reason": "ok",
+            "purpose": declared, "allowed_purposes": list(allowed)}
+
+
+def plan_purposes(
+    resource: str,
+    roles: list[str] | tuple[str, ...] | str,
+    *,
+    purpose: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Re-run a resource plan with purpose limitation applied on top.
+
+    The layer-5 view of :func:`plan_resource_access`: a cell the matrix would
+    show becomes ``hidden`` when the declared purpose does not cover it. Cells
+    the matrix already hid stay hidden, so this can only reduce visibility.
+    """
+    base = plan_resource_access(resource, roles, context=context)
+    per_cell: dict[str, dict[str, Any]] = {}
+    for cell, state in base["cells"].items():
+        verdict = check_purpose(resource, cell, purpose, context=context)
+        per_cell[cell] = verdict
+        if state != "hidden" and not verdict["permitted"]:
+            base["cells"][cell] = "hidden"
+    base["purpose"] = {
+        "declared": next(
+            (v["purpose"] for v in per_cell.values() if v["purpose"]), None
+        ),
+        "reasons": sorted({v["reason"] for v in per_cell.values()}),
+        "cells": per_cell,
+    }
+    base["visible"] = sorted(c for c, k in base["cells"].items() if k == "visible")
+    base["masked"] = sorted(c for c, k in base["cells"].items() if k == "masked")
+    base["hidden"] = sorted(c for c, k in base["cells"].items() if k == "hidden")
+    return base
+
+
+# --- Layer 5: read budgets -----------------------------------------------------
+
+
+def budgets_for(resource: str, cell: str, roles: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    """Enabled budget rows that cover ``(resource, cell)`` for these roles."""
+    resolved = resolve_roles(list(roles) if roles is not None else [])
+    out: list[dict[str, Any]] = []
+    for budget in CELL_BUDGETS:
+        if not budget.get("enabled", True):
+            continue
+        if budget.get("resource") != resource:
+            continue
+        if budget.get("cell") not in (cell, "*"):
+            continue
+        if resolved and not (set(budget.get("roles") or ()) & resolved):
+            continue
+        out.append(dict(budget))
+    return out
+
+
+class ReadBudgetStore:
+    """Thread-safe sliding-window counters for :data:`CELL_BUDGETS`.
+
+    Budgets answer "how often", which the matrix cannot. A grant that is
+    legitimate and unlimited is exactly what makes a stolen credential useful,
+    so the cap is where the blast radius of a compromise actually stops.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._reads: dict[tuple[str, str, str], deque] = {}
+
+    @staticmethod
+    def _key(budget_id: str, subject: str, cell: str) -> tuple[str, str, str]:
+        return (str(budget_id), str(subject), str(cell))
+
+    def _window(self, key: tuple[str, str, str], window_seconds: int) -> deque:
+        bucket = self._reads.get(key)
+        if bucket is None or bucket.maxlen != max(1, int(window_seconds)):
+            bucket = deque(maxlen=max(1, int(window_seconds)))
+            self._reads[key] = bucket
+        return bucket
+
+    def record(
+        self, budget: dict[str, Any], *, subject: str, cell: str, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Count one read against a budget and report whether it is allowed.
+
+        The read is counted whether or not it is allowed, so a client hammering
+        a refused cell still cannot be served by waiting for the window to roll.
+        """
+        moment = now or datetime.now(timezone.utc)
+        key = self._key(budget["budget_id"], subject, cell)
+        window_seconds = max(1, int(budget.get("window_seconds", 60)))
+        with self._lock:
+            bucket = self._window(key, window_seconds)
+            bucket.append(moment.timestamp())
+            used = len(bucket)
+            allowed = used <= int(budget.get("max_reads", 0) or 0)
+        return {
+            "budget_id": budget["budget_id"],
+            "subject": subject,
+            "cell": cell,
+            "used": used,
+            "max_reads": int(budget.get("max_reads", 0) or 0),
+            "window_seconds": window_seconds,
+            "permitted": allowed,
+            "reason": "ok" if allowed else "budget_exhausted",
+        }
+
+    def peek(
+        self, budget: dict[str, Any], *, subject: str, cell: str, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Current usage without counting a read (for a pre-flight check)."""
+        moment = now or datetime.now(timezone.utc)
+        key = self._key(budget["budget_id"], subject, cell)
+        window_seconds = max(1, int(budget.get("window_seconds", 60)))
+        cutoff = moment.timestamp() - window_seconds
+        with self._lock:
+            bucket = self._reads.get(key) or deque(maxlen=window_seconds)
+            used = sum(1 for stamp in bucket if stamp > cutoff)
+        return {
+            "budget_id": budget["budget_id"],
+            "subject": subject,
+            "cell": cell,
+            "used": used,
+            "max_reads": int(budget.get("max_reads", 0) or 0),
+            "window_seconds": window_seconds,
+            "permitted": used < int(budget.get("max_reads", 0) or 0),
+            "reason": "ok" if used < int(budget.get("max_reads", 0) or 0) else "budget_exhausted",
+        }
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                f"{budget_id}:{subject}:{cell}": len(bucket)
+                for (budget_id, subject, cell), bucket in sorted(self._reads.items())
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._reads.clear()
+
+
+READ_BUDGETS = ReadBudgetStore()
+
+
+# --- Layer 5: standing review questions ----------------------------------------
+
+
+def review_access_programs() -> dict[str, Any]:
+    """The questions a periodic access review has to answer, answered.
+
+    Three gaps, all derived from config rather than from a manual spreadsheet:
+
+    - restricted cells with **no purpose tag** — anything will do as a reason;
+    - cells at or above the budget threshold with **no budget** — unbounded;
+    - cells no role can read — dead configuration nobody has revisited.
+    """
+    unrestricted: list[dict[str, Any]] = []
+    unbounded: list[dict[str, Any]] = []
+    for resource, cells in sorted(CELL_MATRIX.items()):
+        for cell in sorted(cells):
+            rank = SENSITIVITY_RANK.get(CELL_SENSITIVITY.get(resource, {}).get(cell, "internal"), 1)
+            sensitivity = CELL_SENSITIVITY.get(resource, {}).get(cell, "internal")
+            if purposes_for(resource, cell) is None:
+                unrestricted.append(
+                    {
+                        "resource": resource,
+                        "cell": cell,
+                        "sensitivity": sensitivity,
+                        "reason": "no_purpose_tag",
+                    }
+                )
+            covered = any(
+                budget.get("resource") == resource and budget.get("cell") in (cell, "*")
+                for budget in CELL_BUDGETS
+            )
+            if rank >= BUDGET_REQUIRED_FROM and not covered:
+                unbounded.append(
+                    {
+                        "resource": resource,
+                        "cell": cell,
+                        "sensitivity": sensitivity,
+                        "rank": rank,
+                        "reason": "no_read_budget",
+                    }
+                )
+    dead_cells = [
+        {"resource": resource, "cell": cell, "reason": "no_role_has_access"}
+        for resource, cells in sorted(CELL_MATRIX.items())
+        for cell in sorted(cells)
+        if not any(
+            ACCESS_RANK.get(grants.get(role, "none"), 0) > 0
+            for grants in cells[cell].values()
+            for role in ROLE_GROUPS
+            if role in grants
+        )
+    ]
+    findings = unrestricted + unbounded + dead_cells
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sensitivity": {
+            resource: {cell: CELL_SENSITIVITY.get(resource, {}).get(cell, "internal")
+                       for cell in sorted(cells)}
+            for resource, cells in sorted(CELL_MATRIX.items())
+        },
+        "purposes": sorted(CELL_PURPOSES),
+        "purpose_tags": {
+            resource: {cell: list(values) for cell, values in sorted(cells.items())}
+            for resource, cells in sorted(CELL_PURPOSE_TAGS.items())
+        },
+        "budgets": [dict(budget) for budget in CELL_BUDGETS],
+        "budget_usage": READ_BUDGETS.state(),
+        "unrestricted_cells": unrestricted,
+        "unbounded_cells": unbounded,
+        "dead_cells": dead_cells,
+        "findings": findings,
+        "finding_count": len(findings),
+        "reviewed": not findings,
+    }
+
+
+def build_cell_matrix_policy() -> dict[str, Any]:
+    """The layer-5 catalog: purposes, budgets, masking, sensitivity, review.
+
+    Separate from :func:`build_cell_matrix_catalog` because that function's key
+    set is a pinned contract — new capability lives here instead of beside it.
+    """
+    return {
+        "layer": 5,
+        "purposes": {name: dict(config) for name, config in sorted(CELL_PURPOSES.items())},
+        "purpose_reasons": list(PURPOSE_REASONS),
+        "purpose_context_field": PURPOSE_CONTEXT_FIELD,
+        "purpose_tags": review_access_programs()["purpose_tags"],
+        "budget_reasons": list(BUDGET_REASONS),
+        "budgets": [dict(budget) for budget in CELL_BUDGETS],
+        "budget_state": READ_BUDGETS.state(),
+        "masking_profiles": {
+            name: dict(config) for name, config in sorted(MASKING_PROFILES.items())
+        },
+        "default_masking_profile": DEFAULT_MASKING_PROFILE,
+        "cell_masking": {
+            resource: dict(sorted(cells.items()))
+            for resource, cells in sorted(CELL_MASKING_PROFILES.items())
+        },
+        "sensitivity_rank": dict(sorted(SENSITIVITY_RANK.items())),
+        "budget_required_from": BUDGET_REQUIRED_FROM,
+        "review": review_access_programs(),
+        "note": (
+            "layer 5 is narrowing-only: purpose tags and read budgets can withhold "
+            "a read the matrix allowed, never grant one, and a masking profile can "
+            "only redact more than the default"
+        ),
+    }
 
 
 # --- Temporary / break-glass grants --------------------------------------------
@@ -715,9 +1259,18 @@ def build_cell_matrix_catalog() -> dict[str, Any]:
         },
         "precedence": [
             "row_scope / override_deny (reduce only)",
+            "purpose_limitation (reduce only)",
+            "read_budget (reduce only)",
             "temporary_grant",
             "base_matrix",
             "override_conditions",
             "override_mask",
         ],
+        # Layer 5 lives in its own catalog because this key set is pinned.
+        "policy": {
+            "catalog": "build_cell_matrix_policy",
+            "purposes": sorted(CELL_PURPOSES),
+            "budget_count": len(CELL_BUDGETS),
+            "masking_profile_default": DEFAULT_MASKING_PROFILE,
+        },
     }
