@@ -169,8 +169,24 @@ def _line_stats(path: Path) -> dict[str, int]:
     }
 
 
+_CONFIG_VALUE_NODES = (ast.List, ast.Dict, ast.Set, ast.Tuple)
+
+
+def _is_config_target(target: ast.expr) -> bool:
+    """A module-level UPPER_CASE name (the house style for a config table)."""
+    return isinstance(target, ast.Name) and target.id.isupper()
+
+
 def _def_counts(path: Path) -> tuple[int, int, int]:
-    """(# public defs, # classes, # module-level UPPER_CASE config tables)."""
+    """(# public defs, # classes, # module-level UPPER_CASE config tables).
+
+    Config tables are counted from *both* bare assignments (``X = {...}``) and
+    annotated assignments (``X: dict[str, object] = [...]``). Counting only the
+    bare form under-counted the repo by more than half: the house style for a
+    larger table is to annotate it, so a heavily config-driven module such as
+    ``services/topics.py`` reported ``cfg=0`` and ranked as if it had no
+    configurable surface at all.
+    """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except SyntaxError:
@@ -183,11 +199,18 @@ def _def_counts(path: Path) -> tuple[int, int, int]:
         elif isinstance(node, ast.ClassDef):
             classes += 1
         elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id.isupper() and isinstance(
-                    node.value, (ast.List, ast.Dict, ast.Set, ast.Tuple)
-                ):
-                    tables += 1
+            if isinstance(node.value, _CONFIG_VALUE_NODES) and any(
+                _is_config_target(target) for target in node.targets
+            ):
+                tables += 1
+        elif isinstance(node, ast.AnnAssign):
+            # ``X: T = {...}`` — the annotated form used by every large table.
+            if (
+                node.value is not None
+                and isinstance(node.value, _CONFIG_VALUE_NODES)
+                and _is_config_target(node.target)
+            ):
+                tables += 1
     return public, classes, tables
 
 

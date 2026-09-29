@@ -672,5 +672,515 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   before and after every step of this pass; the new surfaces were verified with
   scripted harnesses in `/tmp/opencode/` instead.
 
+### Thin-group expansion, fourth pass (2026-09-28)
+
+Five groups expanded, thinnest first by `python3 scripts/loc_by_function_group.py`:
+`services/retention` (733 → 2033), `services/recovery_playbooks` (598 → 2522),
+`routers/topics` (303 → 2765), `app/model_bases` (502 → 1985),
+`services/policy_scoring` (680 → 2193). Additive throughout: no existing
+signature changed, no existing config table was edited, no route response
+payload changed shape, no DDL.
+
+- **`routers/topics.py` — the governance layer is advisory, and that is a
+  decision, not an omission.** `GovernedAPIRoute(APIRoute)` is set on
+  `router.route_class` and returns the original response untouched. The table
+  describes the router; the planner predicts. No existing route is gated, rate
+  budget is never spent by planning, and the recorder is the only piece in the
+  request path. The alternative — enforcing the bounds — would have changed
+  behaviour of 31 live routes in a pass whose scope was adding surface.
+  Every clamp is reported, so a silent narrowing is at least visible.
+- **`app/model_bases.py` — the four new mixins are for new tables only.**
+  Applying `SluggableMixin` / `ApprovalMixin` / `MoneyMixin` /
+  `IdempotencyMixin` to a class in `app/models.py` is a DDL change and needs a
+  migration, so this pass added them and applied them to nothing. A column name
+  that both a mixin and an existing table declare is therefore reported as a
+  **warning that names both sides**, not blocked — a test that "passed" because
+  the overlap was forbidden would be asserting a restriction the layer does not
+  and should not have.
+- **`app/model_bases.py` — partial schema views must say so.** `Base.metadata`
+  only holds imported models. `mixin_column_provenance` reports
+  `entities_module_imported` and `validate_model_bases` warns when it is false,
+  following the same precedent as `schema_drift_report` in `db.py`. A report
+  that read a partial view as a whole-schema audit would pass while being wrong.
+- **`app/model_bases.py` — the field-sensitivity vocabulary is layered *over* the
+  untouched `SERIALIZATION_DENYLIST`.** New keys are reported through
+  `mixin_extensions`; the pinned `mixins` / `families` contract is never
+  widened, because a caller iterating those lists would silently start seeing
+  new names.
+- **BUG FOUND — `SERIALIZATION_PROFILES["public"]["max_depth"]` was 2.** A list
+  response is `{key: [row, ...]}`, so the row dict sits at depth 2 and the
+  bound blanked every row in every list payload. The validator check is on
+  *shape* (`rows and all(row for row in rows)`), not on any one field name, so
+  tightening the class list cannot make it fire spuriously.
+- **`services/recovery_playbooks.py` — the automated sweep is a loop and
+  `credit_points` had no bound.** The credit amount is derived from the current
+  dissatisfaction score, and nothing limited how often the sweep could run, so a
+  customer whose sentiment stayed negative was re-credited the same goodwill
+  amount every pass, indefinitely. `RECOVERY_GUARD_RULES` makes the limits
+  declarative (per-run, per-day, cooldown, daily budget per budgeted metric) and
+  a refusal is reported as `skipped` **with the guard that said no**, not as a
+  failure — a guard that looks like an error trains people to disable it.
+- **Keep-as-is decision — `app/models.py` still does not import
+  `app/services/*`,** so a judgment two services would share is declared twice
+  rather than imported. A duplicate table can drift; a cycle cannot be repaired
+  without breaking the import graph.
+- **BUG FOUND — the `policy_scoring` validator raised `ValueError` instead of
+  reporting.** `dict(rule.get("priority") or {})` on a recommendation row whose
+  `priority` is the string `"high"` raised out of the validator, i.e. a 500 from
+  the one place a malformed config table must never take the process down. Both
+  the validator and the request-path trace now type-check first; the trace falls
+  back to a reported priority rather than raising.
+- **`services/policy_scoring.py` — two original arithmetic asymmetries are
+  preserved, not corrected.** (1) `customer_score` floors its inverted
+  dissatisfaction term at 0 but does **not** ceiling it, so a negative
+  dissatisfaction reading adds to the customer score. (2) `scaled_mean` divides
+  by the *term count*, not by the sum of the weights; in `interest_score` the
+  weights are 10/4/8/1, so reading it as a weighted mean would move the
+  published score by a wide margin. Both are documented in the table comments,
+  and both are asserted: every stored `CustomerPolicyScore.summary` string
+  embeds the numbers they produced, so "correcting" either one silently
+  invalidates historical comparisons.
+- **`services/policy_scoring.py` — marker accumulation order is part of the
+  contract.** For topic `depth` the five-word bonus lands *between* the routing
+  and urgency marker groups, and float addition is not associative. The marker
+  table therefore carries an explicit `order` and a test asserts
+  `10 < bonus_order < 20`, rather than leaving the order to be an accident of
+  how the list is written.
+- **`policy_rule_coverage` surfaced a fact that was not visible before:** 62.9%
+  of the (access, system) score grid resolves to the *default* constrained
+  posture rather than to a `CONTROL_POSTURE_RULES` row. First-match-wins makes
+  row order the semantics, so a shadowed row is dead configuration that still
+  reads as live in the catalog. The sweep reports unreachable rows as
+  **warnings, not errors**, because it is a grid and a band narrower than the
+  step can hide a rule.
+- **Test-side corrections made in this pass (the assertions were wrong, not the
+  source):** the new-mixin column-overlap test asserts a validator *warning*
+  (`test_a_column_name_shared_with_an_existing_table_is_reported_not_forbidden`);
+  `test_lists_are_walked_and_bounded_too` uses `public`; an
+  unknown-enum-value test no longer asserts `filters == []` (replaced by
+  `test_a_half_valid_list_still_filters_and_is_still_reported` and
+  `test_a_fully_unknown_list_leaves_no_filter_at_all`);
+  `test_a_widened_profiles_table_is_an_error` now matches `"no longer falls back
+  to excluding every class"`. **Never `del` a module attribute in a test** — an
+  earlier `del topics.observed_topic_routes` permanently removed the function
+  and broke 30+ tests; use `monkeypatch.setattr` / `monkeypatch.setitem`.
+- **Verification approach.** For `policy_scoring` the claim is *byte-identical
+  output*, so it is proved differentially rather than asserted: the original
+  inline expressions were transcribed into the test file and compared against
+  the table-driven engine over 24,063 topic texts, 20,000 random metric sets and
+  a grid straddling every threshold. Comparing the new engine against another
+  restatement of the same tables would have proved nothing.
+- Code map: leaf-level growth on `services.retention`,
+  `services.recovery_playbooks`, `routers.topics`, `models.model_bases`,
+  `services.policy_scoring` and `infra.main`; regenerated via
+  `python3 scripts/build_code_map.py` to 511 leaves / 54 internal nodes
+  (was 498/54), with **zero leaves lost**. Revision stays `r5` (no new layer /
+  top-level domain, rule 6).
+- `/meta/` surfaces updated in the same commit (rule 5): four `/meta` features,
+  four `/meta/ecosystem` `subservices` entries with `config_tables` + `notes`,
+  new `GET /meta/model-bases` and `GET /meta/policy-scoring` handlers, and the
+  matching `/meta/features` and `/meta/scoring-catalog` keys.
+- Tests: `tests/test_retention_policy_expansion.py` (71),
+  `tests/test_recovery_governance_expansion.py` (119),
+  `tests/test_topic_request_governance_expansion.py` (183),
+  `tests/test_model_bases_governance_expansion.py` (167),
+  `tests/test_policy_scoring_expansion.py` (133) — suite grew **1240 → 1373
+  passing**. `validate_model_bases()` and `validate_policy_scoring()` both
+  report 0 errors against the live tables.
+
+### Thin-group expansion, fifth pass — `app/deps.py` (2026-09-28)
+
+`app/deps.py` 595 → 2908 LOC, 0 → 14 config tables, +19 functions, 184 new
+tests. The request path is unchanged: same principal resolution, same status
+codes, same denial payloads, and every existing dependency keeps its exact
+signature.
+
+- **`AUTHZ_DENIALS` is load-bearing, the other two tables are not.**
+  Each `require_*` factory's `status_code` now reads `AUTHZ_DENIALS`, with
+  values identical to the old inline literals. The `error` / `text` strings stay
+  **inline** on purpose: clients match on them, so a table would only make them
+  easier to change without noticing. `RATE_TIERS` is read only by the new
+  `require_rate_tier`; the historical `require_rate_limit(capacity,
+  refill_per_second)` signature and the env-driven `RATE_LIMITER` are untouched,
+  and the `interactive` row documents the 60/1.0 default the env vars override.
+  `STEP_UP_RANKS` documents the ranks; `require_step_up(level: str = "loa2")`
+  keeps its **literal** default deliberately, so the table documents the floor
+  instead of silently supplying a signature.
+- **`ROLE_SCOPE_GRANTS` is advisory and must never be applied at resolution
+  time.** `require_scopes` reads `Principal.scopes` and nothing else. Deriving
+  scopes from roles would start authorizing calls that are denied today. It is
+  reported as `facts.implied_by_roles` with `implied_by_roles_applied: False`.
+  `USER_ROLES` is untouched.
+- **`AUTHZ_RULES` describes routes that exist; it does not route.** 56 rows,
+  most-specific-first, catch-all last. `enforced_by` names the dependency that
+  actually runs; `hardening` is proposed-but-unenforced and lives in a
+  **different key** on purpose, evaluated only under
+  `evaluate_authz(include_hardening=True)` with every such check marked
+  `enforced: False`. A second key rather than a flag inside `enforced_by`,
+  because a reader scanning that column must never be able to mistake a
+  proposal for something a request is checked against.
+- **`app.deps` cannot import `app.main`** (cycle), so
+  `authz_drift_report(routes)` and `build_authz_catalog(routes=None)` take the
+  route list as an argument. All six `require_*` factories are bound to **no
+  route at all**; the report lists them under `unbound_factories` rather than
+  leaving them to look wired.
+- **FastAPI version quirk worth remembering:** `app.routes` holds
+  `_IncludedRouter` wrappers and `route.path` is **not** the effective path.
+  `include_router(prefix=...)` lives in `route.include_context.prefix`, while a
+  router's own `.prefix` is already baked into its child route paths.
+  `iter_authz_routes` implements this and reproduces the openapi path set
+  **exactly** (197 paths, zero diff) — asserted in the tests. Also, `Dependant`
+  in this version has no `.dependency`; read `Depends` defaults from the
+  endpoint signature and `route.dependencies`.
+- **Three bugs found, all "the surface reported a fact that was not true":**
+  1. `match_authz_rule` omitted the `matched_fallback` key when the deciding
+     rule *was* the catch-all — so `unclassified_routes` and `in_sync` missed
+     precisely the case the fallback exists to catch. The key is now always
+     present; two consumers switched to `bool(match["matched_fallback"])`.
+  2. `evaluate_authz` failed the `authenticated` check whenever
+     `principal is None`, **including on `public` routes** that require no
+     credential, so the whole public surface was reported denied. That check is
+     now `not_evaluated` with a reason. Related: the `anonymous` probe was built
+     as an empty `Principal`, but `roles_for_user` always yields at least one
+     role, so a resolved-but-roleless principal is a state the app **cannot
+     produce** — and "resolves to a principal" is exactly what the
+     authenticated routes check, so the probe reported them all as *allowed*
+     while its note claimed "no credential at all". Probes now carry an
+     `absent` flag and `authz_probe` returns `None` for those rows, which is
+     what `evaluate_authz` actually branches on. A probe row that is absent and
+     still declares a subject, roles, scopes, tenant, auth method or claims is
+     a validator **error**, not a shrug.
+  3. The pattern compiler turned a trailing `*` into `.*`, so the rule for
+     `/meta*` also claimed `/metadata`. Tightened to `(?:/.*)?`. That
+     reclassified `GET /chat/admin-activity`, which had been admin-gated **by
+     accident**; it now has its own `chat_admin_activity` rule.
+- **`validate_authz` was validating derived indexes instead of the tables.**
+  It read the import-time `SCOPE_BY_NAME`, `STEP_UP_RANK_BY_LEVEL`,
+  `RATE_TIER_BY_NAME` and `AUTHZ_RULE_IDS`, so editing `STEP_UP_RANKS` to
+  disagree with `security.STEP_UP_RANK` produced no complaint at all, and
+  "the catch-all rule must be last" had never fired. It now builds its own
+  local indexes from the lists it validates. **Two tests had been written
+  against the old behaviour** — they mutated `STEP_UP_RANK_BY_LEVEL` — and were
+  corrected to mutate the table, plus a new test asserting the index is left
+  stale on purpose.
+- **`AUTHZ_OPS["default_rate_tier"] = "interactive"`** was added: the
+  default-tier lookup had been reading `default_exposure`, which yields the
+  string `"public"` as though it were a tier name.
+- **`policy_tier` is the one `AUTHZ_CHECK_ORDER` check with no denial.** It
+  needs a `User` row that an offline `Principal` does not carry, so it is
+  reported `not_evaluated` and is never a denial. Every other check in the
+  order must have a denial; every denial must be claimed by a check, and one
+  claimed by none is a **warning** (it is reachable from a dependency, just not
+  from `evaluate_authz`).
+- **Test-side traps hit in this pass, for the record:**
+  - `original = list(TABLE)` is a **shallow** copy: the row dicts are the live
+    ones. A test that did `row["self_service"] = True` and restored with
+    `TABLE[:] = original` restored the *mutation* and silently poisoned every
+    later test. Replace the row (`{**row, ...}`) rather than editing it in place.
+  - `original = getattr(D, name)` **aliases the live list** — same trap, worse.
+    Use `list(...)`.
+  - Two tests mutated `AUTHZ_PROBES[0]` positionally, which is now the `absent`
+    row; they name the probe (`"customer"`) instead.
+- **Doc drift corrected while here:** `CODE_MAP.md`'s "Current Map" header still
+  read `498 leaves / 54 internal nodes` from before the fourth pass, and its
+  multi-line rendering was missing seven leaves the Newick had already gained
+  (`model_bases_endpoint`, `policy_scoring_endpoint`, `composition`,
+  `topic_metrics`, `posture_adjustment`, `tier_escalation`, `ops_catalog`). The
+  rendering is now token-for-token equal to the Newick, checked by script.
+  The `/meta/ecosystem` note also hardcoded "the 208 live method+path pairs";
+  it is now count-free, because a note that restates a count is a note that
+  will be wrong the next time a route is added.
+- Code map: `auth_deps` gained 12 leaves (`scope_catalog`,
+  `role_scope_grants`, `denial_contract`, `step_up_ranks`, `rate_tiers`,
+  `route_rules`, `decision_engine`, `drift`, `simulation`, `validation`,
+  `authz_catalog`, `rate_tier`); regenerated via
+  `python3 scripts/build_code_map.py` to **523 leaves / 54 internal nodes**
+  (was 511/54), **zero leaves lost**. Revision stays `r5` (no new layer /
+  top-level domain, rule 6).
+- `/meta/` surfaces updated in the same commit (rule 5): `authz_governance` in
+  the feature list, an `/meta/ecosystem` `subservices` entry with
+  `config_tables` + `notes`, a new `GET /meta/authz` handler, and the matching
+  `/meta/features` and `/meta/scoring-catalog` keys. All five endpoints 200.
+- Tests: `tests/test_authz_expansion.py` (184) — suite grew **1373 → 1557
+  passing**. `validate_authz()` reports **0 errors and 0 warnings** against the
+  live tables. `authz_denial_contract` drives all 14 `require_*` factories and
+  private raisers against their declared payloads.
+- Route ground truth for the next pass: **209 live method+path pairs over 197
+  paths** — 79 admin, 63 authenticated, 19 policy, 48 public. (209 − 197 = 12
+  methods beyond GET.) Write the count into a test, not into prose.
+
+### Thin-group expansion, sixth pass — `app/i18n.py` (2026-09-29)
+
+`app/i18n.py` 564 → 3211 LOC, 0 → 6 config tables, 11 → 20 public functions
+(+9), 116 new tests. Verified by diff: **zero pre-existing signatures changed,
+zero functions removed.** `MESSAGE_CATALOG`, `SUPPORTED_LOCALES`,
+`PLURAL_CATEGORIES`, `RTL_LOCALES`, `translate`, `_render_template`,
+`resolve_locale`, `negotiate_locale`, `parse_accept_language`,
+`catalog_coverage` and `build_i18n_catalog` are byte-identical to
+`HEAD`; the tests transcribe them into `ORIG_*` constants and assert it.
+
+- **This group is report-only. Do not "fix" the leaks.** `_render_template`
+  catches `(KeyError, IndexError, ValueError)` and returns the joined string, so
+  a template that leaks `{name}` is *already being served that way* — repairing
+  it changes a string clients are matching on, inside the module whose entire job
+  is producing those strings. All 15 `RENDER_OPS` rows carry
+  `report_only: True` and `validate_i18n` **errors** on a row that does not.
+  A finding names the code path that produced it; it does not propose a patch.
+- **`NUMBER_FORMATS` is keyed by region profile, not language tag** (`en_us`,
+  `en_gb`, `es_es`, `es_419`, `fr_fr`, `de_de`, `ar_eg`). A language tag
+  determines neither the decimal separator nor the currency position: `es` is
+  `1.234,50 €` in Spain and `$1,234.50` in Latin America. Language-keyed rows
+  would have been confidently wrong. Currency and date order are deliberately
+  **absent** from `LOCALE_EXPECTATIONS` for the same reason. Every profile
+  declares `digit_substitution: "none"` (Arabic-Indic shaping is not
+  implemented) and `format_number` is **offered, not imposed** — the renderer's
+  plural `#` still emits `str(int(n))`.
+- **`unreached_codes` is a first-class catalog field, not a hidden gap.** 22 of
+  the 36 `I18N_WARNINGS` codes are guards that only fire on a malformed config;
+  the shipped catalog is clean, so they stay unreached and the catalog says so.
+- **Six new functions, but the schemas are untouched.** No new pydantic model
+  was added, no existing model's fields were renamed or retyped, and no route's
+  response payload changed shape. The one change to an existing type is
+  additive: `CatalogOverrides.keys_by_scope()`, a read-only view added so the
+  coverage reports do not reach into `_layers`.
+- **Every audit takes an optional `catalog=`.** A proposed catalog is checked
+  before installation, so no test has to mutate the live catalog and restore it
+  — which is the trap that produces three of the bugs listed below.
+
+#### Nine verified defects, reported and deliberately not fixed
+
+1. A missing value leaks the raw token: `translate('auth.welcome','en')` →
+   `'Welcome, {name}'`. Six findings (3 locales × 2 independent detectors).
+2. **`translate()` raises `AttributeError` out of the renderer** for a dotted
+   field — `except (KeyError, IndexError, ValueError)` does not cover it.
+   `_render_template('Value is {a.b} here','en',{'a':'v'})` propagates.
+   Indexing (`{a[0]}`) *is* caught as `IndexError`. The one template shape that
+   turns a copy mistake into a 500.
+3. A plural with no `count` renders the **zero** branch:
+   `translate('error.count','en')` is identical to `count=0` → `'no errors'`.
+4. One unescaped `}` makes `str.format` raise `ValueError`, so **every**
+   placeholder in that template stops interpolating: `'Welcome, {name} }'` →
+   `'Welcome, {name} }'`. The escape is `}}`.
+5. `#` substitution has no word boundary: `'{n, plural, other {issue #7 resolved
+   with # items}}'` with `n=3` → `'issue 37 resolved with 3 items'`.
+6. A missing `other` branch makes the last branch serve every unmatched count:
+   `'{n, plural, one {# item}}'` with `n=99` → `'99 item'`.
+7. `negotiate_locale(...).requested` is `normalize_locale` of the **whole
+   header**: `'fr-CA, es;q=0.8, en;q=0.5'` → `'fr-ca, es;q=0.8, en;q=0.5'` — a
+   field named `requested` that is not a tag.
+8. `q=0` is still eligible (RFC 9110: zero quality means "not acceptable");
+   `q` is unclamped (`q=5` → 5.0); a repeated `q` last-wins silently.
+9. `resolve_locale` and `negotiate_locale` disagree on `fallback_used` for `""`,
+   `es` and `fr` — same resolved locale, opposite flag — and `chain` means
+   different things depending on which produced it.
+
+Plus registry drift: `RTL_LOCALES` ∩ `SUPPORTED_LOCALES` = ∅ (so `direction` is
+permanently `"ltr"`), `PLURAL_CATEGORIES["ar"]` declares six categories while
+`plural_category()` produces only `one`/`other`, `SUPPORTED_LOCALES[l]
+['fallback']` is reported by two payloads and read by no resolution path,
+override keys are invisible to `catalog_coverage()`, and `error.*` vs `errors.*`
+is a declared near-duplicate **kept as-is** because collapsing it would retire
+live keys.
+
+#### Two bugs found in the new code, and the probe traps on this module
+
+- `locale_registry_audit` counted templates with `MESSAGE_CATALOG.get(locale)`,
+  but the catalog is `{key: {locale: template}}` — the top-level lookup found
+  nothing and reported all three shipped locales as translation-less. Three
+  spurious findings. The count is now `sum(1 for _, locale, _ in
+  _catalog_entries(MESSAGE_CATALOG))`; **never** `MESSAGE_CATALOG.get(locale)`.
+- `plural_audit(catalog=X)` called `_safe_translate`, which always reads
+  `MESSAGE_CATALOG` — so it audited the live catalog while claiming to audit the
+  proposed one. It now renders the catalog it was handed.
+- **`translate`'s `count` and `scopes` are keyword-only.**
+  `translate(key, locale, "Ana")` raises `TypeError`. A first probe round
+  passed the value positionally, appeared to show that overrides were being
+  ignored, and would have been written up as a defect. Override probes must pass
+  `scopes=(...)`.
+- `_template_scan` calls `_render_template(text, locale, {})`, which is safe
+  *only* because the empty-values path returns before `.format()`. That is
+  exactly what makes it usable as a detector, and exactly what would break it if
+  the render order ever changed.
+- `I18N_PLACEHOLDER_NAME_INVALID` is reachable only for brace contents that are
+  not `\w+` (e.g. `{na-me}`), and is found in the **rendered output** via
+  `_BRACE_CONTENT`, not in the template via `_PLACEHOLDER`. A legal but
+  differently-spelled name like `{nombre}` is a `I18N_PLACEHOLDER_MISMATCH`, not
+  a name error.
+- Test-restore traps, all still live: `original = getattr(D, name)` **aliases
+  the live list**; `original = list(TABLE)` is **shallow**, so `row["x"] = y`
+  then `TABLE[:] = original` restores the *mutation*. Replace the row
+  (`{**row, ...}`) or `monkeypatch.setattr` the whole table, and restore in a
+  `finally`.
+
+#### State after this pass
+
+- Suite green at **1673 passing** (1557 + 116).
+- `build_i18n_governance_catalog()` reports **36 findings (16 defect / 16
+  warning / 4 info)** across 6 audits; `validate_i18n()` is clean — 0 errors,
+  0 warnings. `message_budget_report` is the one audit with no findings.
+- `main.py` wiring, all four surfaces: the `localization` subservice on
+  `/meta/ecosystem` gained `config_tables` (all 6) and a 1333-character
+  `notes`; `endpoints.i18n_governance = "/meta/i18n"` in `/meta/features`;
+  `"i18n_governance"` in the `/meta` features list; `"i18n_governance":
+  build_i18n_governance_catalog()` in `/meta/scoring-catalog`; a `governance`
+  key on `/meta/i18n`. All five `/meta/` endpoints return 200.
+- Code map: **523 → 539 leaves**, 54 internal nodes, revision stays **r5**
+  (leaf-level additions only; nothing structural). Zero prior leaves lost,
+  verified by token-multiset diff against the `HEAD` Newick, and the multi-line
+  rendering in `CODE_MAP.md` is token-for-token equal to `CODE_MAP.newick`
+  (checked by script, not by eye — the previous pass had drifted by seven
+  leaves).
+- **Ground truth for the shipped catalog**, asserted in the tests so a future
+  edit to `MESSAGE_CATALOG` cannot silently move it: 15 keys, 45 templates, 3
+  locales, 8 prefixes; `name` in `auth.welcome` is the *only* placeholder in the
+  whole catalog; 6 templates carry a plural block; the longest is
+  `error.count[fr]` at 68 characters, which is why the 80-character budget report
+  is clean; `booking.count` → `one`/`other` and `error.count` → `=0`/`one`/
+  `other`, identical across all three locales; all locales agree per key on
+  placeholders, so the divergence guard is green today.
+- **Nothing is committed.** All changes across all seven expansions are
+  uncommitted working-tree changes.
+
+#### Next target
+
+`app/schemas/audit.py` (520 LOC, 40 models, 0 functions, 0 config tables) — the
+last of the 43 ranked groups. A pure pydantic model module: the expansion adds
+`CONTRACT_KINDS`, `CONTRACT_AUDIENCES`, `CONTRACT_FIELD_POLICIES`,
+`CONTRACT_FORBIDDEN_FIELDS`, `CONTRACT_OPS`, `CONTRACT_INVENTORY`,
+`CONTRACT_WARNINGS`, plus `describe_contract_field`,
+`contract_divergence_report`, `contract_redaction_report`, `validate_contracts`,
+`build_contract_catalog`, new report models, and `GET /meta/audit-contracts`.
+Ground truth still true for that work: **209** API routes (method+path pairs) over
+**197** paths — 79 admin, 63 authenticated, 19 policy, 48 public — and
+`analyze_sentiment` returns `None` offline, so any sentiment-dependent contract
+must not assume a model result.
+
+### Thin-group expansion, seventh pass — `app/schemas/audit.py` (2026-09-29)
+
+`app/schemas/audit.py` 520 → 3222 LOC, 0 → 9 config tables, 0 → 6 public
+functions, 0 → 32-code finding taxonomy, 139 new tests. The eighth and last of the
+43 ranked groups. Verified by diff: the forty shipped pydantic contracts above
+the governance banner are **byte-identical to `HEAD`**; the tests transcribe the
+40 field lists, the 40 (fields, required) pairs, the eight comment-declared
+vocabularies and the two `severity` vocabularies as `ORIG_*` constants and assert
+them.
+
+- **This group is report-only, and the reason is sharper than the i18n pass.**
+  A message catalog is data a renderer consumes; a pydantic model here *is* the
+  contract a client binds to. Widening `severity` to silence
+  `CONTRACT_VOCABULARY_COLLISION` would delete the only place the event
+  vocabulary is written down and start accepting a fourth value at the door.
+  All 8 `CONTRACT_OPS` rows carry `report_only: True` and `validate_contracts`
+  **errors** on a row that does not — the posture is checked, not promised.
+- **Nine config tables, none of which existed before**: `CONTRACT_KINDS` (6),
+  `CONTRACT_AUDIENCES` (5), `CONTRACT_FIELD_POLICIES` (14),
+  `CONTRACT_TRIVIAL_FIELDS` (23), `CONTRACT_FORBIDDEN_FIELDS` (6),
+  `CONTRACT_INVENTORY` (40), `CONTRACT_WRITE_PATHS` (4), `CONTRACT_OPS` (8),
+  `CONTRACT_WARNINGS` (33 codes). `CONTRACT_TRIVIAL_FIELDS` is an explicit list,
+  not a frequency threshold, so adding a model cannot start reporting `id`.
+- **The headline finding, verified against the service, not the module.**
+  `POST /audit/log` → `record_audit_log_entry` stores its `detail` blob
+  **verbatim**; `POST /audit/log/auditable` → `record_auditable` calls
+  `redact_detail`. Both fields are `Dict[str, Any]` with **no description**, so
+  the OpenAPI document cannot tell a client which is which
+  (`CONTRACT_REDACTION_ASYMMETRY` + `CONTRACT_REDACTION_UNDECLARED`). The check
+  reads the *function bodies* with `ast` — a module-level grep for `redact_detail`
+  says both paths redact, which is how this table first came to assert
+  `redacts: True` for the raw write. The `no_unredacted_credentials` integrity
+  gate already exists to catch the value; the contract was the blind spot. The
+  pipeline write is unredacted too and stays **clean** because its row says why,
+  so `CONTRACT_WRITE_UNREDACTED` is unreached rather than suppressed.
+- **Other verified findings, reported and not fixed**: `severity` carries two
+  vocabularies in one module (`info|warning|critical` pattern-enforced on three
+  fields vs `advisory|review|reject` comment-only on `AuditIntegrityGateOut`);
+  eight fields name their values in a trailing comment and nowhere else;
+  `summary` is the only uncapped write string; five dead-letter timestamps are
+  `Optional[str]` where the module otherwise uses `datetime`;
+  `entry_ids: List[Optional[int]]`; two envelopes omit `generated_at` and one
+  makes it optional; `POST /audit/log` is the only audit write with an untyped
+  201; shape collisions on `id` (int/str), `occurred_at` (datetime/str) and
+  `replayable` (**a bool flag vs an int count**); and
+  `TransactionQueryReport.results` is untyped where `TransactionLogReport.tail`
+  declares `List[TransactionOut]` — stated as a *comparison*, not as an assertion
+  that the elements are the same records, because the schema does not say so.
+- **`unreached_codes` is emitted, not just counted** (16 of 33). Each unreached
+  code is surfaced as a `CONTRACT_TAXONOMY_NOT_EMITTED` finding and
+  `emitted_codes + unreached_codes == codes` holds as arithmetic a client can
+  check. `CONTRACT_TAXONOMY_NOT_EMITTED` is the one code always reached — it
+  reports the others.
+- **`GOVERNANCE_MODELS` is an explicit name list**, not "everything after the
+  banner comment". An ordering rule would silently reclassify a future contract
+  and silently stop treating a moved report as one. Asserted structurally:
+  `_audit_models` filters by identity and reads no line number, no slice and no
+  marker comment.
+- **No cross-module imports.** `app.models` and `app.main` are deliberately not
+  imported, so the DDL constraint is documented and *not* verified and the route
+  map takes `routes=` (an OpenAPI document or app). The two route-dependent
+  checks report `untyped_write_responses:skipped` without it — an unavailable
+  check never reads as clean.
+- **Eighteen bugs found in this pass's own new code while writing it**, every one
+  caught by cross-checking the report against the module rather than against
+  intent, every one now pinned as a regression test: (1) a taxonomy typo
+  `...UNDOCLARED` vs the emitted `...UNDECLARED`; (2) route matching compared a
+  declared `"GET /audit/logs"` against an observed `"GET /audit/logs [200]"` (12
+  false findings); (3) `top_level` tested against every label, so all 4 `Create`
+  models counted as top-level; (4) `_kind_for` first-match inferred
+  `TransactionSpecReport` as `report`; (5) four checks string-matched a `typing`
+  repr (`List[Dict[str, Any]]` renders as `typing.List[typing.Dict[str,
+  typing.Any]]`) and matched nothing; (6) `_shape_of` unwrapped *any* single-arg
+  generic, turning `List[Dict[str, Any]]` into a bare dict; (7) the nested case
+  then tested `str` for a dict origin; (8) `_typed_list_sibling` returns `field`
+  but the finding body read `typed_twin['typed_at']` → `KeyError`; (9) a taxonomy
+  `emitted_by` was a bare string, so `",".join` spelled the producer out one
+  character at a time (a new taxonomy self-check now catches it); (10) four
+  taxonomy rows used `severity: "error"` while twenty-nine used
+  `defect`/`warning`/`info` — two vocabularies for one field;
+  (11) `CONTRACT_TAXONOMY_NOT_EMITTED` was reported unreached while being
+  emitted; (12) `nested_only` counted the 4 request bodies in with the 14
+  nested-only models; (13) the bypassed-contract check reported 3 lists of query
+  parameters and checkpoints as bypassed contracts (its own comment described the
+  intended behaviour and the code did the opposite); (14) the bypassed entry's
+  `annotation` was the bare origin `"List"`; (15) `_shape_of(None)` claimed
+  `known: True`; (16) `describe_contract_field` called `_carrier_of(annotation)`
+  without the field name, so an ISO-string timestamp was described as "a free
+  label by design" while the returned `carrier` said `timestamp` — one function,
+  two answers; (17) `build_contract_catalog`'s ground-truth arithmetic raised on
+  a malformed row; (18) `emitted_codes` was computed before the unreached
+  findings were appended, so `emitted + unreached == codes` was false by one.
+- **One claim corrected against the code**: `redacts: True` was first written
+  for `POST /audit/log` because `redact_detail` appears in `audit_log.py`. It is
+  in `record_auditable`, not `record_audit_log_entry`. Always check the function
+  body.
+- `main.py` wiring, all five surfaces: a new `GET /meta/audit-contracts` returning
+  `{contracts, governance}`; `audit_trail` on `/meta/ecosystem` gained
+  `config_tables` (9) and a 1145-character `notes`;
+  `endpoints.audit_contracts = "/meta/audit-contracts"` in `/meta/features`;
+  `"contract_governance"` in the `/meta` features list; and
+  `"audit_contracts": build_contract_catalog(routes=app)` in
+  `/meta/scoring-catalog`. All eight `/meta/` endpoints return 200.
+- Code map: **539 → 560 leaves**, 54 internal nodes, revision stays **r5**
+  (leaf-level additions only). Zero prior leaves lost, verified by token-multiset
+  diff against the `HEAD` Newick, and the multi-line rendering in `CODE_MAP.md`
+  is token-for-token equal to `CODE_MAP.newick` (checked by script).
+- **Tests**: `tests/test_contract_governance_expansion.py` (139) — suite grew
+  **1673 → 1812 passing**. Whole-table swaps use `monkeypatch.setattr`; the
+  write-path claims are verified against `app.services.audit_log` by `ast`.
+- **Ground truth for the shipped catalog**, asserted in the tests: 40 contracts
+  (4 request bodies / 22 top-level responses / 14 nested-only), 326 fields
+  examined, 33 codes with 17 reached and 16 unreached, 84 findings (27 defect /
+  37 warning / 20 info), `contract_inventory` the only clean report, and
+  `validate_contracts` ok with 0 errors, 4 warnings, 0 info. The four warnings
+  are the carrier mismatch on `SystemEfficiencyReport.summary` and the three
+  shape collisions.
+- **Nothing is committed.** All changes across all eight expansions are
+  uncommitted working-tree changes. Last commit is `979d8c7`.
+
+#### Next target
+
+All 43 ranked function groups are now expanded. No further thin group remains;
+the next work is a decision about what to do with the uncommitted changes — commit
+them, or start a fresh ranking over the grown tree.
+
 ## Open blockages
+
 - None.

@@ -43,7 +43,7 @@ TREE = _node(
             "startup_lifespan", "cors", "exception_handler", "meta", "health",
             "runtime", "scoring_catalog", "i18n_endpoint", "features", "ecosystem",
             "tenants", "tenants_policy", "partitions", "zero_trust", "decisions",
-            "regional_endpoint",
+            "regional_endpoint", "model_bases_endpoint", "policy_scoring_endpoint",
         ),
         _node(
             "db",
@@ -69,12 +69,26 @@ TREE = _node(
             "correlation_id", "require_scopes", "require_roles",
             "require_step_up", "require_cell_access", "require_tenant",
             "rate_limit", "catalog",
+            # Config-table driven authorization governance. The request path
+            # is unchanged; these are the readers, the engine and the reports.
+            "scope_catalog", "role_scope_grants", "denial_contract",
+            "step_up_ranks", "rate_tiers", "route_rules", "decision_engine",
+            "drift", "simulation", "validation", "authz_catalog",
+            "rate_tier",
         ),
         _node("localization",
               "locale_resolution", "locale_payload", "message_catalog", "translate", "catalog_builder",
               "locale_normalization", "accept_language", "negotiation",
               "plural_rules", "fallback_chain", "coverage", "overrides",
-              "translate_many"),
+              "translate_many",
+              # Governance layer. The resolution and render path above is
+              # unchanged; these are the tables, the readers and the reports.
+              "namespaces", "placeholder_policies", "locale_expectations",
+              "number_formats", "render_ops", "findings_taxonomy",
+              "template_scan", "placeholder_audit", "budget_report",
+              "unbalanced_templates", "plural_audit", "negotiation_audit",
+              "locale_registry_audit", "format_number", "i18n_validation",
+              "governance_catalog"),
         _node(  # Stage 1A: multi-tenant DB routing + partition lifecycle
             "multi_tenant",
             _node("tenant_router",
@@ -211,7 +225,10 @@ TREE = _node(
         _node("bookings",
               "lifecycle", "normalization", "transitions", "ownership", "assignment_report"),
         _node("policy_scoring",
-              "policy_tier", "control_posture", "access_band", "can_access", "decision_reports"),
+              "policy_tier", "control_posture", "access_band", "can_access", "decision_reports",
+              "composition", "topic_metrics", "posture_adjustment", "tier_escalation",
+              "health", "recommendations", "decision_trace", "what_if", "coverage",
+              "validation", "ops_catalog"),
         _node("retention",
               "snapshots", "trends", "deltas", "retention_dashboard"),
         _node("retention_snapshot_ops",
@@ -257,7 +274,17 @@ TREE = _node(
               "governed_write", "integrity", "actors", "timeline",
               "anomalies", "retention", "export",
               "view_projection", "integrity_gates", "dead_letters", "replay",
-              "transaction_query", "transaction_integrity", "transaction_export"),
+              "transaction_query", "transaction_integrity", "transaction_export",
+              # Contract-governance layer over the 40 shipped models. The
+              # contracts above are unchanged; these are the tables, the
+              # readers and the reports.
+              "kinds", "audiences", "field_policies", "trivial_fields",
+              "forbidden_fields", "inventory", "write_paths", "contract_ops",
+              "findings_taxonomy",
+              "model_scan", "field_facts", "source_scan", "field_resolution",
+              "route_map", "kind_inference",
+              "contract_inventory", "field_description", "divergence_report",
+              "redaction_report", "contract_validation", "governance_catalog"),
     ),
 )
 

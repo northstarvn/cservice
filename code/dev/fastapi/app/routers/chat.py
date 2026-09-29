@@ -61,6 +61,10 @@ from app.schemas.chat import (
     RetentionSnapshotOperationsReport,
     RetentionCoverageReport,
     RetentionOperationalReport,
+    RetentionClusterCoverageReport,
+    RetentionForecastReport,
+    RetentionHealthDecisionReport,
+    RetentionHorizonSweepReport,
     TopicRankingReport,
     TopicPolicyDecisionReport,
     LoyaltyRecoveryReport,
@@ -70,6 +74,9 @@ from app.schemas.chat import (
     RecoveryOutcomeAggregateReport,
     RecoveryPlaybookRunRequest,
     RecoveryPlaybookRunReport,
+    RecoveryActionAnalyticsReport,
+    RecoveryGuardReport,
+    RecoveryOutreachPlan,
     MonetizationCohortReport,
     WeightedSystemMonitoringReport,
     WeightedFocusItem,
@@ -115,8 +122,12 @@ from app.services.chat_analytics import (
     load_user_interaction_window,
 )
 from app.services.retention import (
+    build_retention_cluster_coverage_for_user,
     build_retention_coverage_report,
     build_retention_dashboard,
+    build_retention_forecast_for_user,
+    build_retention_health_report_for_user,
+    build_retention_horizon_sweep_for_user,
     build_retention_operational_report,
     build_retention_snapshot_admin_report,
     build_retention_snapshot_delta,
@@ -161,6 +172,9 @@ from app.services.policy_scoring import (
     build_customer_policy_snapshot,
 )
 from app.services.recovery_playbooks import (
+    build_recovery_action_analytics_for_user,
+    build_recovery_guard_report_for_user,
+    build_recovery_outreach_plan_for_user,
     build_recovery_playbook_catalog,
     run_recovery_playbooks,
 )
@@ -1366,6 +1380,82 @@ async def get_retention_operational_report(
     return await build_retention_operational_report(db, current_user.id, window_days)
 
 
+# --- retention policy surfaces (health banding / forecasting) ----------------
+#
+# These read the same snapshot rows the reports above do; what is new is that the
+# verdict is produced by ``RETENTION_HEALTH_RULES`` / ``RETENTION_ANOMALY_RULES``
+# / ``RETENTION_FORECAST_RULES`` and travels with the evidence that produced it.
+# Retuning any of them is a table edit, not a redeploy of this router.
+
+
+@router.get("/chat/admin/retention-health", response_model=RetentionHealthDecisionReport)
+async def get_retention_health_decision(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Health band + series anomalies for a customer's snapshot series.
+
+    ``effective_date`` is exposed as a query parameter so a decision can be
+    reproduced as of a past date instead of only "now"; date-window rules in the
+    shared engine bind it.
+    """
+    effective_date = Query(default=None, description="ISO-8601 date to evaluate date-window rules against")
+    return await build_retention_health_report_for_user(
+        db,
+        current_user.id,
+        window_days,
+        effective_date=effective_date,
+    )
+
+
+@router.get("/chat/admin/retention-forecast", response_model=RetentionForecastReport)
+async def get_retention_forecast(
+    window_days: int = Query(default=30, ge=7, le=365),
+    horizon_days: int = Query(default=30, ge=1, le=365),
+    method: str | None = Query(default=None, description="forecast method; see catalog available_methods"),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Project loyalty and churn forward. Declines when the series is too thin.
+
+    An unknown ``method`` is reported in ``reason`` with
+    ``sufficient_data=false`` rather than 422, because the set of valid methods
+    is configuration and a client holding a stale method name should be told what
+    the current set is.
+    """
+    return await build_retention_forecast_for_user(
+        db,
+        current_user.id,
+        window_days,
+        horizon_days=horizon_days,
+        method=method,
+    )
+
+
+@router.get("/chat/admin/retention-forecast-sweep", response_model=RetentionHorizonSweepReport)
+async def get_retention_forecast_sweep(
+    window_days: int = Query(default=30, ge=7, le=365),
+    method: str | None = Query(default=None),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The same projection at every configured horizon, with its confidence decay."""
+    return await build_retention_horizon_sweep_for_user(
+        db, current_user.id, window_days, method=method
+    )
+
+
+@router.get("/chat/admin/retention-cluster-coverage", response_model=RetentionClusterCoverageReport)
+async def get_retention_cluster_coverage(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Which retention topic clusters the customer's snapshots speak to — and which are silent."""
+    return await build_retention_cluster_coverage_for_user(db, current_user.id, window_days)
+
+
 @router.get("/chat/admin/monetization-cohorts", response_model=MonetizationCohortReport)
 async def get_monetization_cohorts(
     window_days: int = Query(default=30, ge=7, le=365),
@@ -1600,8 +1690,67 @@ async def get_recovery_outcome_aggregate(
 async def get_recovery_playbook_catalog(
     current_user: models.User = Depends(deps.get_current_admin_user),
 ):
-    """Expose the config-driven recovery playbook table (read-only, idempotent)."""
+    """Expose the config-driven recovery playbook table (read-only, idempotent).
+
+    ``playbooks`` and ``catalog_version`` stay the frozen v1 core set; the
+    governance layer (action registry, guard rules, outreach playbooks) is
+    published under its own keys and version so a client can tell a core change
+    from a new subsystem.
+    """
     return build_recovery_playbook_catalog()
+
+
+@router.get("/chat/admin/recovery-guards", response_model=RecoveryGuardReport)
+async def get_recovery_guard_report(
+    window_days: int = Query(default=30, ge=7, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """What the guard layer would do for this customer right now, and why.
+
+    Returns two evaluations of the same plan: ``evaluation`` with enforcement
+    off (what the guards *would* say) and ``enforced_evaluation`` with it on
+    (what would actually happen). Seeing both is the point -- an operator asking
+    "why did nothing run" needs the difference between "a guard blocked this" and
+    "nothing matched", and that difference is only visible when the guards are
+    shown without suppressing what they would have allowed.
+
+    Also carries the static governance audit, so an operator checking the limits
+    does not have to make a second call.
+    """
+    return await build_recovery_guard_report_for_user(db, current_user.id, window_days)
+
+
+@router.get("/chat/admin/recovery-analytics", response_model=RecoveryActionAnalyticsReport)
+async def get_recovery_action_analytics(
+    window_days: int = Query(default=7, ge=1, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Rollup of this customer's recovery action history over a window.
+
+    ``guarded_ratio`` and ``budget_utilisation`` are the two numbers that matter:
+    per-customer, a repeatedly re-credited goodwill balance reads as one
+    generous action, and only the aggregate shows the spend was never bounded.
+    """
+    return await build_recovery_action_analytics_for_user(db, current_user.id, window_days)
+
+
+@router.get("/chat/admin/recovery-outreach-plan", response_model=RecoveryOutreachPlan)
+async def get_recovery_outreach_plan(
+    window_days: int = Query(default=30, ge=7, le=365),
+    locale: str = Query(default="global"),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Composed outreach preview: strategy, callback, incentive, review priority.
+
+    Issues nothing. Every sub-plan is marked undispatched/unissued/unqueued, so
+    the payload is safe to forward for approval.
+    """
+    return await build_recovery_outreach_plan_for_user(
+        db, current_user.id, window_days, locale=locale
+    )
 
 
 @router.post("/chat/recovery/playbooks", response_model=RecoveryPlaybookRunReport)

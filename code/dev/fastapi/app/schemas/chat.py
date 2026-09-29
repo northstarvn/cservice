@@ -245,6 +245,346 @@ class RetentionOperationalReport(BaseModel):
     summary: str
 
 
+class RetentionHealthBand(BaseModel):
+    """Which ``RETENTION_HEALTH_RULES`` row produced the verdict, and why.
+
+    The evidence travels with the verdict on purpose: a band with no
+    ``matched_fields`` is an assertion, and an assertion an operator cannot
+    check is the thing this whole expansion exists to remove.
+    """
+
+    band: str
+    rule_id: str
+    rule_name: str
+    priority: int
+    actions: List[str] = []
+    matched_fields: dict = {}
+    band_rank: int = 0
+    default_applied: bool = False
+
+
+class RetentionAnomalyFinding(BaseModel):
+    rule_id: str
+    name: str
+    severity: str
+    detail: str
+    matched_fields: dict = {}
+
+
+class RetentionSeriesMetrics(BaseModel):
+    snapshot_count: int
+    loyalty_avg: float
+    loyalty_min: float
+    loyalty_max: float
+    loyalty_latest: float
+    loyalty_stdev: float
+    loyalty_delta: float
+    abs_loyalty_delta: float
+    loyalty_trend: float = 0.0
+    churn_avg: float
+    churn_latest: float
+    churn_max: float
+    churn_delta: float
+    churn_stdev: float
+    churn_trend: float = 0.0
+    churn_latest_label: str = ""
+    snapshot_types: List[str] = []
+    lifecycle_stages: List[str] = []
+
+
+class RetentionHealthDecisionReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    series_length: int
+    metrics: RetentionSeriesMetrics
+    health: RetentionHealthBand
+    anomalies: List[RetentionAnomalyFinding] = []
+
+
+class RetentionForecastProjection(BaseModel):
+    latest: float
+    projected: float
+    change: float
+    bounds: List[float] = []
+    latest_label: str = ""
+    projected_label: str = ""
+
+
+class RetentionForecastReport(BaseModel):
+    """A forward projection, or an explicit refusal to produce one.
+
+    ``sufficient_data=False`` carries ``reason`` and ``confidence=0.0``. A
+    forecast endpoint that always answers is worse than one that can decline,
+    because a two-snapshot projection and a thirty-snapshot projection come back
+    looking identical unless the payload says which it is.
+    """
+
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    sufficient_data: bool
+    reason: str = ""
+    method: str
+    horizon_days: int
+    projected_steps: int
+    series_length: int
+    min_points: int
+    confidence: float
+    metrics: Optional[RetentionSeriesMetrics] = None
+    loyalty: Optional[RetentionForecastProjection] = None
+    churn: Optional[RetentionForecastProjection] = None
+    available_methods: List[str] = []
+
+
+class RetentionHorizonSweepEntry(BaseModel):
+    horizon_days: int
+    sufficient_data: bool
+    confidence: float
+    reason: str = ""
+    loyalty: Optional[RetentionForecastProjection] = None
+    churn: Optional[RetentionForecastProjection] = None
+
+
+class RetentionHorizonSweepReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    series_length: int
+    method: str
+    horizons: List[RetentionHorizonSweepEntry] = []
+
+
+class RetentionClusterCoverageReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    matched_topics: List[str] = []
+    cluster_members: dict = {}
+    clusters_declared: int
+    clusters_represented: int
+    clusters_silent: int
+    represented_clusters: List[str] = []
+    silent_clusters: List[str] = []
+    coverage_ratio: float
+
+
+# ---------------------------------------------------------------------------
+# Recovery governance: guards, action registry, analytics, outreach plan
+# ---------------------------------------------------------------------------
+
+
+class RecoveryActionSpec(BaseModel):
+    """The declared policy for one action type.
+
+    Published rather than inferred from the handler because a guard has to know
+    these facts *before* dispatch, and a consumer has to be able to see the
+    limits without running a sweep.
+    """
+
+    action: str
+    title: str
+    description: str
+    mutates_state: bool
+    idempotent: bool
+    spend_metric: Optional[str] = None
+    max_per_day: int
+    cooldown_hours: float
+    reversible: bool
+    compensation: Optional[str] = None
+    stateful: bool
+
+
+class RecoveryGuardRule(BaseModel):
+    guard_id: str
+    check: str
+    subject: str
+    metric: Optional[str] = None
+    max: Optional[float] = None
+    enabled: bool
+    reason: str
+    counted_statuses: List[str] = Field(default_factory=list)
+    consulted: bool = False
+
+
+class RecoveryGuardDecision(BaseModel):
+    """One action's verdict, with the guard that produced it.
+
+    ``allowed=False`` is the normal, healthy outcome for a customer who ran an
+    action recently, so the payload always carries which guard said no rather
+    than only the boolean.
+    """
+
+    index: int
+    playbook_id: str
+    playbook_set: str
+    action: str
+    allowed: bool
+    guard_id: str = ""
+    status: str
+    reason: str = ""
+    detail: dict = Field(default_factory=dict)
+
+
+class RecoveryActionPlanItem(BaseModel):
+    index: int
+    playbook_id: str
+    playbook_name: str
+    playbook_set: str
+    priority: int
+    action: str
+    params: dict = Field(default_factory=dict)
+    spend_metric: Optional[str] = None
+    spend: float = 0.0
+    registered: bool
+    mutates_state: bool = False
+
+
+class RecoveryActionUsage(BaseModel):
+    cooldown_hours: float
+    max_per_day: int
+    attempts_recorded: int
+    delivered_today: int
+    last_run_at: Optional[str] = None
+    history_rows: int = 0
+
+
+class RecoveryGuardEvaluation(BaseModel):
+    generated_at: datetime
+    enforced: bool
+    lookback_hours: float
+    planned_actions: int
+    allowed_actions: int
+    blocked_actions: int
+    playbooks_allowed: int
+    suppressed_playbooks: List[dict] = Field(default_factory=list)
+    decisions: List[RecoveryGuardDecision] = Field(default_factory=list)
+    rules: List[RecoveryGuardRule] = Field(default_factory=list)
+    budget: dict = Field(default_factory=dict)
+    usage: Dict[str, RecoveryActionUsage] = Field(default_factory=dict)
+    history_rows: int
+    unregistered_actions: List[str] = Field(default_factory=list)
+    summary: str
+
+
+class RecoveryGovernanceFinding(BaseModel):
+    severity: str
+    code: str
+    action: str
+    detail: str
+
+
+class RecoveryGovernanceAudit(BaseModel):
+    """Static audit of the governance layer: is the guard layer complete?
+
+    Answered without running a sweep, which is the question an operator asks when
+    a sweep is misbehaving and nobody wants to wait for the next pass.
+    """
+
+    generated_at: datetime
+    action_count: int
+    guard_count: int
+    playbook_count: int
+    writing_actions: List[str] = Field(default_factory=list)
+    budgeted_metrics: List[str] = Field(default_factory=list)
+    registry_drift: Dict[str, List[str]] = Field(default_factory=dict)
+    findings: List[RecoveryGovernanceFinding] = Field(default_factory=list)
+    counts_by_severity: Dict[str, int] = Field(default_factory=dict)
+    healthy: bool
+    summary: str
+
+
+class RecoveryGuardReport(BaseModel):
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    context: dict = Field(default_factory=dict)
+    plan: List[RecoveryActionPlanItem] = Field(default_factory=list)
+    evaluation: RecoveryGuardEvaluation
+    enforced_evaluation: RecoveryGuardEvaluation
+    audit: RecoveryGovernanceAudit
+    summary: str
+
+
+class RecoveryActionAnalyticsEntry(BaseModel):
+    attempts: int
+    executed: int
+    failed: int
+    blocked: int
+    spend: float
+    spend_metric: Optional[str] = None
+    registered: bool
+    mutates_state: bool = False
+
+
+class RecoveryActionFailure(BaseModel):
+    id: int
+    playbook_id: str
+    action: str
+    failure_reason: str
+    at: str
+
+
+class RecoveryActionSpend(BaseModel):
+    spent: float
+    daily_budget: Optional[float] = None
+    budget_utilisation: Optional[float] = None
+
+
+class RecoveryActionAnalyticsReport(BaseModel):
+    """Aggregate view of the automated recovery program.
+
+    Per-customer, a re-credited goodwill balance looks like one generous action.
+    In aggregate it is an unbounded credit, which is why ``guarded_ratio`` and
+    ``budget_utilisation`` are first-class fields rather than derived trivia.
+    """
+
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    rows_in_window: int
+    rows_total: int
+    by_status: Dict[str, int] = Field(default_factory=dict)
+    by_action: Dict[str, RecoveryActionAnalyticsEntry] = Field(default_factory=dict)
+    by_playbook: Dict[str, int] = Field(default_factory=dict)
+    by_guard: Dict[str, int] = Field(default_factory=dict)
+    by_day: Dict[str, int] = Field(default_factory=dict)
+    spend: Dict[str, RecoveryActionSpend] = Field(default_factory=dict)
+    executed: int
+    failed: int
+    blocked: int
+    guarded_ratio: float
+    failure_ratio: float
+    success_ratio: float
+    recent_failures: List[RecoveryActionFailure] = Field(default_factory=list)
+    unregistered_actions: List[str] = Field(default_factory=list)
+    top_guards: List[dict] = Field(default_factory=list)
+    summary: str
+
+
+class RecoveryOutreachPlan(BaseModel):
+    """The composed outreach story for one customer. Issues nothing.
+
+    Every sub-plan carries a ``*_dispatched``/``issued``/``queued`` flag set to
+    false, so this payload can be logged, forwarded or reviewed without any
+    ambiguity about whether anything was actually sent to a customer.
+    """
+
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    recovery_readiness: str
+    lifecycle_stage: str
+    communication: dict = Field(default_factory=dict)
+    callback: dict = Field(default_factory=dict)
+    incentive: dict = Field(default_factory=dict)
+    review: dict = Field(default_factory=dict)
+    issued: bool
+    primary_risks: List[str] = Field(default_factory=list)
+    risk_areas: List[str] = Field(default_factory=list)
+    summary: str
+
+
 # ---------------------------------------------------------------------------
 # Policy topic analysis + topic coverage
 # ---------------------------------------------------------------------------

@@ -46,105 +46,571 @@ Rules of thumb:
 
 ## Current Map — `CODE_MAP.newick`
 
-Tree size: **498 leaves / 54 internal nodes** (validated, see maintenance
+Tree size: **560 leaves / 54 internal nodes** (validated, see maintenance
 rule 4). Rendered multi-line for readability; the single-line Newick file is
 the source of truth.
 
 ```
-(((startup_lifespan,cors,exception_handler,meta,health,runtime,scoring_catalog,i18n_endpoint,
-      features,ecosystem,tenants,tenants_policy,partitions,zero_trust,decisions,
-      regional_endpoint)main,
-    (engine,pool_config,session,ping,retry,retry_policy,retry_classification,circuit_breaker,
-      statement_timeouts,advisory_lock,transaction,pool_status,db_health,readiness_probe,
-      test_connection,catalog)db,
-    (verify_password,hash_password,access_token,refresh_token,decode_token,password_policy,
-      key_rotation,token_revocation,token_validation,step_up,api_keys,password_strength,
-      password_history,catalog)security,
-    (current_user,optional_user,admin_user,policy_or_admin,policy_score,control_posture,
-      principal,optional_principal,require_principal,correlation_id,require_scopes,require_roles,
-      require_step_up,require_cell_access,require_tenant,rate_limit,catalog)auth_deps,
-    (locale_resolution,locale_payload,message_catalog,translate,catalog_builder,
-      locale_normalization,accept_language,negotiation,plural_rules,fallback_chain,coverage,
-      overrides,translate_many)localization,
-((registry,route_for_tenant,tenant_session,declared_tenants,catalog,tenant_validation,
-        request_resolution,dsn_redaction,routing_policy,tenant_health,provisioning_plan)tenant_router,
-      (policies,ensure_partition,archive,drop_expired,worker,catalog,identifier_validation,
-        period_keys,sql_builders,policy_validation,catalog_reads,legal_holds,lifecycle_plan,
-        adopt_partitions,attach_restore,dry_run)partition_manager)multi_tenant,
-((hmac_signer,ed25519_signer,sign_bytes,verify_bytes,signature_envelope,catalog,
-        backend_registry,signing_key_ring,key_fingerprint,detailed_verification,co_signature,
-        multi_signature,replay_guard,self_test,health)hsm_signer,
-      (modalities,register,validate,revoke,list_templates,catalog,adaptive_thresholds,
-        slot_enrollment,challenges,attempt_lockout,match_decision,history,state_export,
-        state_import,snapshot)biometric_vault,
-      (risk_levels,risk_rules,evaluate,adaptive_weights,catalog,signal_normalization,
-        context_gaps,required_controls,action_mapping,counterfactuals,weight_history,
-        weight_versions,outcome_batches,risk_decisions)risk_evaluator,
-      (access_levels,cell_matrix,evaluate,resolve_roles,catalog,row_scopes,cell_overrides,
-        masking,resource_plans,override_simulation,temporary_grants)cell_matrix)zero_trust,
-((workers,batch,submit,drain,dead_letter,stats,catalog,replay_policy,replay_dead_letters)high_throughput_pipeline,
-      (wire_format,transaction,hash_chain,append_only_log,spec_catalog,query,
-        integrity_report,export)protobuf_transaction_spec)event_pipeline,
-((registry,snapshots,canary,shadow_scoring,promote,catalog,lifecycle,promotion_gates,
-      version_diff,rollback_policy,deprecation,prune,traffic_split,label_templates)model_versioning,
-      (what_if,risk_scenarios,retention_scenarios,reports,catalog,scenario_library,
-        partition_policies,sensitivity,comparison)simulation_engine,
-      (decision_trace,trace_store,explain,factor_trail,catalog,counterfactuals,
-        audiences,replay,regression)explainability,
-      (version_guard,compare_and_swap,stale_conflict,conflict_policy,versioned_records,
-        versioned_store,field_diffs,json_merge_patch,retry_updates,lock_sets,merge_semantics,
-        advisory_locks,audit,catalog)optimistic_locking)decision_intelligence,
-((field_dsl,combinators,date_ops,expressions,catalog,operators,policy,validation,
-      explanation,packs)rule_engine,
-      (calendars,labor_rules,tax_rules,booking_assessment,catalog,jurisdictions,compliance,
-        holiday_resolution,quotas)regional_policy)business_rules)infra,
-((timestamp,tenant_scoped,partitioned,security_event,soft_delete,row_version,expiring,
-      actor_audit,serialization,security_event_extensions,entity_registry,catalog)model_bases,
-    (sensitivity_vocabulary,redaction_presets,json_payloads,enum_vocabulary,table_lifecycle,
-      introspection,enum_access,serialization,constraint_coverage,referential_gaps,
-      relationship_catalog,schema_catalog)metadata,
-    user,booking,booking_event,booking_assignment,chat_history,interaction_signal,
-    retention_snapshot,recovery_outcome,recovery_action,customer_policy_score,topic_selection,
-    communication_override,arrears_entry,points_wallet,points_transaction,audit_log_entry)models,
-((register,login,me,policy_score,can_access,policy_decision,change_password,session_refresh,
-      logout,session_inventory,step_up,api_keys,password_policy,password_feedback,
-      security_posture,catalog)users,
-    (lifecycle_crud,analytics,assignment_report,audit_history,export)bookings,
-    (history,sentiment,insights,recovery,recovery_playbooks,loyalty_journey,retention_dashboard,
-      snapshot_operations,activity_tree,communication_strategy,arrears_payments,points_exchange,
+(((startup_lifespan,
+      cors,
+      exception_handler,
+      meta,
+      health,
+      runtime,
+      scoring_catalog,
+      i18n_endpoint,
+      features,
+      ecosystem,
+      tenants,
+      tenants_policy,
+      partitions,
+      zero_trust,
+      decisions,
+      regional_endpoint,
+      model_bases_endpoint,
+      policy_scoring_endpoint)main,
+    (engine,
+      pool_config,
+      session,
+      ping,
+      retry,
+      retry_policy,
+      retry_classification,
+      circuit_breaker,
+      statement_timeouts,
+      advisory_lock,
+      transaction,
+      pool_status,
+      db_health,
+      readiness_probe,
+      test_connection,
+      catalog)db,
+    (verify_password,
+      hash_password,
+      access_token,
+      refresh_token,
+      decode_token,
+      password_policy,
+      key_rotation,
+      token_revocation,
+      token_validation,
+      step_up,
+      api_keys,
+      password_strength,
+      password_history,
+      catalog)security,
+    (current_user,
+      optional_user,
+      admin_user,
+      policy_or_admin,
+      policy_score,
+      control_posture,
+      principal,
+      optional_principal,
+      require_principal,
+      correlation_id,
+      require_scopes,
+      require_roles,
+      require_step_up,
+      require_cell_access,
+      require_tenant,
+      rate_limit,
+      catalog,
+      scope_catalog,
+      role_scope_grants,
+      denial_contract,
+      step_up_ranks,
+      rate_tiers,
+      route_rules,
+      decision_engine,
+      drift,
+      simulation,
+      validation,
+      authz_catalog,
+      rate_tier)auth_deps,
+    (locale_resolution,
+      locale_payload,
+      message_catalog,
+      translate,
+      catalog_builder,
+      locale_normalization,
+      accept_language,
+      negotiation,
+      plural_rules,
+      fallback_chain,
+      coverage,
+      overrides,
+      translate_many,
+      namespaces,
+      placeholder_policies,
+      locale_expectations,
+      number_formats,
+      render_ops,
+      findings_taxonomy,
+      template_scan,
+      placeholder_audit,
+      budget_report,
+      unbalanced_templates,
+      plural_audit,
+      negotiation_audit,
+      locale_registry_audit,
+      format_number,
+      i18n_validation,
+      governance_catalog)localization,
+    ((registry,
+        route_for_tenant,
+        tenant_session,
+        declared_tenants,
+        catalog,
+        tenant_validation,
+        request_resolution,
+        dsn_redaction,
+        routing_policy,
+        tenant_health,
+        provisioning_plan)tenant_router,
+      (policies,
+        ensure_partition,
+        archive,
+        drop_expired,
+        worker,
+        catalog,
+        identifier_validation,
+        period_keys,
+        sql_builders,
+        policy_validation,
+        catalog_reads,
+        legal_holds,
+        lifecycle_plan,
+        adopt_partitions,
+        attach_restore,
+        dry_run)partition_manager)multi_tenant,
+    ((hmac_signer,
+        ed25519_signer,
+        sign_bytes,
+        verify_bytes,
+        signature_envelope,
+        catalog,
+        backend_registry,
+        signing_key_ring,
+        key_fingerprint,
+        detailed_verification,
+        co_signature,
+        multi_signature,
+        replay_guard,
+        self_test,
+        health)hsm_signer,
+      (modalities,
+        register,
+        validate,
+        revoke,
+        list_templates,
+        catalog,
+        adaptive_thresholds,
+        slot_enrollment,
+        challenges,
+        attempt_lockout,
+        match_decision,
+        history,
+        state_export,
+        state_import,
+        snapshot)biometric_vault,
+      (risk_levels,
+        risk_rules,
+        evaluate,
+        adaptive_weights,
+        catalog,
+        signal_normalization,
+        context_gaps,
+        required_controls,
+        action_mapping,
+        counterfactuals,
+        weight_history,
+        weight_versions,
+        outcome_batches,
+        risk_decisions)risk_evaluator,
+      (access_levels,
+        cell_matrix,
+        evaluate,
+        resolve_roles,
+        catalog,
+        row_scopes,
+        cell_overrides,
+        masking,
+        resource_plans,
+        override_simulation,
+        temporary_grants)cell_matrix)zero_trust,
+    ((workers,
+        batch,
+        submit,
+        drain,
+        dead_letter,
+        stats,
+        catalog,
+        replay_policy,
+        replay_dead_letters)high_throughput_pipeline,
+      (wire_format,
+        transaction,
+        hash_chain,
+        append_only_log,
+        spec_catalog,
+        query,
+        integrity_report,
+        export)protobuf_transaction_spec)event_pipeline,
+    ((registry,
+        snapshots,
+        canary,
+        shadow_scoring,
+        promote,
+        catalog,
+        lifecycle,
+        promotion_gates,
+        version_diff,
+        rollback_policy,
+        deprecation,
+        prune,
+        traffic_split,
+        label_templates)model_versioning,
+      (what_if,
+        risk_scenarios,
+        retention_scenarios,
+        reports,
+        catalog,
+        scenario_library,
+        partition_policies,
+        sensitivity,
+        comparison)simulation_engine,
+      (decision_trace,
+        trace_store,
+        explain,
+        factor_trail,
+        catalog,
+        counterfactuals,
+        audiences,
+        replay,
+        regression)explainability,
+      (version_guard,
+        compare_and_swap,
+        stale_conflict,
+        conflict_policy,
+        versioned_records,
+        versioned_store,
+        field_diffs,
+        json_merge_patch,
+        retry_updates,
+        lock_sets,
+        merge_semantics,
+        advisory_locks,
+        audit,
+        catalog)optimistic_locking)decision_intelligence,
+    ((field_dsl,
+        combinators,
+        date_ops,
+        expressions,
+        catalog,
+        operators,
+        policy,
+        validation,
+        explanation,
+        packs)rule_engine,
+      (calendars,
+        labor_rules,
+        tax_rules,
+        booking_assessment,
+        catalog,
+        jurisdictions,
+        compliance,
+        holiday_resolution,
+        quotas)regional_policy)business_rules)infra,
+  ((timestamp,
+      tenant_scoped,
+      partitioned,
+      security_event,
+      soft_delete,
+      row_version,
+      expiring,
+      actor_audit,
+      serialization,
+      security_event_extensions,
+      entity_registry,
+      catalog)model_bases,
+    (sensitivity_vocabulary,
+      redaction_presets,
+      json_payloads,
+      enum_vocabulary,
+      table_lifecycle,
+      introspection,
+      enum_access,
+      serialization,
+      constraint_coverage,
+      referential_gaps,
+      relationship_catalog,
+      schema_catalog)metadata,
+    user,
+    booking,
+    booking_event,
+    booking_assignment,
+    chat_history,
+    interaction_signal,
+    retention_snapshot,
+    recovery_outcome,
+    recovery_action,
+    customer_policy_score,
+    topic_selection,
+    communication_override,
+    arrears_entry,
+    points_wallet,
+    points_transaction,
+    audit_log_entry)models,
+  ((register,
+      login,
+      me,
+      policy_score,
+      can_access,
+      policy_decision,
+      change_password,
+      session_refresh,
+      logout,
+      session_inventory,
+      step_up,
+      api_keys,
+      password_policy,
+      password_feedback,
+      security_posture,
+      catalog)users,
+    (lifecycle_crud,
+      analytics,
+      assignment_report,
+      audit_history,
+      export)bookings,
+    (history,
+      sentiment,
+      insights,
+      recovery,
+      recovery_playbooks,
+      loyalty_journey,
+      retention_dashboard,
+      snapshot_operations,
+      activity_tree,
+      communication_strategy,
+      arrears_payments,
+      points_exchange,
       topic_policy)chat,
-    (catalog,themes,intelligence,coverage,portfolio,workspace,overview,search,suggestions,
-      recommendations,current_selection,history,taxonomy,governance,integrity,match,ranked,
-      validate,drift,lifecycle)topics,
-    (efficiency,enhancements,audit_catalog,trail_catalog,log,logs,summary,pipeline_stats,
-      pipeline_event,transactions,protobuf_spec,governed_log,integrity,actors,timeline,anomalies,
-      retention,export,view,integrity_gates,dead_letters,replay,transactions_query,
-      transactions_integrity,transactions_export)audit)routers,
-((area_scoring,sentiment,insights,recovery,topic_ranking,topic_policy,capabilities)chat_analytics,
-    (catalog,search,suggestion,theme,selection,workspace,intelligence,coverage)topics,
-    (lifecycle,normalization,transitions,ownership,assignment_report)bookings,
-    (policy_tier,control_posture,access_band,can_access,decision_reports)policy_scoring,
-    (snapshots,trends,deltas,retention_dashboard)retention,
-    (freshness,health,operations_status,compliance,posture,automation,launch_readiness,go_no_go)retention_snapshot_ops,
-    (scenario_catalog,matching,journey_plan,admin_report)loyalty_journey,
-    (grouping,ranking,smart_filter,anomaly_rules,admin_trees)activity_tree,
-    (override,policy,culture,profile,mood,decision_trail)communication_strategy,
-    (component_scoring,classifications,enhancement_proposals,catalog)efficiency_audit,
-    (interest_policies,late_fees,quote,open,settle,waive_interest,waive_fees,waiver_policy)arrears_payments,
-    (rate_rules,rate_multipliers,campaigns,quote,wallet,ledger,admin_rollup)points_exchange,
-    (realtime_context,playbook_rules,credit_points,escalation,policy_guardrail,orchestrator,
-      auto_sweep,catalog)recovery_playbooks,
-    (record,list,summary,action_catalog,governed_record,action_aliases,action_specs,
-      severity_policy,justification,sensitive_detail,redaction,change_detail,paging,count,
-      retention_plan,retention_advice,actor_activity,entity_timeline,anomaly_detection,
-      seal_chain,chain_verification,trail_export,view_profiles,integrity_gates,
-      entry_seal_chain,catalog)audit_log)services,
-((user,token,booking,policy_score,topic_selection,session_lifecycle,machine_credentials,
-      password_feedback,security_posture,step_up)schemas_core,
-    (insight,recovery,recovery_playbooks,retention,snapshot_ops,topic_ranking,topic_policy)schemas_chat,
-    (efficiency,enhancements,audit_trail,governed_write,integrity,actors,timeline,anomalies,
-      retention,export,view_projection,integrity_gates,dead_letters,replay,transaction_query,
-      transaction_integrity,transaction_export)schemas_audit)schemas)cservice_backend;
+    (catalog,
+      themes,
+      intelligence,
+      coverage,
+      portfolio,
+      workspace,
+      overview,
+      search,
+      suggestions,
+      recommendations,
+      current_selection,
+      history,
+      taxonomy,
+      governance,
+      integrity,
+      match,
+      ranked,
+      validate,
+      drift,
+      lifecycle)topics,
+    (efficiency,
+      enhancements,
+      audit_catalog,
+      trail_catalog,
+      log,
+      logs,
+      summary,
+      pipeline_stats,
+      pipeline_event,
+      transactions,
+      protobuf_spec,
+      governed_log,
+      integrity,
+      actors,
+      timeline,
+      anomalies,
+      retention,
+      export,
+      view,
+      integrity_gates,
+      dead_letters,
+      replay,
+      transactions_query,
+      transactions_integrity,
+      transactions_export)audit)routers,
+  ((area_scoring,
+      sentiment,
+      insights,
+      recovery,
+      topic_ranking,
+      topic_policy,
+      capabilities)chat_analytics,
+    (catalog,
+      search,
+      suggestion,
+      theme,
+      selection,
+      workspace,
+      intelligence,
+      coverage)topics,
+    (lifecycle,
+      normalization,
+      transitions,
+      ownership,
+      assignment_report)bookings,
+    (policy_tier,
+      control_posture,
+      access_band,
+      can_access,
+      decision_reports,
+      composition,
+      topic_metrics,
+      posture_adjustment,
+      tier_escalation,
+      health,
+      recommendations,
+      decision_trace,
+      what_if,
+      coverage,
+      validation,
+      ops_catalog)policy_scoring,
+    (snapshots,
+      trends,
+      deltas,
+      retention_dashboard)retention,
+    (freshness,
+      health,
+      operations_status,
+      compliance,
+      posture,
+      automation,
+      launch_readiness,
+      go_no_go)retention_snapshot_ops,
+    (scenario_catalog,
+      matching,
+      journey_plan,
+      admin_report)loyalty_journey,
+    (grouping,
+      ranking,
+      smart_filter,
+      anomaly_rules,
+      admin_trees)activity_tree,
+    (override,
+      policy,
+      culture,
+      profile,
+      mood,
+      decision_trail)communication_strategy,
+    (component_scoring,
+      classifications,
+      enhancement_proposals,
+      catalog)efficiency_audit,
+    (interest_policies,
+      late_fees,
+      quote,
+      open,
+      settle,
+      waive_interest,
+      waive_fees,
+      waiver_policy)arrears_payments,
+    (rate_rules,
+      rate_multipliers,
+      campaigns,
+      quote,
+      wallet,
+      ledger,
+      admin_rollup)points_exchange,
+    (realtime_context,
+      playbook_rules,
+      credit_points,
+      escalation,
+      policy_guardrail,
+      orchestrator,
+      auto_sweep,
+      catalog)recovery_playbooks,
+    (record,
+      list,
+      summary,
+      action_catalog,
+      governed_record,
+      action_aliases,
+      action_specs,
+      severity_policy,
+      justification,
+      sensitive_detail,
+      redaction,
+      change_detail,
+      paging,
+      count,
+      retention_plan,
+      retention_advice,
+      actor_activity,
+      entity_timeline,
+      anomaly_detection,
+      seal_chain,
+      chain_verification,
+      trail_export,
+      view_profiles,
+      integrity_gates,
+      entry_seal_chain,
+      catalog)audit_log)services,
+  ((user,
+      token,
+      booking,
+      policy_score,
+      topic_selection,
+      session_lifecycle,
+      machine_credentials,
+      password_feedback,
+      security_posture,
+      step_up)schemas_core,
+    (insight,
+      recovery,
+      recovery_playbooks,
+      retention,
+      snapshot_ops,
+      topic_ranking,
+      topic_policy)schemas_chat,
+    (efficiency,
+      enhancements,
+      audit_trail,
+      governed_write,
+      integrity,
+      actors,
+      timeline,
+      anomalies,
+      retention,
+      export,
+      view_projection,
+      integrity_gates,
+      dead_letters,
+      replay,
+      transaction_query,
+      transaction_integrity,
+      transaction_export,
+      kinds,
+      audiences,
+      field_policies,
+      trivial_fields,
+      forbidden_fields,
+      inventory,
+      write_paths,
+      contract_ops,
+      findings_taxonomy,
+      model_scan,
+      field_facts,
+      source_scan,
+      field_resolution,
+      route_map,
+      kind_inference,
+      contract_inventory,
+      field_description,
+      divergence_report,
+      redaction_report,
+      contract_validation,
+      governance_catalog)schemas_audit)schemas)cservice_backend;
 ```
 
 ## Maintenance Rules
@@ -168,6 +634,556 @@ the source of truth.
    domain). Leaf-level additions are recorded in the log without a bump.
 
 ## Revision Log
+
+### r5 — thin-group expansion, seventh pass: `app.schemas.audit` (2026-09-29)
+
+The eighth and last ranked group, `app/schemas/audit.py` (520 → **3222 LOC**,
+0 → 9 config tables, +6 public functions). No new layer and no new top-level
+domain, so per maintenance rule 6 the revision stays `r5`; the tree grew
+**539 → 560 leaves** (54 internal nodes) by leaf-level additions only, and **no
+r1–r6 leaf was lost** (verified by a token-multiset diff against
+`git show HEAD:./CODE_MAP.newick`, not by eye). The forty shipped contracts are
+**byte-identical to `HEAD`** above the governance banner — the diff is
+everything after it, and the tests transcribe the 40 field lists, the 40
+(fields, required) pairs, the eight comment-declared vocabularies and the two
+`severity` vocabularies as `ORIG_*` constants rather than asserting it by
+inspection.
+
+- **Posture: report, never repair** — with a sharper reason than the i18n pass.
+  A message catalog is data the renderer consumes; a pydantic model here *is* the
+  contract a client binds to. Widening `severity` to silence
+  `CONTRACT_VOCABULARY_COLLISION` would delete the only place the event
+  vocabulary was written down and start accepting a fourth value at the door. So
+  all 8 `CONTRACT_OPS` rows carry `report_only: True` and `validate_contracts`
+  **errors** on a row that does not — the posture is a checked property, not a
+  docstring promise.
+- **What became config** — nine tables, none of which existed before:
+  - `CONTRACT_KINDS` (6) — suffix → direction, request-body-ness and
+    `expect_generated_at`. `spec`'s suffix is `SpecReport`, not `Report`, because
+    `TransactionSpecReport` otherwise infers the wrong kind (longest-suffix-first).
+  - `CONTRACT_AUDIENCES` (5) — rank, expectation and redaction posture per
+    reader. Ranks are ordered; two audiences may share a rank because they are
+    peers, not ladder steps.
+  - `CONTRACT_FIELD_POLICIES` (14) — policy per *field name*, because policy
+    attaches to names that recur: 5 `generated_at`, 13 `severity` and three
+    free-form carriers, and they disagree. `declared_in` is the honest answer to
+    "where is this checked?": `pattern`, `column_check` (declared, not verified),
+    `comment_only` (the finding), `declared` (free label on purpose).
+  - `CONTRACT_TRIVIAL_FIELDS` (23) — an explicit list, not a frequency
+    threshold, so adding a model cannot start reporting `id`.
+  - `CONTRACT_FORBIDDEN_FIELDS` (6) — names that must never be declared on a
+    response contract, with what to publish instead. A name check, not a value
+    check: it cannot see inside `detail`, which is the point.
+  - `CONTRACT_INVENTORY` (40) — one row per shipped model: kind, audience,
+    effective route, `top_level`, field and required counts. The pinned surface.
+  - `CONTRACT_WRITE_PATHS` (4) — which route scrubs its carrier, and which
+    service function does it.
+  - `CONTRACT_OPS` (8) — what the layer can do and, in `cannot`, what it cannot.
+  - `CONTRACT_WARNINGS` (33 codes) — the finding taxonomy with severity,
+    `emitted_by` and remediation.
+- **The new leaves, mapped**: `kinds` (`CONTRACT_KINDS`), `audiences`,
+  `field_policies` (`CONTRACT_FIELD_POLICIES`), `trivial_fields`,
+  `forbidden_fields`, `inventory` (`CONTRACT_INVENTORY`), `write_paths`
+  (`CONTRACT_WRITE_PATHS`), `contract_ops` (`CONTRACT_OPS`),
+  `findings_taxonomy` (`CONTRACT_WARNINGS`); the readers `model_scan`
+  (`_audit_models`, which excludes `GOVERNANCE_MODELS` by identity),
+  `field_facts`, `source_scan` (`_source_vocabularies`, AST-scoped per class),
+  `field_resolution` (`_carrier_of` / `_shape_of`), `route_map` and
+  `kind_inference` (longest-suffix-first); and the reports `contract_inventory`,
+  `field_description` (`describe_contract_field`), `divergence_report`,
+  `redaction_report`, `contract_validation` (`validate_contracts`) and
+  `governance_catalog` (`build_contract_catalog`).
+- **The headline finding, verified against the service.** `POST /audit/log` →
+  `record_audit_log_entry` stores its `detail` blob **verbatim**; `POST
+  /audit/log/auditable` → `record_auditable` calls `redact_detail`. Both fields
+  are `Dict[str, Any]` with **no description**, so the OpenAPI document cannot
+  tell a client which is which (`CONTRACT_REDACTION_ASYMMETRY` +
+  `CONTRACT_REDACTION_UNDECLARED`). The check is against the *function bodies*,
+  read with `ast`: a module-level grep for `redact_detail` says both paths redact,
+  which is how the table first came to assert `redacts: True` for the raw write.
+  The `no_unredacted_credentials` integrity gate already exists to catch the
+  value; the contract was the blind spot. The pipeline write is unredacted too
+  and stays **clean**, because its row says why (a dead-letter replay needs the
+  payload intact), so `CONTRACT_WRITE_UNREDACTED` is unreached rather than
+  suppressed.
+- **Other verified findings, reported and not fixed**: `severity` carries two
+  vocabularies in one module (`info|warning|critical` pattern-enforced on three
+  fields vs `advisory|review|reject` comment-only on `AuditIntegrityGateOut`);
+  eight fields name their allowed values in a trailing comment and nowhere else;
+  `summary` is the only uncapped write string; the five dead-letter timestamps
+  are `Optional[str]` where the rest of the module uses `datetime`;
+  `entry_ids: List[Optional[int]]` is the only nullable-element list; two
+  envelopes omit `generated_at` and one makes it optional; `POST /audit/log` is
+  the only audit write with an untyped 201; shape collisions on `id` (int/str),
+  `occurred_at` (datetime/str) and `replayable` (**a bool flag vs an int count**);
+  and `TransactionQueryReport.results` is untyped where `TransactionLogReport.tail`
+  declares `List[TransactionOut]` — stated as a *comparison*, not as an assertion
+  that the elements are the same records, because the schema does not say so.
+- **`unreached_codes` is emitted, not just counted** (16 of 33). A field named
+  `unreached_codes` that no report ever surfaces is a claim a client has to take
+  on trust, so each unreached code gets a `CONTRACT_TAXONOMY_NOT_EMITTED`
+  finding, and `emitted_codes + unreached_codes == codes` holds as arithmetic a
+  client can check. `CONTRACT_TAXONOMY_NOT_EMITTED` is the one code that is
+  always reached, which is the honest reading: it reports the others.
+- **`GOVERNANCE_MODELS` is an explicit name list**, not "everything after the
+  banner comment". An ordering rule would silently reclassify a future contract
+  as a report and silently stop treating a moved report as a report. Asserted
+  structurally: `_audit_models` filters by identity against the declared set and
+  reads no line number, no slice and no marker comment.
+- **No cross-module imports**: `app.models` and `app.main` are deliberately not
+  imported (a schemas module that imported the app to inspect it would be a
+  cycle, and the deps pass set the precedent). The DDL constraint is documented
+  and *not* verified; the route map takes `routes=` — an OpenAPI document or a
+  FastAPI app — and the two route-dependent checks report
+  `untyped_write_responses:skipped` when it is absent. An unavailable check never
+  reads as clean.
+- **Bugs found in the new code while writing it — eighteen**, every one caught by
+  cross-checking the report against the module rather than against intent, and
+  every one now pinned as a regression test:
+  1. A typo in the taxonomy: declared `CONTRACT_NESTED_ONLY_UNDOCLARED`, emitted
+     `...UNDECLARED`. The `_finding` error-severity fallback caught it.
+  2. Route matching compared the declared `"GET /audit/logs"` against the
+     observed `"GET /audit/logs [200]"` — 12 false findings. `_route_map` now
+     keeps a separate `response_paths` list of bare method+path.
+  3. `top_level` was tested against every observed label, so all 4 `Create`
+     models counted as top-level. It means "top-level **response**" only.
+  4. `_kind_for` used first-match-wins, so `TransactionSpecReport` inferred
+     `report` from the `Report` suffix. Fixed with longest-suffix-first.
+  5. Four checks string-matched a `typing` repr: `List[Dict[str, Any]]` renders
+     as `typing.List[typing.Dict[str, typing.Any]]` and `Optional[str]` as
+     `typing.Optional[str]`, so the checks matched nothing and reported clean.
+     `_shape_of` now reads the type object.
+  6. `_shape_of` unwrapped *any* single-arg generic, turning
+     `List[Dict[str, Any]]` into a bare dict. It must unwrap Optional only.
+  7. The nested-generic case then tested `str` for a dict origin, which is always
+     False. The element must be tested whole.
+  8. `_typed_list_sibling` returns `field` but the finding body read
+     `typed_twin['typed_at']` → `KeyError`.
+  9. `CONTRACT_KIND_UNKNOWN.emitted_by` was a bare string instead of a tuple, so
+     `",".join` spelled the producer out one character at a time. A new
+     taxonomy self-check now catches it — the check that reads the taxonomy as a
+     consumer of it is the only thing that can notice.
+  10. Four taxonomy rows used `severity: "error"` while twenty-nine used
+      `defect`/`warning`/`info`, so one payload had two vocabularies for one
+      field — the same collision the module reports on the contracts.
+  11. The catalog reported `CONTRACT_TAXONOMY_NOT_EMITTED` as unreached while
+      simultaneously emitting it.
+  12. `nested_only` counted the 4 request bodies in with the 14 models that can
+      only appear inside another contract.
+  13. The bypassed-contract check matched `filters` against
+      `TransactionLogReport.tail` and reported 3 lists of query parameters and
+      checkpoints as bypassed contracts; its own comment described the intended
+      behaviour and the code did the opposite. Names in the trivial table are now
+      skipped.
+  14. The bypassed entry's `annotation` was the bare origin `"List"`, which
+      distinguishes nothing.
+  15. `_shape_of(None)` reported `known: True` — claiming to have recognised an
+      annotation it had no fact about, the exact failure its docstring warns of.
+  16. `describe_contract_field` called `_carrier_of(annotation)` without the field
+      name, so an ISO-string timestamp was described as "a free label by design"
+      while the returned `carrier` said `timestamp` — one function, two answers.
+  17. `build_contract_catalog`'s own ground-truth arithmetic raised on a
+      malformed row (`row.get` on `None`), in the one place a client reads to
+      check the report against.
+  18. `emitted_codes` was computed before the unreached findings were appended, so
+      `emitted + unreached == codes` was false by exactly one.
+- **One claim corrected against the code, not the module**: `redacts: True` was
+  first written for `POST /audit/log` because `redact_detail` appears in
+  `audit_log.py`. It is in `record_auditable`, not `record_audit_log_entry`.
+  Always check the function body.
+- **`main.py` wiring** (rule 5, same change): a new `GET /meta/audit-contracts`
+  returning `{contracts, governance}`; `audit_trail` in `/meta/ecosystem` gained
+  `config_tables` (9) and a 1145-character `notes`;
+  `"audit_contracts": "/meta/audit-contracts"` in `/meta/features`;
+  `"contract_governance"` appended to the `/meta` features list; and
+  `"audit_contracts": build_contract_catalog(routes=app)` in
+  `/meta/scoring-catalog`. All eight `/meta/` endpoints return 200.
+- **Tests**: `tests/test_contract_governance_expansion.py` (139) — suite grew
+  **1673 → 1812 passing**. Four groups: the pinned 40 contracts, the write-path
+  claims verified against `app.services.audit_log` by `ast`, the tables and the
+  guards-with-deliberately-broken-tables, and the surfaces. Whole-table swaps use
+  `monkeypatch.setattr`; the fixtures restore nothing in place.
+- **Ground truth for the shipped catalog**, asserted in the tests: 40 contracts
+  (4 request bodies / 22 top-level responses / 14 nested-only), 326 fields
+  examined, 33 codes with 17 reached and 16 unreached, 84 findings
+  (27 defect / 37 warning / 20 info), `contract_inventory` the only clean report,
+  and `validate_contracts` ok with 0 errors, 4 warnings, 0 info. The four
+  warnings are the carrier mismatch on `SystemEfficiencyReport.summary` and the
+  three shape collisions.
+
+### r5 — thin-group expansion, sixth pass: `app.i18n` (2026-09-29)
+
+The seventh and last thin group, `app/i18n.py` (564 → **3211 LOC**, 0 → 6
+config tables, +9 public functions). No new layer and no new top-level domain,
+so per maintenance rule 6 the revision stays `r5`; the tree grew **523 → 539
+leaves** (54 internal nodes) by leaf-level additions only. `MESSAGE_CATALOG`,
+`SUPPORTED_LOCALES`, `PLURAL_CATEGORIES`, `RTL_LOCALES`, `translate`,
+`_render_template`, `resolve_locale`, `negotiate_locale`,
+`parse_accept_language`, `catalog_coverage` and `build_i18n_catalog` all keep
+their exact signatures, payloads and behaviour — asserted against transcribed
+`ORIG_*` constants in the tests, not by inspection.
+
+- **Posture: report, never repair.** This is the one group where the obvious
+  expansion — "fix the message leak" — would be wrong. `_render_template`
+  catches `(KeyError, IndexError, ValueError)` and returns the joined string, so
+  a template that leaks `{name}` is *already being served that way*: repairing
+  it changes a string clients are matching on, in a module whose entire job is
+  producing those strings. So all 15 `RENDER_OPS` rows carry `report_only: True`
+  and `validate_i18n` **errors** on a row that does not. Each finding names the
+  code path that produced it rather than proposing a patch.
+- **What became config** — six tables, none of which existed before:
+  - `MESSAGE_NAMESPACES` (8) — per-prefix ownership, audience, expected
+    placeholder policy and a 80-character budget. It is what lets
+    `message_placeholder_audit` say *this* prefix expects no values, so a
+    `{token}` there is a defect rather than a curiosity.
+  - `PLACEHOLDER_POLICIES` (3) — `none_expected` / `required_values` /
+    `plural_count`, referenced by name from the namespace rows.
+  - `LOCALE_EXPECTATIONS` (4) — `direction`, `plural_categories` and a
+    `format_profile` per language.
+  - `NUMBER_FORMATS` (7) — keyed by **region profile** (`en_us`, `en_gb`,
+    `es_es`, `es_419`, `fr_fr`, `de_de`, `ar_eg`), not by language tag,
+    because a language tag determines neither the decimal separator nor the
+    currency position: `es` is `1.234,50 €` in Spain and `$1,234.50` in Latin
+    America. Language-keyed rows would have been confidently wrong. Every
+    profile declares `digit_substitution: "none"` because Arabic-Indic shaping
+    is not implemented, and `format_number` is **offered, not imposed** — the
+    renderer's plural `#` still emits `str(int(n))`.
+  - `RENDER_OPS` (15) — the format-spec grammar the renderer actually honours,
+    written down as data. This is where the pass's findings live: the shipped
+    behaviour of each op, not a wish list.
+  - `I18N_WARNINGS` (36 codes) — the finding taxonomy, with severity,
+    `emitted_by` and remediation. **22 of the 36 are unreached** and the catalog
+    says so in a first-class `unreached_codes` field: they are guards that only
+    fire on a malformed config, and the shipped config is clean. Stated rather
+    than papered over with synthetic fixtures.
+- **Verified defects, reported and not fixed** — nine, each established by
+  throwaway probe and each reproducible from the shipped catalog:
+  1. **A missing value leaks the raw token.** `translate('auth.welcome','en')`
+     → `'Welcome, {name}'`. Six findings, because three locales each hit two
+     independent detectors.
+  2. **`translate()` raises `AttributeError` out of the renderer** for a dotted
+     field — the `except` clause does not cover it, so
+     `_render_template('Value is {a.b} here','en',{'a':'v'})` propagates
+     instead of degrading. Indexing (`{a[0]}`) *is* caught as `IndexError`. The
+     worst finding in the module: the one template shape that turns a copy
+     mistake into a 500.
+  3. **A plural with no `count` renders the *zero* branch.**
+     `translate('error.count','en')` is identical to `count=0` — `'no errors'`
+     where the caller meant "an unspecified number of errors".
+  4. **One unescaped `}` makes `str.format` raise `ValueError`, so *every*
+     placeholder in that template stops interpolating.**
+     `'Welcome, {name} }'` → `'Welcome, {name} }'`. The escape is `}}`.
+  5. **`#` substitution has no word boundary.**
+     `'{n, plural, other {issue #7 resolved with # items}}'` with `n=3` →
+     `'issue 37 resolved with 3 items'`.
+  6. **A missing `other` branch makes the last branch serve every unmatched
+     count.** `'{n, plural, one {# item}}'` with `n=99` → `'99 item'`.
+  7. **`negotiate_locale(...).requested` is `normalize_locale` of the whole
+     header.** `'fr-CA, es;q=0.8, en;q=0.5'` → the literal string
+     `'fr-ca, es;q=0.8, en;q=0.5'` — a field named `requested` that is not a
+     tag.
+  8. **`q=0` is still eligible.** RFC 9110 says zero quality means "not
+     acceptable"; `q` is also unclamped (`q=5` → `5.0`) and a repeated `q`
+     last-wins silently.
+  9. **`resolve_locale` and `negotiate_locale` disagree on `fallback_used`** for
+     `""`, `es` and `fr` — the same resolved locale with the opposite flag — and
+     `chain` means different things depending on which produced it.
+  Plus registry drift: `RTL_LOCALES` ∩ `SUPPORTED_LOCALES` = ∅, so `direction`
+  is permanently `"ltr"`; `PLURAL_CATEGORIES["ar"]` declares six categories
+  while `plural_category()` can only ever produce `one`/`other`;
+  `SUPPORTED_LOCALES[l]['fallback']` is reported by two payloads and read by no
+  resolution path; override keys are invisible to `catalog_coverage()`; and
+  `error.*` vs `errors.*` is a declared near-duplicate that was **kept as-is**,
+  because collapsing it would retire live keys.
+- **New functions** — `message_placeholder_audit`, `message_budget_report`,
+  `unbalanced_template_report`, `plural_audit`, `negotiation_audit`,
+  `locale_registry_audit`, `format_number`, `validate_i18n`,
+  `build_i18n_governance_catalog`. Every audit takes an optional `catalog=`
+  argument, so a *proposed* catalog is checked before it is installed rather
+  than by mutating the live one and restoring it.
+- **Additive method on an existing class**: `CatalogOverrides.keys_by_scope()` —
+  a read-only view, so the coverage reports do not reach into `_layers`.
+- **Bugs found in the new code while writing it** — two, both caught by
+  cross-checking against the module rather than against intent:
+  1. `locale_registry_audit` counted templates with
+     `MESSAGE_CATALOG.get(locale)`, but the catalog is `{key: {locale: template}}`
+     — the top-level lookup found nothing and reported all three shipped
+     locales as translation-less. Three spurious findings; the count is now
+     `sum(1 for _, locale, _ in _catalog_entries(MESSAGE_CATALOG))`.
+  2. `plural_audit(catalog=X)` was calling `_safe_translate`, which always
+     reads `MESSAGE_CATALOG` — so it audited the live catalog while claiming to
+     audit the proposed one. It now renders the catalog it was handed.
+- **Tests**: `tests/test_i18n_governance_expansion.py` (116) — suite grew
+  **1557 → 1673 passing**. The whole file transcribes the shipped tables into
+  `ORIG_*` constants and restores every table swap with `monkeypatch.setattr`
+  (whole-table, never an in-place row edit — `original = list(TABLE)` aliases
+  the rows and would restore the *mutation*). 36 findings are reported (16
+  defect / 16 warning / 4 info) and `validate_i18n` is clean: 0 errors,
+  0 warnings.
+- **Doc-drift correction**: `translate`'s `count` and `scopes` are
+  **keyword-only**, so `translate(key, locale, "Ana")` raises `TypeError`. A
+  first probe round passed the value positionally, appeared to show that
+  overrides were being ignored, and would have been written up as a defect.
+- **`main.py` wiring** (rule 5, same change): the `localization` subservice
+  gained `config_tables` and a 1333-character `notes`; `"i18n_governance":
+  "/meta/i18n"` in `/meta/features`; `"i18n_governance"` appended to the
+  `/meta` features list; `"i18n_governance": i18n.build_i18n_governance_catalog()`
+  in `/meta/scoring-catalog`; a `governance` key on `/meta/i18n`. All five
+  `/meta/` endpoints return 200.
+- **Ground truth for the shipped catalog** (asserted in the tests, so a future
+  edit to `MESSAGE_CATALOG` cannot silently move these): 15 keys, 45 templates,
+  3 locales, 8 prefixes; `name` in `auth.welcome` is the *only* placeholder in
+  the entire catalog; 6 templates carry a plural block; the longest is
+  `error.count[fr]` at 68 characters, which is why the 80-character budget
+  report is clean; `booking.count` → `one`/`other` and `error.count` →
+  `=0`/`one`/`other`, identical across all three locales; and all locales agree
+  per key on placeholders, so the divergence guard is green today.
+
+### r5 — thin-group expansion, fourth pass (2026-09-28)
+
+Five function groups expanded in sequence, thinnest first: `services.retention`,
+`services.recovery_playbooks`, `routers.topics`, `app.model_bases`, and
+`services.policy_scoring`. No new layer and no new top-level domain, so per
+maintenance rule 6 the revision stays `r5`; the tree grew **498 → 511 leaves**
+(54 internal nodes) by leaf-level additions only, and every change is additive.
+No DDL was added anywhere in this pass, no existing config table was edited, and
+no existing route's response payload changed shape.
+
+- **`services.retention`** (733 → 2033 LOC, 0 → 7 config tables). Retention
+  windows, forecast bands, suppression rules and the maintenance-gate verdicts
+  moved out of inline branches into tables, with a validator that says which
+  configured rule cannot run as written.
+- **`services.recovery_playbooks`** (598 → 2522 LOC, 1 → 8 config tables).
+  Proactive-reach playbooks kept deliberately separate from the v1 core set, an
+  action registry replacing the orchestrator's `if/elif` chain, and
+  `RECOVERY_GUARD_RULES` — the reason the pass mattered: the automated sweep is a
+  *loop*, `credit_points` derives its amount from the current dissatisfaction
+  score, and nothing bounded how often it could run, so a customer whose
+  sentiment stayed negative was re-credited the same goodwill amount every pass.
+  A guard refusal is reported as `skipped` with the guard that said no.
+- **`routers.topics`** (303 → 2765 LOC, 31 routes, 18 new pydantic schemas).
+  A `GovernedAPIRoute` on `router.route_class` that returns the original
+  response untouched: the governance layer is advisory by design. Numeric params
+  clamp, enumerated and required params reject, and **every** clamp is reported.
+  `admit_topic_request` consumes a token only when `consume=True`, and planning
+  never spends rate budget.
+- **`app.model_bases`** (502 → 1985 LOC, 8 → 12 mixins, 18 new config tables).
+  No existing table gained a column. The four new mixins — `SluggableMixin`,
+  `ApprovalMixin`, `MoneyMixin`, `IdempotencyMixin` — are for **new tables
+  only**; applying one to a mapped table is a DDL change, so the validator
+  reports a column name a mixin and an existing table share as a *warning* and
+  names it, rather than blocking. The field-sensitivity vocabulary is layered
+  *over* the untouched `SERIALIZATION_DENYLIST` and new keys are reported through
+  `mixin_extensions`, never by widening the pinned `mixins`/`families` contract.
+  `Base.metadata` holds only imported models, so `mixin_column_provenance`
+  reports `entities_module_imported` — a partial view read as a whole-schema
+  audit is how a partial audit passes.
+- **`services.policy_scoring`** (680 → 2193 LOC, 3 → 15 config tables). The
+  tier/posture/band tables were already config; the *score layer below them* was
+  not. The six published signals were six arithmetic expressions inline in an
+  `async def` that also issued six queries, and topic breadth/complexity/depth
+  were long inline marker lists. Those constants are now table rows **with
+  identical values**, so published scores and every stored
+  `CustomerPolicyScore.summary` string are unchanged — asserted differentially
+  against the original expressions, not against another restatement of the same
+  tables. Two original asymmetries are preserved rather than corrected and say so
+  in the table comments: the inverted dissatisfaction term is floored but not
+  ceilinged, and `scaled_mean` divides by the term count rather than the sum of
+  the weights (in `interest_score` the weights are 10/4/8/1, so reading it as a
+  weighted mean would move the published score). The marker table carries an
+  explicit `order` because for `depth` the five-word bonus lands *between* the
+  routing and urgency groups and float addition is not associative.
+  `build_policy_tier_catalog` keeps its exact key set and is reproduced
+  unchanged under `tier_catalog`.
+- **New in this pass**: `policy_rule_coverage` sweeps the score space and
+  reports which tier and band row actually decides and for how much of it. It
+  surfaced that **62.9%** of the (access, system) grid resolves to the
+  *default* constrained posture rather than to a `CONTROL_POSTURE_RULES` row —
+  a fact that was not visible anywhere before. First-match-wins makes row order
+  the semantics, so a shadowed row is dead configuration that still reads as
+  live in the catalog; the sweep reports it, as a warning, because a band
+  narrower than the grid step can hide a rule.
+- **Bugs found while building it** — two, both the silent-no-op class. The
+  `public` serialization profile's `max_depth` was 2, which blanks every
+  list-of-rows payload because the row dict sits at depth 2; and the
+  policy-scoring validator itself raised `ValueError` on a malformed
+  recommendation `priority` instead of reporting the row — a 500 out of the one
+  place a bad table must never take the process down. `BLOCKAGES.md` has the
+  detail.
+- **Meta wiring (rule 5, same commit)**: `retention_dashboard`,
+  `topic_request_governance`, `model_bases_governance` and
+  `policy_scoring_governance` in the `/meta` feature list and in
+  `/meta/ecosystem` `subservices` with their `config_tables` and `notes`; new
+  `GET /meta/model-bases` and `GET /meta/policy-scoring` handlers; matching keys
+  in `/meta/features` and `/meta/scoring-catalog`. `main` gained
+  `model_bases_endpoint` and `policy_scoring_endpoint` leaves.
+- **Tests**: `tests/test_retention_policy_expansion.py` (71),
+  `tests/test_recovery_governance_expansion.py` (119),
+  `tests/test_topic_request_governance_expansion.py` (183),
+  `tests/test_model_bases_governance_expansion.py` (167),
+  `tests/test_policy_scoring_expansion.py` (133) — suite grew **1240 → 1373
+  passing**. `validate_model_bases()` and `validate_policy_scoring()` both
+  report 0 errors against the live tables.
+
+### r5 — thin-group expansion, fifth pass: `app.deps` (2026-09-28)
+
+The sixth group, `app/deps.py` (595 → 2908 LOC, 0 → 14 config tables), and the
+first one where the "documented intent did not match the behaviour" class of bug
+turned up three times in the *authorization surface itself*. The request path is
+unchanged: same principal resolution, same status codes, same denial payloads,
+and every existing dependency keeps its exact signature.
+
+- **What became config** — three tables kept deliberately separate, because
+  they carry different kinds of truth:
+  - `AUTHZ_DENIALS` is **load-bearing**: each factory's `status_code` now reads
+    the table, with values identical to the old inline literals. The `error` and
+    `text` strings stay inline, because clients match on them and a table would
+    only make them easier to change silently.
+  - `RATE_TIERS` is read only by the new `require_rate_tier`. The historical
+    `require_rate_limit(capacity, refill_per_second)` signature and the
+    env-driven `RATE_LIMITER` are untouched, and the `interactive` row documents
+    the 60/1.0 default those env vars override.
+  - `STEP_UP_RANKS` documents the floor. `require_step_up(level: str = "loa2")`
+    keeps its literal default on purpose — the table documents the ranks, it does
+    not supply the signature.
+  - `AUTHZ_RULES` (56 rows) is a *description* of routes that exist, not a
+    router. `enforced_by` names the dependency that actually runs; `hardening`
+    is proposed-but-unenforced, in a **different key** on purpose, and is only
+    evaluated when `evaluate_authz(include_hardening=True)`, with every such
+    check marked `enforced: False`.
+  - `ROLE_SCOPE_GRANTS` is advisory and **never applied at resolution time**:
+    `require_scopes` reads `Principal.scopes` and nothing else, so synthesizing
+    scopes from roles would start authorizing calls that are denied today. It is
+    reported as `facts.implied_by_roles` with `implied_by_roles_applied: False`.
+  - `USER_ROLES` is untouched.
+- **Route-table ground truth**: 209 live method+path pairs over 197 paths
+  (79 admin, 63 authenticated, 19 policy, 48 public). `iter_authz_routes`
+  reproduces the openapi path set **exactly** — asserted in the tests, because
+  in this FastAPI version `app.routes` holds `_IncludedRouter` wrappers and
+  `route.path` is *not* the effective path: `include_router(prefix=...)` lives in
+  `route.include_context.prefix`, while a router's own `.prefix` is already baked
+  into its child route paths. `authz_drift_report` and `build_authz_catalog`
+  take `routes` as an argument because `app.deps` cannot import `app.main`.
+  All six `require_*` factories are bound to **no route at all**, and the report
+  says so rather than leaving them to look wired.
+- **Bugs found while building it** — three, all of the kind where a
+  configuration surface reported a fact that was not true:
+  1. **`matched_fallback` was absent exactly when it mattered.** A route landing
+     on the catch-all *row* left the key missing rather than `True`, so
+     `unclassified_routes` and `in_sync` silently missed it — the one case the
+     fallback exists to catch. The key is now always present.
+  2. **Anonymous callers were denied the entire public surface.** `evaluate_authz`
+     failed the `authenticated` check whenever `principal is None`, including for
+     `public` routes that require no credential; it now reports that check as
+     `not_evaluated` with a reason. The `anonymous` probe was itself wrong for a
+     related reason: it was built as an empty `Principal`, but `roles_for_user`
+     always yields at least one role, so a resolved-but-roleless principal is a
+     state the app cannot produce — and "resolves to a principal" is exactly what
+     the authenticated routes check, so the probe reported them all as *allowed*
+     while claiming "no credential at all". Probes now carry an `absent` flag
+     meaning "no credential resolved", and `authz_probe` returns `None` for
+     those rows, which is what the engine actually branches on.
+  3. **A trailing `*` meant `.*`, not `(?:/.*)?`.** The pattern compiler
+     compiled `/meta*` to a prefix match, so the rule claimed `/metadata`
+     too. Tightening it reclassified `GET /chat/admin-activity`, which had been
+     admin-gated *by accident*; it now has its own rule.
+  - Also fixed: `validate_authz` was reading the **import-time** indexes derived
+    from the tables (`SCOPE_BY_NAME`, `STEP_UP_RANK_BY_LEVEL`, `RATE_TIER_BY_NAME`,
+    `AUTHZ_RULE_IDS`) rather than the tables. A validator that consults a
+    derived index is checking the table as it *was*; editing `STEP_UP_RANKS` to
+    disagree with `security.STEP_UP_RANK` produced no complaint at all. It now
+    builds its own local indexes, which is why "the catch-all must be last" had
+    never fired. Two tests had been written against the old behaviour by
+    mutating the index, and were corrected to mutate the table.
+  - `AUTHZ_OPS["default_rate_tier"] = "interactive"` was added: the
+    default-tier lookup had been reading `default_exposure`, which yields the
+    string `"public"` as though it were a tier name.
+- **Meta wiring (rule 5, same commit)**: `authz_governance` in the `/meta`
+  feature list and in `/meta/ecosystem` `subservices` with its `config_tables`
+  and `notes`; a new `GET /meta/authz` handler; matching keys in
+  `/meta/features` and `/meta/scoring-catalog`. All five `/meta/` endpoints
+  return 200.
+- **Tests**: `tests/test_authz_expansion.py` (184) — suite grew **1373 → 1557
+  passing**. `validate_authz()` reports 0 errors and 0 warnings against the live
+  tables, with the fault-injection tests each restoring in a `finally`.
+  `authz_denial_contract` drives all 14 `require_*` factories and private raisers
+  against their declared payloads. The tree grew **511 → 523 leaves** (54
+  internal nodes): `auth_deps` gained `scope_catalog`, `role_scope_grants`,
+  `denial_contract`, `step_up_ranks`, `rate_tiers`, `route_rules`,
+  `decision_engine`, `drift`, `simulation`, `validation`, `authz_catalog` and
+  `rate_tier`.
+- **Doc drift corrected while here**: the "Current Map" header still read
+  498/54 from before the fourth pass, and the multi-line rendering in this file
+  was missing seven leaves the Newick had gained (`model_bases_endpoint`,
+  `policy_scoring_endpoint`, `composition`, `topic_metrics`,
+  `posture_adjustment`, `tier_escalation`, `ops_catalog`). The rendering is now
+  token-for-token equal to the Newick, checked rather than eyeballed.
+
+### r5 — thin-group expansion, third pass (2026-09-27)
+
+`infra.db` (542 → **2564 LOC**) gained a second layer on top of the r5
+resilience plumbing: query fingerprinting and slow-query banding, a read/write
+split, savepoints, chunked bulk load, gated `EXPLAIN`, connection diagnostics,
+and a schema-drift report. `services.retention_snapshots` was also finished in
+this pass (see the second-pass entry for the tally it belongs to). No new layer
+and no new top-level domain, so per maintenance rule 6 the revision stays `r5`;
+the tree is **byte-identical** at 498 leaves / 54 internal nodes, which is the
+expected result — both changes are growth *under* existing leaves
+(`db`, `services.retention_snapshots`), not new surfaces. Every change is
+additive: `engine`, `SessionLocal`, `Base`, `get_db`, `ping_database`,
+`retry_async` (`policy=None` still the exact legacy path), `build_db_catalog`,
+and all 30-odd historical names are untouched, and no DDL was added.
+
+- **Infra — instrumentation, routing, diagnostics** (`app/db.py`)
+  - `query_fingerprinting`: `normalize_sql` (idempotent literal / bind-param /
+    `IN`-list masking driven by the ordered `SQL_NORMALIZATION_RULES` table),
+    `fingerprint_statement`, `classify_statement` (tri-state `mutating`, so a
+    data-modifying CTE behind a leading `WITH` is classified as the write it is),
+    `QueryRecorder` / `timed_execute` (bounded, and over-capacity drops are
+    *counted* in the report rather than discarded).
+  - `slow_query`: `classify_duration`, `resolve_slow_bands` — bands name the
+    tunable supplying their threshold instead of repeating the number, so the
+    band table and the tunable table cannot disagree about one knob.
+  - `read_write_split`: `get_read_engine`, `read_session`, `read_only`,
+    `split_target_for`. Opt-in and invisible when unused: with no `DB_READ_URL`
+    every statement routes to the primary, so no call site needs a replica flag.
+  - `guarded_call`: retry **and** circuit breaker in one call, with
+    `idempotent=False` running the factory exactly once. The breaker records the
+    outcome of the whole call, not of each attempt.
+  - `explain`: `explain_plan_request` (pure gate, no database) and
+    `explain_statement`. `EXPLAIN ANALYZE` *executes*, so both it and any
+    mutating statement require an explicit `execute=True`.
+  - `diagnostics`: `connection_diagnostics` (one round-trip) and the pure
+    `diagnose_connection` / `diagnostic_verdict`, with
+    `parse_postgres_value` for the compound duration literals
+    `current_setting` actually returns (`"30s"`, `"1h30min"`).
+  - `schema_drift`: `compare_table` (pure) and `schema_drift_report`, against
+    `Base.metadata` — which holds only imported models, so the report states its
+    own coverage instead of implying a whole-schema audit.
+  - `write_shapes`: `savepoint` / `run_in_savepoint` (a failed step costs the
+    step, not the unit of work) and `bulk_load` (chunked, commits nothing).
+  - `validate_db_ops_policy` / `simulate_db_ops` / `build_db_ops_catalog`
+    (0 errors, 0 warnings), exposed as the new `database_ops` key in
+    `/meta/scoring-catalog`.
+- **Bugs found while building it** — five, four of them the silent-no-op class.
+  `simulate_db_ops` built its *baseline* from the overrides, so baseline and
+  candidate were identical and every scenario reported `changed: False`;
+  `timed_execute`'s success record sat after a `return` and was unreachable, so
+  only failures were ever measured; `explain_plan_request` never set `ok: True`
+  and the refusal branch inherited the request, inverting both gates;
+  `diagnostic_verdict` had `concern_not_equals` backwards, flagging every
+  healthy server; and Postgres duration settings were unparseable by `float()`,
+  which would have made **every** duration check permanently `skipped` in
+  production while a test passing only `"0"` looked clean. All five were caught
+  by the `/tmp/opencode/` harness, not by reading the code. `BLOCKAGES.md` has
+  the detail.
+- **Pruned** on the no-speculative-config rule: `DRIFT_COLUMNS_EXCLUDED` (an
+  always-empty exclusion set) and `COLUMN_TYPE_PARAMS` (declared, never read).
+- **Tests**: unchanged by policy — the suite was **700 passing** before and
+  after. `validate_db_ops_policy()` reports `valid: True` with 0 errors and
+  0 warnings, and the new surface is verified by
+  `/tmp/opencode/cservice/verify_db_ops.py` (~200 assertions, including the
+  never-raise contracts for every database-touching helper, against fakes).
 
 ### r5 — thin-group expansion, second pass (2026-09-27)
 
@@ -328,7 +1344,16 @@ catalog key sets are untouched, and no DDL was added to an existing table.
   - `localization`: `locale_normalization`, `accept_language`,
     `negotiation` (`negotiate_locale`), `plural_rules`, `fallback_chain`,
     `coverage` (`catalog_coverage`), `overrides` (`CatalogOverrides`),
-    `translate_many`.
+    `translate_many`. The sixth pass added a governance layer over that
+    untouched render path: `namespaces` (`MESSAGE_NAMESPACES`),
+    `placeholder_policies`, `locale_expectations`, `number_formats`,
+    `render_ops` (`RENDER_OPS`, the format-spec grammar the renderer actually
+    honours), `findings_taxonomy` (`I18N_WARNINGS`, 36 codes), `template_scan`,
+    `placeholder_audit` (`message_placeholder_audit`), `budget_report`
+    (`message_budget_report`), `unbalanced_templates`,
+    `plural_audit`, `negotiation_audit`, `locale_registry_audit`,
+    `format_number`, `i18n_validation` (`validate_i18n`), `governance_catalog`
+    (`build_i18n_governance_catalog`).
 - **Models** — `model_bases` gains `soft_delete`, `row_version`, `expiring`,
   `actor_audit`, `serialization`, `security_event_extensions` (extra STI
   families live in their own table so the pinned 3-key `families` catalog stays

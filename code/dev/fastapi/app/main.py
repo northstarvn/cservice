@@ -14,11 +14,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import Base, engine, get_db
+from app import db as db_infra
 from app import i18n
 from app.i18n import locale_payload
+from app import model_bases
 from app import models
+from app.schemas import audit as audit_schemas
+from app import deps
 from app.routers import audit, bookings, chat, topics, users
-from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks
+from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
 from app import (
@@ -216,6 +220,12 @@ async def app_metadata():
             "regional_policy",
             "rule_engine",
             "recovery_playbooks",
+            "topic_request_governance",
+            "model_bases_governance",
+            "policy_scoring_governance",
+            "authz_governance",
+            "i18n_governance",
+            "contract_governance",
         ],
     }
 
@@ -262,6 +272,30 @@ async def app_ecosystem():
                 ],
                 "purpose": "conversation memory, sentiment analysis, and retention scoring",
                 "status": "ready",
+            },
+            "retention_policy": {
+                "routes": [
+                    "/chat/admin/retention-health",
+                    "/chat/admin/retention-forecast",
+                    "/chat/admin/retention-forecast-sweep",
+                    "/chat/admin/retention-cluster-coverage",
+                ],
+                "purpose": (
+                    "config-driven health banding over the retention snapshot series, "
+                    "series anomaly detection, forward projection with an explicit "
+                    "confidence decay, and topic-cluster coverage including the "
+                    "clusters a customer never speaks to"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "RETENTION_TOPIC_HINTS",
+                    "RETENTION_TOPIC_CLUSTERS",
+                    "RETENTION_CHURN_RANK",
+                    "RETENTION_SAMPLE_THRESHOLDS",
+                    "RETENTION_HEALTH_RULES",
+                    "RETENTION_ANOMALY_RULES",
+                    "RETENTION_FORECAST_RULES",
+                ],
             },
             "retention_ops": {
                 "routes": [
@@ -368,6 +402,36 @@ async def app_ecosystem():
                 ],
                 "purpose": "immutable operator/system action trail for explainability, with action/severity catalog, rollups, per-audience read profiles, and a config-driven integrity gate table",
                 "status": "ready",
+                "config_tables": [
+                    "CONTRACT_KINDS",
+                    "CONTRACT_AUDIENCES",
+                    "CONTRACT_FIELD_POLICIES",
+                    "CONTRACT_TRIVIAL_FIELDS",
+                    "CONTRACT_FORBIDDEN_FIELDS",
+                    "CONTRACT_INVENTORY",
+                    "CONTRACT_WRITE_PATHS",
+                    "CONTRACT_OPS",
+                    "CONTRACT_WARNINGS",
+                ],
+                "notes": (
+                    "the 40 pydantic models in app/schemas/audit.py are the client-facing "
+                    "contract for every /audit/* route, and the nine tables above describe "
+                    "them: which route serves each, which audience it is for, and where its "
+                    "allowed values are actually enforced. The posture is report, never "
+                    "repair -- a model in that module is not a rendering of a policy, it is "
+                    "the policy a client binds to, and widening one to silence a finding "
+                    "would delete the only place a vocabulary was written down. So a "
+                    "non-empty finding list is the expected state, not a broken endpoint. "
+                    "Two things it deliberately does not verify: the DDL, because the "
+                    "audit_log_entries.severity CHECK constraint is documented in "
+                    "CONTRACT_FIELD_POLICIES and not checked from a schemas module; and the "
+                    "route table without an openapi document, in which case the two "
+                    "route-level checks report themselves as skipped rather than passing. "
+                    "The headline finding is that POST /audit/log stores its detail blob "
+                    "verbatim while POST /audit/log/auditable scrubs it, and the two "
+                    "declare the field identically -- Dict[str, Any], no description -- so "
+                    "a client reading the OpenAPI document cannot tell which is which."
+                ),
             },
             "localization": {
                 "routes": [
@@ -376,6 +440,36 @@ async def app_ecosystem():
                 ],
                 "purpose": "locale resolution and message translation across en/es/fr with fallback to English",
                 "status": "ready",
+                "config_tables": [
+                    "MESSAGE_NAMESPACES",
+                    "PLACEHOLDER_POLICIES",
+                    "LOCALE_EXPECTATIONS",
+                    "NUMBER_FORMATS",
+                    "RENDER_OPS",
+                    "I18N_WARNINGS",
+                ],
+                "notes": (
+                    "the resolution and render path is unchanged: SUPPORTED_LOCALES, "
+                    "MESSAGE_CATALOG, PLURAL_CATEGORIES, RTL_LOCALES, translate, "
+                    "_render_template, resolve_locale, negotiate_locale and "
+                    "parse_accept_language all keep their exact signatures, payloads and "
+                    "behaviour, and build_i18n_catalog keeps its key set. The governance "
+                    "layer reports and never repairs. Every RENDER_OPS row is report_only, "
+                    "because the renderer catches KeyError and returns the joined string, so "
+                    "fixing a leak changes a string that is already being served. format_number "
+                    "is offered, not wired in: the plural '#' still renders as str(int(n)). The "
+                    "catalog ships 17 defect-severity findings, all verified against the shipped "
+                    "functions and asserted in the tests -- a missing value leaks the raw "
+                    "{name} token, a plural message with no count renders its zero branch, a "
+                    "dotted field such as {a.b} raises AttributeError straight out of "
+                    "translate() because the renderer's except clause does not cover it, "
+                    "negotiate_locale reports the whole Accept-Language header as 'requested', "
+                    "and resolve_locale and negotiate_locale disagree on fallback_used for the "
+                    "same request. RTL_LOCALES names four locales and PLURAL_CATEGORIES six "
+                    "categories for Arabic, none of which the registry ships, so direction is "
+                    "always 'ltr' and the Arabic branches are unreachable; that is reported, "
+                    "not repaired"
+                ),
             },
             "tenant_routing": {
                 "routes": [
@@ -466,6 +560,208 @@ async def app_ecosystem():
                 "status": "ready",
                 "auto_recovery_enabled": recovery_playbooks.AUTO_RECOVERY_ENABLED,
             },
+            "recovery_governance": {
+                "routes": [
+                    "/chat/admin/recovery-guards",
+                    "/chat/admin/recovery-analytics",
+                    "/chat/admin/recovery-outreach-plan",
+                ],
+                "purpose": (
+                    "the guard layer that bounds automated recovery: declarative "
+                    "per-run, cooldown, per-day and per-metric budget limits "
+                    "evaluated before dispatch, a registry-backed action policy "
+                    "table, an aggregate spend/effectiveness rollup, and a "
+                    "composed outreach preview that issues nothing"
+                ),
+                "status": "ready",
+                "governance_version": recovery_playbooks.RECOVERY_GOVERNANCE_VERSION,
+                "config_tables": [
+                    "RECOVERY_OUTREACH_PLAYBOOKS",
+                    "RECOVERY_ACTION_SPECS",
+                    "RECOVERY_GUARD_RULES",
+                    "RECOVERY_CALLBACK_PLANS",
+                    "RECOVERY_SAVE_INCENTIVES",
+                    "RECOVERY_REVIEW_RULES",
+                    "RECOVERY_STAGE_RULES",
+                ],
+                "notes": (
+                    "guards exist because the automated sweep is a loop: "
+                    "credit_points derives its amount from the current "
+                    "dissatisfaction score, so an unbounded sweep re-credits a "
+                    "persistently-negative customer the same goodwill amount "
+                    "every pass"
+                ),
+            },
+            "topic_request_governance": {
+                "routes": [
+                    "/topics/governance/routes",
+                    "/topics/governance/params",
+                    "/topics/governance/limits",
+                    "/topics/governance/capacity",
+                    "/topics/governance/requests",
+                    "/topics/governance/validation",
+                    "/topics/governance/drift",
+                    "/topics/plan",
+                ],
+                "purpose": (
+                    "the governance layer over this router's caller-supplied "
+                    "input: declared per-parameter bounds with clamp-vs-reject "
+                    "semantics, per-route response caps and cache classes, rate "
+                    "tiers, a cost/SLO model, a table-vs-router drift check, and "
+                    "an offline planner that answers what a request would do "
+                    "without sending it"
+                ),
+                "status": "ready",
+                "advisory": True,
+                "config_tables": [
+                    "TOPIC_ROUTE_POLICIES",
+                    "TOPIC_PARAM_BOUNDS",
+                    "TOPIC_RESPONSE_LIMITS",
+                    "TOPIC_CACHE_POLICIES",
+                    "TOPIC_RATE_TIERS",
+                    "TOPIC_CAPACITY_RULES",
+                    "TOPIC_ERROR_MAP",
+                ],
+                "notes": (
+                    "advisory by design: the table describes the router and the "
+                    "planner predicts, but no existing route is gated. Planning "
+                    "never spends rate budget, and the recorder is the only "
+                    "piece in the request path"
+                ),
+            },
+            "model_bases_governance": {
+                "routes": [
+                    "/meta/model-bases",
+                    "/meta/scoring-catalog",
+                    "/meta/schema",
+                ],
+                "purpose": (
+                    "the governance layer under the shared model bases: a field "
+                    "sensitivity vocabulary layered over the untouched "
+                    "serialization denylist, named payload profiles with an "
+                    "unknown-name fallback to the most restrictive one, four "
+                    "mixins for new tables (slug, approval state machine, minor "
+                    "units, idempotency fingerprint), and a validator that says "
+                    "which mixin column names existing tables already own"
+                ),
+                "status": "ready",
+                "new_tables_only": True,
+                "config_tables": [
+                    "MODEL_BASES_OPS",
+                    "SLUG_RESERVED",
+                    "SERIALIZATION_CLASSES",
+                    "SERIALIZATION_PROFILES",
+                    "MASK_OPS",
+                    "APPROVAL_STATES",
+                    "CURRENCY_EXPONENTS",
+                    "MONEY_OPS",
+                    "SEVERITY_BANDS",
+                    "SECURITY_EVENT_SOURCES",
+                    "SECURITY_EVENT_QUERY_OPS",
+                    "MIXIN_CATEGORIES",
+                ],
+                "notes": (
+                    "no existing table gained a column and no existing config "
+                    "table changed. The four mixins are available for new tables "
+                    "only: applying one to a mapped table is a DDL change. A "
+                    "column name that both a mixin and an existing table declare "
+                    "is reported as a warning, not blocked"
+                ),
+            },
+            "authz_governance": {
+                "routes": [
+                    "/meta/authz",
+                    "/meta/scoring-catalog",
+                ],
+                "purpose": (
+                    "the authorization layer as data: the scope vocabulary "
+                    "grounded in what app.routers.users will actually issue, the "
+                    "role-to-scope relationship kept advisory and never applied "
+                    "at resolution time, the denial contract for all six "
+                    "require_* factories, the assurance and rate tiers, a "
+                    "per-route description of the gate that actually runs, and a "
+                    "pure decision engine that can answer who-may-do-what "
+                    "without a request or a database"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "SCOPE_CATALOG",
+                    "ROLE_SCOPE_GRANTS",
+                    "AUTHZ_DENIALS",
+                    "STEP_UP_RANKS",
+                    "RATE_TIERS",
+                    "AUTHZ_RULES",
+                    "AUTHZ_PROBES",
+                    "AUTHZ_CHECK_ORDER",
+                    "AUTHZ_CHECK_DENIALS",
+                    "AUTHZ_EXPOSURE_RANK",
+                    "AUTHZ_DEPENDENCY_NAMES",
+                    "AUTHZ_FACTORY_PREFIXES",
+                    "AUTHZ_OPS",
+                    "AUTHZ_VERSION",
+                ],
+                "notes": (
+                    "the request path is unchanged: same principal resolution, "
+                    "same status codes, same denial payloads, and every existing "
+                    "dependency keeps its exact signature. The status codes the "
+                    "factories raise now read AUTHZ_DENIALS, and "
+                    "authz_denial_contract proves the declaration against the "
+                    "live code by invoking each factory -- so a payload that "
+                    "drifts from its declaration is an error, not a surprise. "
+                    "USER_ROLES is untouched. ROLE_SCOPE_GRANTS is deliberately "
+                    "NOT applied at resolution time: require_scopes reads granted "
+                    "scopes only, so synthesizing them from roles would start "
+                    "authorizing calls that are denied today. Each rule's "
+                    "hardening block is a proposal and nothing reads it at "
+                    "request time. authz_drift_report reports every live "
+                    "method+path pair against the table while listing all "
+                    "six require_* factories as bound to no route at all"
+                ),
+            },
+            "policy_scoring_governance": {
+                "routes": [
+                    "/meta/policy-scoring",
+                    "/meta/scoring-catalog",
+                ],
+                "purpose": (
+                    "the score layer under the policy tier rules: the six "
+                    "published signals composed by a pure ordered engine from "
+                    "declared weights instead of six inline expressions, the "
+                    "topic breadth/complexity/depth marker tables with an "
+                    "explicit accumulation order, declarative posture "
+                    "adjustments, tier escalations and recommendation rules with "
+                    "reportable predicates, and a what-if surface for tuning a "
+                    "threshold against a real metric set without a database"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "SCORE_SIGNALS",
+                    "SCORE_INPUTS",
+                    "COMPOSITE_RULES",
+                    "POSTURE_ADJUSTMENTS",
+                    "TIER_ESCALATIONS",
+                    "TOPIC_MARKER_WEIGHTS",
+                    "TOPIC_SCORE_RULES",
+                    "HEALTH_THRESHOLDS",
+                    "RECOMMENDATION_RULES",
+                    "RECOMMENDATION_CONDITIONS",
+                    "POLICY_SCORING_OPS",
+                    "POLICY_SCORING_VERSION",
+                ],
+                "notes": (
+                    "the pinned tier/posture/band contract is unchanged and is "
+                    "reproduced under tier_catalog; build_policy_tier_catalog "
+                    "keeps its exact key set. Every constant lifted out of the "
+                    "score formula kept its value, so published scores and every "
+                    "stored summary string are unchanged -- the differential "
+                    "tests assert that against the original expressions. Two "
+                    "asymmetries in the original arithmetic are preserved rather "
+                    "than corrected, and say so in the table comments: the "
+                    "inverted dissatisfaction term is floored but not ceilinged, "
+                    "and scaled_mean divides by the term count rather than the "
+                    "sum of the weights"
+                ),
+            },
         },
         "capabilities": capabilities,
     }
@@ -489,6 +785,10 @@ async def app_feature_summary():
             "chat_history": "/chat/history",
             "retention_dashboard": "/chat/retention-dashboard",
             "retention_maintenance": "/retention/maintenance",
+            "retention_health": "/chat/admin/retention-health",
+            "retention_forecast": "/chat/admin/retention-forecast",
+            "retention_forecast_sweep": "/chat/admin/retention-forecast-sweep",
+            "retention_cluster_coverage": "/chat/admin/retention-cluster-coverage",
             "loyalty_journey": "/chat/loyalty-journey",
             "loyalty_admin_journey": "/chat/admin/loyalty-journey",
             "activity_tree": "/chat/activity-tree",
@@ -522,6 +822,8 @@ async def app_feature_summary():
             "audit_integrity_gates": "/audit/integrity/gates",
             "audit_trail_catalog": "/audit/trail-catalog",
             "i18n_catalog": "/meta/i18n",
+            "i18n_governance": "/meta/i18n",
+            "audit_contracts": "/meta/audit-contracts",
             "tenant_routing": "/meta/tenants",
             "tenant_routing_policy": "/meta/tenants/policy",
             "partition_management": "/meta/partitions",
@@ -545,6 +847,20 @@ async def app_feature_summary():
             "regional_policy": "/meta/regional",
             "recovery_playbooks": "/chat/recovery/playbooks",
             "recovery_playbooks_admin": "/chat/admin/recovery/playbooks",
+            "recovery_guards": "/chat/admin/recovery-guards",
+            "recovery_analytics": "/chat/admin/recovery-analytics",
+            "recovery_outreach_plan": "/chat/admin/recovery-outreach-plan",
+            "topic_route_policies": "/topics/governance/routes",
+            "topic_param_bounds": "/topics/governance/params",
+            "topic_response_limits": "/topics/governance/limits",
+            "topic_capacity": "/topics/governance/capacity",
+            "topic_request_analytics": "/topics/governance/requests",
+            "topic_policy_validation": "/topics/governance/validation",
+            "topic_route_drift": "/topics/governance/drift",
+            "topic_request_plan": "/topics/plan",
+            "model_bases_catalog": "/meta/model-bases",
+            "policy_scoring_catalog": "/meta/policy-scoring",
+            "authz_catalog": "/meta/authz",
             "session_refresh": "/users/refresh",
             "session_logout": "/users/logout",
             "session_inventory": "/users/me/sessions",
@@ -583,6 +899,8 @@ async def scoring_catalog():
         "efficiency_audit": build_efficiency_audit_catalog(),
         "audit_log": audit_log.build_audit_log_catalog(),
         "i18n": i18n.build_i18n_catalog(),
+        "i18n_governance": i18n.build_i18n_governance_catalog(),
+        "audit_contracts": audit_schemas.build_contract_catalog(routes=app),
         "password_policy": security.password_policy_payload(),
         "tenant_routing": tenant_router.build_tenant_router_catalog(),
         "partition_lifecycle": partition_manager.build_partition_manager_catalog(),
@@ -605,7 +923,13 @@ async def scoring_catalog():
         "rule_engine": rule_engine.build_rule_engine_catalog(),
         "regional_policy": regional_policy.build_regional_policy_catalog(),
         "recovery_playbooks": recovery_playbooks.build_recovery_playbook_catalog(),
+        "retention": retention.build_retention_catalog(),
+        "topic_request_governance": topics.build_topic_request_governance_catalog(),
+        "model_bases": model_bases.build_model_bases_ops_catalog(),
+        "policy_scoring_governance": policy_scoring.build_policy_scoring_catalog(),
+        "authz_governance": deps.build_authz_catalog(app.routes),
         "identity": users.build_users_catalog(),
+        "database_ops": db_infra.build_db_ops_catalog(),
     }
 
 
@@ -655,12 +979,118 @@ async def schema_catalog(section: str | None = Query(default=None)):
     return {**envelope, **catalog}
 
 
+@app.get("/meta/model-bases")
+async def model_bases_catalog():
+    """Describe the shared model bases and the governance layer over them.
+
+    ``/meta/schema`` describes the *mapped* schema; this describes the layer the
+    models are built from. The most useful section is ``validation``: it names
+    every mixin that has no mapped-table consumer, every new-mixin column name
+    an existing table already owns, and whether the process has imported
+    ``app.models`` at all — a partial ``Base.metadata`` view read as a whole
+    schema is how a partial audit passes.
+
+    Warnings here mean "available but not yet used". Errors mean the layer
+    cannot be trusted and should not be read as a statement about the schema.
+    """
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **model_bases.build_model_bases_ops_catalog(),
+    }
+
+
+@app.get("/meta/policy-scoring")
+async def policy_scoring_catalog():
+    """Describe the score layer under the policy tier rules.
+
+    ``/meta/scoring-catalog`` exposes ``policy_tiers``: the tier, posture and
+    access-band thresholds. Those were already config tables. What sat *below*
+    them was not — the six published signals were six arithmetic expressions
+    written inline inside the snapshot builder, and the topic breadth, complexity
+    and depth scores were long inline marker lists. This endpoint describes the
+    tables those expressions now read, and none of the numbers in them changed.
+
+    Three sections are worth reading first:
+
+    * ``validation`` — which configured rules cannot run as written. A
+      composition rule that reads a signal produced later, a marker group for a
+      metric that does not exist, or a recommendation predicate with a typo in
+      its condition name all produce a plausible score and no signal that a rule
+      did not fire.
+    * ``coverage`` — which tier and band row actually decides, and for how much
+      of the score space. First-match-wins makes row order the semantics, so a
+      shadowed row is dead configuration that still reads as live.
+    * ``tier_catalog`` — the pinned tier/posture/band contract, reproduced
+      unchanged for consumers that already know it.
+
+    Warnings mean something is configured but not doing anything. Errors mean
+    the layer should not be read as a statement about any customer's score.
+    """
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **policy_scoring.build_policy_scoring_catalog(),
+    }
+
+
+@app.get("/meta/authz")
+async def authz_catalog():
+    """Describe the authorization layer: what each route enforces, and what it does not.
+
+    ``app.deps`` holds the scope vocabulary, the role/scope relationship, the
+    denial contract, the assurance levels, the rate tiers, and a per-route
+    description of the gate that actually runs. None of that changed the request
+    path -- same principal resolution, same status codes, same denial payloads --
+    but it used to be invisible: the only way to ask "who can reach this?" was to
+    read a FastAPI signature, and the six ``require_*`` dependency factories were
+    bound to no route at all.
+
+    Four sections are worth reading first:
+
+    * ``drift`` -- the described posture against the routes the app actually
+      registers. ``in_sync`` is a claim that can be falsified, and a new route
+      landing on the fallback rule is reported by name.
+    * ``validation`` -- which configured rules cannot run as written. A scope
+      nobody can be issued, a step-up rank that disagrees with ``app.security``,
+      or a denial whose declared key order no longer matches the payload a
+      client receives are all errors here rather than surprises in production.
+    * ``backlog`` -- the requirements that are *proposed and not enforced*, kept
+      in a different key from the rules on purpose. 34 of the 55 rules ask for a
+      scope that no dependency checks, and reading that as a guarantee is exactly
+      the failure mode this separation exists to prevent.
+    * ``unbound_factories`` -- which ``require_*`` factories no route calls. All
+      six are working, tested, and unused.
+
+    Warnings mean something is configured but not doing anything. Errors mean the
+    layer should not be read as a statement about any real route's posture.
+    """
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **deps.build_authz_catalog(app.routes),
+    }
+
+
 @app.get("/meta/i18n")
 async def i18n_catalog(locale: str | None = None):
     """Expose the localization surface: supported locales and message catalog.
 
     The payload is locale-aware: pass ``?locale=es`` to see how the catalog
     will resolve for that audience, otherwise English is used as the baseline.
+
+    ``governance`` is the rules *around* the messages -- the key namespaces and
+    their placeholder and length policies, what the renderer actually does with
+    a missing value, an unbalanced brace, or a plural block, and where the two
+    locale resolvers disagree. It is a report, not a repair: every finding names
+    the code path that produced it, and a non-empty finding list is the expected
+    state rather than a sign the endpoint is broken.
     """
     return {
         "name": APP_NAME,
@@ -668,6 +1098,38 @@ async def i18n_catalog(locale: str | None = None):
         "environment": APP_ENV,
         "catalog": i18n.build_i18n_catalog(),
         "resolution": i18n.locale_payload(locale),
+        "governance": i18n.build_i18n_governance_catalog(),
+    }
+
+
+@app.get("/meta/audit-contracts")
+async def audit_contract_catalog():
+    """Expose the audit-trail contract surface and the governance over it.
+
+    40 pydantic models are the client-facing contract for every ``/audit/*``
+    route, and until now nothing in the tree said which route each one served,
+    which audience it was for, or where its allowed values were actually
+    enforced. ``contracts`` answers that from the pinned inventory; ``governance``
+    is the report *over* those contracts.
+
+    The posture is report, never repair -- a model in that module is not a
+    rendering of a policy, it is the policy a client binds to, and widening one
+    to silence a finding would delete the only place a vocabulary was written
+    down. So the interesting output is a non-empty finding list: which field
+    names its allowed values in a comment instead of a ``pattern=``, that
+    ``severity`` means two different things in one module, that ``/audit/log``
+    stores its detail blob verbatim while ``/audit/log/auditable`` scrubs it and
+    the two declare the field identically, and that the database CHECK constraint
+    the severity column relies on is documented here but *not* verified, because
+    a schemas module claiming to have checked the DDL would be a lie with a
+    passing test.
+    """
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "contracts": audit_schemas.contract_inventory(routes=app),
+        "governance": audit_schemas.build_contract_catalog(routes=app),
     }
 
 

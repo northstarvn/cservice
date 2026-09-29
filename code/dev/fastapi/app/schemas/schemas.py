@@ -774,3 +774,279 @@ class TopicSearchReport(BaseModel):
     catalog_size: int = 0
     topic_focus: List[str] = Field(default_factory=list)
     summary: str
+
+# --- Request governance & capacity planning ------------------------------------
+#
+# `/topics/search`, `/topics/suggestions`, `/topics/ranked`, `/topics/drift` and
+# friends take caller-supplied numbers (`limit`, `page`, `per_page`, `window`)
+# and free text (`query`, `topic`) that reach a service with no bounds of its
+# own. These contracts back the additive governance surface over those inputs:
+# what a parameter is allowed to be, which route requires what, how large a
+# response may get, and what a request would do if it were planned offline.
+#
+# Nothing here changes an existing route. `POST /topics/validate` is already
+# advisory for a *topic*; `GET /topics/plan` is advisory for a *request*.
+
+
+class TopicParamCoercion(BaseModel):
+    """One parameter that was accepted but not exactly as supplied.
+
+    A clamp is recorded rather than applied silently, so a caller that asked for
+    ``per_page=5000`` is told it received 100 rather than discovering a short
+    page with no explanation.
+    """
+
+    param: str
+    supplied: Any = None
+    resolved: Any = None
+    rule: str  # clamped | truncated | defaulted | coerced_type
+    reason: str = ""
+
+
+class TopicParamViolation(BaseModel):
+    """One parameter that could not be repaired and was refused."""
+
+    param: str
+    supplied: Any = None
+    reason: str  # out_of_range | too_long | wrong_type | empty
+    bound: str = ""
+    detail: str = ""
+
+
+class TopicParamBound(BaseModel):
+    """The declared contract for one request parameter."""
+
+    param: str
+    kind: str  # int | float | str | bool
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    default: Any = None
+    max_length: Optional[int] = None
+    required: bool = False
+    on_violation: str = "clamp"  # clamp | reject
+    used_by: List[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class TopicParamBoundsReport(BaseModel):
+    generated_at: datetime
+    count: int
+    bounds: List[TopicParamBound] = Field(default_factory=list)
+    clamp_params: List[str] = Field(default_factory=list)
+    reject_params: List[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class TopicCachePolicy(BaseModel):
+    """How a route's response may be cached, and by whom."""
+
+    cache_class: str
+    max_age: int
+    stale_while_revalidate: int
+    private: bool
+    varies_on: List[str] = Field(default_factory=list)
+    routes: List[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class TopicRoutePolicy(BaseModel):
+    """One row of the route policy table."""
+
+    route_id: str
+    method: str
+    path: str
+    handler: str
+    auth: str  # none | user
+    scope: str  # catalog | user | user_write | advisory | governance
+    cache: str
+    rate_tier: str
+    cost_weight: float
+    max_rows: int
+    mutating: bool = False
+    observed: bool = False
+    params: List[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class TopicRoutePolicyReport(BaseModel):
+    generated_at: datetime
+    total: int
+    observed: int
+    undeclared: List[str] = Field(default_factory=list)
+    stale: List[str] = Field(default_factory=list)
+    policies: List[TopicRoutePolicy] = Field(default_factory=list)
+    by_scope: Dict[str, int] = Field(default_factory=dict)
+    by_cache: Dict[str, int] = Field(default_factory=dict)
+    by_tier: Dict[str, int] = Field(default_factory=dict)
+    note: str = ""
+
+
+class TopicResponseLimit(BaseModel):
+    """A cap on one list-valued field of one report."""
+
+    report: str
+    field: str
+    cap: int
+    overflow: str  # truncate | reject | report_only
+    routes: List[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class TopicResponseTruncation(BaseModel):
+    """What capping a payload actually did, so the caller can say so."""
+
+    field: str
+    original_length: int
+    kept_length: int
+    dropped: int
+    cap: int
+    overflow: str
+
+
+class TopicResponseLimitReport(BaseModel):
+    generated_at: datetime
+    total: int
+    limits: List[TopicResponseLimit] = Field(default_factory=list)
+    cache_policies: List[TopicCachePolicy] = Field(default_factory=list)
+    max_cap: int = 0
+    total_capped_fields: int = 0
+    cache_classes: List[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class TopicCapacityEntry(BaseModel):
+    """Cost model for one route: what it costs to serve."""
+
+    route_id: str
+    slo_tier: str
+    latency_budget_ms: int
+    db_queries: int
+    catalog_scans: int
+    rate_tier: str
+    cost_weight: float
+    cache: str
+    cacheable: bool = True
+    max_rows: int = 0
+    note: str = ""
+
+
+class TopicCapacityReport(BaseModel):
+    generated_at: datetime
+    total: int
+    by_slo_tier: Dict[str, int] = Field(default_factory=dict)
+    entries: List[TopicCapacityEntry] = Field(default_factory=list)
+    heaviest: List[str] = Field(default_factory=list)
+    total_db_queries: int = 0
+    total_catalog_scans: int = 0
+    aggregate_cost_weight: float = 0.0
+    cacheable_share: float = 0.0
+    note: str = ""
+
+
+class TopicAdmissionDecision(BaseModel):
+    """May this request proceed, and if not, why."""
+
+    allowed: bool = True
+    reason: str = "ok"  # ok | param_out_of_range | rate_limited | unknown_route
+    rate_tier: str = ""
+    capacity: int = 0
+    remaining: int = 0
+    retry_after_seconds: int = 0
+    violations: List[TopicParamViolation] = Field(default_factory=list)
+    detail: str = ""
+
+
+class TopicRequestPlanReport(BaseModel):
+    """What ``GET /topics/plan`` says a request *would* do. Writes nothing."""
+
+    generated_at: datetime
+    route_id: str
+    known: bool
+    method: str = ""
+    path: str = ""
+    auth: str = ""
+    scope: str = ""
+    cache: str = ""
+    rate_tier: str = ""
+    cost_weight: float = 0.0
+    max_rows: int = 0
+    supplied: Dict[str, Any] = Field(default_factory=dict)
+    resolved: Dict[str, Any] = Field(default_factory=dict)
+    unused: List[str] = Field(default_factory=list)
+    defaults_applied: List[str] = Field(default_factory=list)
+    coercions: List[TopicParamCoercion] = Field(default_factory=list)
+    violations: List[TopicParamViolation] = Field(default_factory=list)
+    page: Dict[str, Any] = Field(default_factory=dict)
+    admission: TopicAdmissionDecision = Field(default_factory=TopicAdmissionDecision)
+    caps: List[TopicResponseLimit] = Field(default_factory=list)
+    db_queries: int = 0
+    latency_budget_ms: int = 0
+    slo_tier: str = ""
+    summary: str = ""
+
+
+class TopicRequestSample(BaseModel):
+    """One recorded request, in the shape a capacity review needs."""
+
+    route_id: str
+    method: str = ""
+    scope: str = ""
+    rate_tier: str = ""
+    cost_weight: float = 0.0
+    admitted: bool = True
+    reason: str = "ok"
+    coercions: int = 0
+    violations: int = 0
+    page: int = 1
+    per_page: int = 5
+    observed_at: datetime
+
+
+class TopicRequestAnalyticsReport(BaseModel):
+    """What the live routes have actually been asked for."""
+
+    generated_at: datetime
+    tracked: bool
+    capacity: int
+    recorded: int
+    admitted: int
+    refused: int
+    dropped: int
+    record_errors: int
+    by_route: Dict[str, int] = Field(default_factory=dict)
+    by_reason: Dict[str, int] = Field(default_factory=dict)
+    by_tier: Dict[str, int] = Field(default_factory=dict)
+    coerced_params: Dict[str, int] = Field(default_factory=dict)
+    refused_params: Dict[str, int] = Field(default_factory=dict)
+    heaviest_routes: List[str] = Field(default_factory=list)
+    recent: List[TopicRequestSample] = Field(default_factory=list)
+    note: str = ""
+
+
+class TopicRouteDriftReport(BaseModel):
+    """Routes the table and the router disagree about."""
+
+    generated_at: datetime
+    declared: int
+    observed: int
+    undeclared: List[str] = Field(default_factory=list)
+    missing: List[str] = Field(default_factory=list)
+    method_mismatches: List[str] = Field(default_factory=list)
+    path_mismatches: List[str] = Field(default_factory=list)
+    handler_mismatches: List[str] = Field(default_factory=list)
+    in_sync: bool = False
+    note: str = ""
+
+
+class TopicPolicyValidationReport(BaseModel):
+    """Errors and warnings from checking the governance tables against each other."""
+
+    generated_at: datetime
+    errors: int = 0
+    warnings: int = 0
+    error_list: List[str] = Field(default_factory=list)
+    warning_list: List[str] = Field(default_factory=list)
+    routes: int = 0
+    params: int = 0
+    limits: int = 0
+    note: str = ""
