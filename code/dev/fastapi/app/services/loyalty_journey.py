@@ -375,6 +375,53 @@ LOYALTY_SCENARIO_CATALOG: list[dict[str, object]] = [
         "kpis": ["signal coverage growth", "offer accuracy"],
         "when_hint": "too few chat/booking signals to infer patterns",
     },
+    # --- NEW: referral & reactivation scenarios ---
+    {
+        "scenario": "referral_enrollment",
+        "family": "referral",
+        "goal": "Invite loyal customers to refer peers, expanding the user base.",
+        "priority": "medium",
+        "owner_hint": "growth and CRM",
+        "when": {"loyalty_score": {"gte": 80}, "completed_bookings": {"gte": 2}},
+        "actions": [
+            "Send a referral link via the customer's preferred channel",
+            "Offer mutual rewards (discount for referee, credits for referrer)",
+            "Track referral conversions and attribute revenue",
+        ],
+        "kpis": ["referral conversion rate", "referred-user retention"],
+        "when_hint": "loyal customer with multiple completed bookings",
+    },
+    {
+        "scenario": "reactivation_winback",
+        "family": "reactivation",
+        "goal": "Re-engage lapsed customers who previously completed bookings.",
+        "priority": "high",
+        "owner_hint": "retention ops",
+        "when": {"dormant": True, "had_bookings": True, "completed_bookings": {"gte": 1}},
+        "actions": [
+            "Launch a win-back campaign highlighting new features since they left",
+            "Offer a reactivation incentive (e.g. bonus points or discount)",
+            "Provide a simple one-click rebooking path using saved preferences",
+        ],
+        "kpis": ["win-back reactivation rate", "time-to-reactivation"],
+        "when_hint": "dormant customer with a successful service history",
+    },
+    # --- NEW: upgrade scenarios ---
+    {
+        "scenario": "tier_upgrade_candidate",
+        "family": "upgrade",
+        "goal": "Identify customers ready for a premium tier upgrade.",
+        "priority": "medium",
+        "owner_hint": "product strategy",
+        "when": {"loyalty_score": {"gte": 70}, "monetization_readiness": {"gte": 70}, "completed_bookings": {"gte": 3}},
+        "actions": [
+            "Present a premium tier value proposition",
+            "Offer a trial or discounted first month at the higher tier",
+            "Highlight exclusive benefits (priority support, early access)",
+        ],
+        "kpis": ["tier upgrade conversion rate", "premium adoption velocity"],
+        "when_hint": "loyal, high-readiness customer with substantial history",
+    },
 ]
 
 SCENARIO_ORDER: dict[str, int] = {
@@ -421,6 +468,11 @@ class JourneyContext:
     days_since_last_activity: Optional[int]
     top_issues: list[str] = field(default_factory=list)
     signal_total: int = 0
+    # --- NEW fields for enhanced scenarios ---
+    engagement_score: float = 0.0
+    lifetime_value_estimate: float = 0.0
+    referral_count: int = 0
+    tier_status: str = "standard"
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +492,34 @@ def _matches_rule(rule_value: Any, context_value: Any) -> bool:
     return rule_engine.matches_field(rule_value, context_value)
 
 
+def _matches_temporal(rule_value: dict[str, object], context_value: Any) -> bool:
+    """Evaluate a temporal condition like `{"_date": {"between_dates": [...]}}`.
+
+    Supported operators inside the dict:
+      - `between_dates`: [start, end] — inclusive window check against context `_date`
+      - `after_date`: value — context `_date` must be after this date
+      - `before_date`: value — context `_date` must be before this date
+    """
+    if not isinstance(rule_value, dict):
+        return False
+    for op, threshold in rule_value.items():
+        if op == "between_dates":
+            if not isinstance(threshold, list) or len(threshold) != 2:
+                return False
+            if context_value is None:
+                return False
+            return threshold[0] <= context_value <= threshold[1]
+        if op == "after_date":
+            if context_value is None:
+                return False
+            return context_value > threshold
+        if op == "before_date":
+            if context_value is None:
+                return False
+            return context_value < threshold
+    return False
+
+
 def evaluate_scenario_when(when: dict[str, object], context: JourneyContext) -> tuple[bool, dict[str, object]]:
     """Evaluate every condition in `when` against `context` (AND semantics).
 
@@ -449,11 +529,20 @@ def evaluate_scenario_when(when: dict[str, object], context: JourneyContext) -> 
     """
     matched_fields: dict[str, object] = {}
     for field_name, rule_value in when.items():
-        if not hasattr(context, field_name):
+        if not hasattr(context, field_name) and field_name != "_date":
             return False, {}
-        context_value = getattr(context, field_name)
-        if not _matches_rule(rule_value, context_value):
-            return False, {}
+        # Support temporal _date conditions separately; otherwise fall back to
+        # attribute-based rules (which delegate to the shared rule engine).
+        if field_name == "_date":
+            context_value = getattr(context, "days_since_last_activity", 0)  # simplified
+            if not _matches_temporal(rule_value, context_value):
+                return False, {}
+        else:
+            if not hasattr(context, field_name):
+                return False, {}
+            context_value = getattr(context, field_name)
+            if not _matches_rule(rule_value, context_value):
+                return False, {}
         matched_fields[field_name] = _json_safe(context_value)
     return True, matched_fields
 
@@ -565,6 +654,11 @@ def build_journey_context(
         days_since_last_activity=days_since_last_activity,
         top_issues=list(summary.top_issues),
         signal_total=chat_count + booking_count,
+        # --- NEW fields ---
+        engagement_score=float(summary.engagement_score) if summary.engagement_score is not None else 0.0,
+        lifetime_value_estimate=float(summary.ltv_estimate) if summary.ltv_estimate is not None else 0.0,
+        referral_count=int(summary.referral_count or 0),
+        tier_status=str(summary.value_tier or "standard"),
     )
 
 
@@ -790,13 +884,16 @@ def build_loyalty_scenario_catalog() -> dict[str, object]:
                 "condition_fields": sorted(rule["when"].keys()),
             }
         )
-    families = list(dict.fromkeys(str(rule["family"]) for rule in LOYALTY_SCENARIO_CATALOG))
+    all_families = list(dict.fromkeys(
+        str(rule["family"]) for rule in LOYALTY_SCENARIO_CATALOG
+    ) + ["referral", "reactivation", "upgrade"])
     return {
         "catalog_version": "loyalty_journey_v1",
         "total_scenarios": len(scenarios),
-        "families": families,
+        "families": all_families,
         "priority_levels": ["high", "medium", "low"],
         "context_fields": sorted(JourneyContext.__dataclass_fields__),
         "dormancy_threshold_days": DORMANCY_THRESHOLD_DAYS,
+        "temporal_operators": ["between_dates", "after_date", "before_date"],
         "scenarios": scenarios,
     }

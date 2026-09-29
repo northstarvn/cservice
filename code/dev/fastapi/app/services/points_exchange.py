@@ -175,6 +175,43 @@ POINTS_EXCHANGE_RULES: list[dict[str, Any]] = [
         },
         "when_hint": "Referral points cannot be bought; must be earned by referrals.",
     },
+    # --- NEW: gift card and voucher point types ---
+    {
+        "rule_id": "gift_card_usd",
+        "point_type": "gift_card",
+        "currency": "USD",
+        "priority": "medium",
+        "when": {},
+        "params": {
+            "purchase_enabled": False,
+            "redeem_enabled": True,
+            "points_per_unit": 0.0,  # gift cards are a fixed-value instrument
+            "fee_pct": 0.0,
+            "min_redeem_points": 0.0,
+            "min_purchase_money": 10.0,
+            "max_daily_redeem_money": 500.0,
+            "max_daily_purchase_money": 0.0,
+        },
+        "when_hint": "Gift cards can be redeemed for USD value at face value.",
+    },
+    {
+        "rule_id": "voucher_usd",
+        "point_type": "voucher",
+        "currency": "USD",
+        "priority": "low",
+        "when": {},
+        "params": {
+            "purchase_enabled": True,
+            "redeem_enabled": True,
+            "points_per_unit": 1.0,
+            "fee_pct": 0.0,
+            "min_redeem_points": 50.0,
+            "min_purchase_money": 5.0,
+            "max_daily_redeem_money": 100.0,
+            "max_daily_purchase_money": 50.0,
+        },
+        "when_hint": "Vouchers are flexible points-money hybrids with low-rate conversion.",
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -204,6 +241,13 @@ POINTS_TIER_MULTIPLIERS: list[dict[str, Any]] = [
         "redeem_multiplier": 1.1,
         "when_hint": "Premium tier earns 20% more points and redeems at a 10% better rate.",
     },
+    # --- NEW ---
+    {
+        "value_tier": "enterprise",
+        "purchase_multiplier": 1.5,
+        "redeem_multiplier": 1.3,
+        "when_hint": "Enterprise tier earns 50% more points and redeems at a 30% better rate.",
+    },
 ]
 
 POINTS_LTV_MULTIPLIERS: list[dict[str, Any]] = [
@@ -212,6 +256,13 @@ POINTS_LTV_MULTIPLIERS: list[dict[str, Any]] = [
         "purchase_multiplier": 1.15,
         "redeem_multiplier": 1.05,
         "when_hint": "High monetization readiness (LTV proxy) boosts earn/burn rates.",
+    },
+    # --- NEW ---
+    {
+        "min_monetization_readiness": 70.0,
+        "purchase_multiplier": 1.10,
+        "redeem_multiplier": 1.0,
+        "when_hint": "Moderate monetization readiness provides mild earn/burn boost.",
     },
 ]
 
@@ -231,6 +282,23 @@ POINTS_CAMPAIGN_RULES: list[dict[str, Any]] = [
         "when": {"_date": {"between_dates": ["2026-03-01", "2026-04-30"]}},
         "params": {"purchase_multiplier": 1.08, "redeem_multiplier": 1.0},
         "when_hint": "Seasonal window 2026-03-01 .. 2026-04-30: earn 8% extra points.",
+    },
+    # --- NEW ---
+    {
+        "campaign_id": "winter_redeem_boost_2026",
+        "label": "Winter Redeem Boost 2026",
+        "priority": "high",
+        "when": {"_date": {"between_dates": ["2026-12-01", "2026-12-31"]}},
+        "params": {"purchase_multiplier": 1.0, "redeem_multiplier": 1.10},
+        "when_hint": "December 2026: redeem points at a 10% better rate (holiday spending).",
+    },
+    {
+        "campaign_id": "autumn_enrollment_2026",
+        "label": "Autumn Enrollment 2026",
+        "priority": "medium",
+        "when": {"_date": {"between_dates": ["2026-09-01", "2026-10-31"]}},
+        "params": {"purchase_multiplier": 1.10, "redeem_multiplier": 1.0},
+        "when_hint": "September-October 2026: earn 10% extra points for new enrollments.",
     },
 ]
 

@@ -148,6 +148,14 @@ COMPONENT_TARGETS: list[dict[str, Any]] = [
         "exts": [".json", ".txt", ".js", ".yaml", ".html", ".md"],
         "owner": "product",
     },
+    {
+        "component": "documentation",
+        "kind": "docs",
+        "description": "Inline code docstrings and API reference Markdown.",
+        "paths": ["app"],
+        "exts": [".py"],
+        "owner": "backend engineering",
+    },
 ]
 
 # Marker patterns counted as visible tech-debt in source lines.
@@ -179,6 +187,9 @@ CLASSIFICATION_THRESHOLDS = [
     {"min_score": 0.0, "label": "at_risk"},
 ]
 
+# Enhanced: documentation component kind
+DOCS_COMPONENT_KIND = "docs"
+
 # System-data metrics collected when the DB session is reachable.
 SYSTEM_DATA_METRICS: list[tuple[str, Any]] = [
     ("users", models.User),
@@ -188,6 +199,7 @@ SYSTEM_DATA_METRICS: list[tuple[str, Any]] = [
     ("retention_snapshots", models.RetentionSnapshot),
     ("recovery_outcomes", models.RecoveryOutcome),
     ("recovery_actions", models.RecoveryAction),
+    ("api_endpoints", models.APIEndpoint),  # NEW
 ]
 
 MAX_FILE_READ_BYTES = 2 * 1024 * 1024  # guard against huge/binary files
@@ -515,6 +527,28 @@ def score_component(raw: dict[str, Any]) -> tuple[float, str, list[_Finding]]:
                 signals=[f"test_ratio={raw['test_ratio']:.2f}"],
             )
         )
+    # Docs component: penalize low comment-to-code ratio
+    if raw["kind"] == "docs" and raw["file_count"] > 0:
+        doc_lines = sum(
+            1 for _, p in raw["per_file"]
+            if p.suffix in {".md", ".rst", ".txt"}  # markdown/rst/text docs
+        )
+        if doc_lines == 0:
+            score -= 5.0
+            findings_text.append("no documentation files found with expected extensions")
+            findings.append(
+                _Finding(
+                    code="outdated_docs",
+                    component=component,
+                    detail="No documentation files (.md, .rst, .txt) found in the configured paths.",
+                    recommendation="Add or restore documentation files so component usage is visible.",
+                    owner_hint=owner,
+                    impact="low",
+                    effort="low",
+                    priority="low",
+                    signals=[f"doc_file_count={doc_lines}"],
+                )
+            )
 
     score = max(0.0, round(score, 2))
     classification = class_for_score(score)
@@ -884,6 +918,7 @@ def build_efficiency_audit_catalog() -> dict[str, Any]:
             "classification_thresholds": {
                 rule["label"]: rule["min_score"] for rule in CLASSIFICATION_THRESHOLDS
             },
+            "component_kinds": ["source", "tests", "data", "docs"],
         },
         "system_data_metrics": [metric for metric, _ in SYSTEM_DATA_METRICS],
         "endpoints": {

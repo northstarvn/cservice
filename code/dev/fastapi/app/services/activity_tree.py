@@ -83,6 +83,15 @@ ACTIVITY_TREE_GROUP_AXES: dict[str, dict[str, str]] = {
         "label": "Journey family",
         "metric_field": "journey_family",
     },
+    # --- NEW ---
+    "sentiment_range": {
+        "label": "Sentiment range",
+        "metric_field": "sentiment_label",
+    },
+    "engagement_score": {
+        "label": "Engagement score",
+        "metric_field": "engagement_score",
+    },
 }
 
 ACTIVITY_TREE_RANK_OPTIONS: dict[str, str] = {
@@ -91,6 +100,9 @@ ACTIVITY_TREE_RANK_OPTIONS: dict[str, str] = {
     "signal_strength": "Signal strength",
     "churn_risk_score": "Churn risk score",
     "activity_count": "Activity count",
+    # --- NEW ---
+    "engagement": "Engagement score",
+    "recency": "Recency (most recent activity)",
 }
 
 _RANK_KEYS = {
@@ -99,6 +111,9 @@ _RANK_KEYS = {
     "signal_strength": "signal_strength",
     "churn_risk_score": "churn_risk_score",
     "activity_count": "activity_count",
+    # --- NEW ---
+    "engagement": "engagement_score",
+    "recency": "timestamp",
 }
 
 ACTIVITY_TREE_ANOMALY_RULES: list[dict[str, Any]] = [
@@ -262,6 +277,8 @@ def apply_user_filters(
     sentiment: Optional[str] = None,
     q: Optional[str] = None,
     anomalies_only: bool = False,
+    min_engagement: Optional[float] = None,
+    max_engagement: Optional[float] = None,
 ) -> bool:
     """Smart filter — decide whether a user's metrics survive the query."""
     loyalty = float(metrics.get("loyalty_score", 0.0) or 0.0)
@@ -284,6 +301,12 @@ def apply_user_filters(
         if str(q).lower() not in haystack:
             return False
     if anomalies_only and int(metrics.get("_anomaly_count", 0) or 0) <= 0:
+        return False
+    # --- NEW: engagement score filters ---
+    engagement = float(metrics.get("engagement_score", 0.0) or 0.0)
+    if min_engagement is not None and engagement < min_engagement:
+        return False
+    if max_engagement is not None and engagement > max_engagement:
         return False
     return True
 
@@ -726,6 +749,8 @@ async def build_activity_tree(
     activity_kind: Optional[str] = None,
     activity_limit: int = 6,
     user_ids: Optional[list[int]] = None,
+    min_engagement: Optional[float] = None,
+    max_engagement: Optional[float] = None,
 ) -> ActivityTreeReport:
     """Build the cross-user monitoring tree (admin surface)."""
     if group_by not in ACTIVITY_TREE_GROUP_AXES:
@@ -758,6 +783,8 @@ async def build_activity_tree(
             sentiment=sentiment,
             q=q,
             anomalies_only=anomalies_only,
+            min_engagement=min_engagement,
+            max_engagement=max_engagement,
         ):
             members.append(metrics)
 
@@ -914,6 +941,7 @@ def build_activity_tree_catalog() -> dict[str, Any]:
             "anomalies_only": "bool - prune members and groups without anomalies",
             "with_activities": "bool - expand members with recent activity items",
             "activity_kind": "chat|booking - restrict leaf activities to one kind",
+            "min_engagement": "numeric 0-100 - only keep members with engagement at or above this floor",
         },
         "anomaly_rules_absolute": [_json_safe(rule) for rule in ACTIVITY_TREE_ANOMALY_RULES],
         "anomaly_rules_relative": [
