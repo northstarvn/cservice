@@ -1247,3 +1247,49 @@ class TestCodeMapSync:
             cwd=str(root),
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_every_version_column_can_hold_the_version_it_is_given(self):
+        """The catalog version must fit the column that stores it.
+
+        Both version columns were `VARCHAR(20)` and the value the service
+        writes is `PREFERENCE_CATALOG_VERSION` -- 21 characters:
+
+            asyncpg.exceptions.StringDataRightTruncationError:
+              value too long for type character varying(20)
+
+        which means `PUT /chat/me/preferences` could not save a single
+        preference and every consent event failed to insert. The 100+ tests in
+        this suite all use fakes, and a fake never enforces a length, so only a
+        real database surfaced it.
+        """
+        version = pref.PREFERENCE_CATALOG_VERSION
+        for table_name, column_name in (
+            ("user_preference_profiles", "consent_version"),
+            ("user_consent_events", "version"),
+        ):
+            column = models.Base.metadata.tables[table_name].columns[column_name]
+            assert column.type.length is not None, f"{table_name}.{column_name} is unbounded"
+            assert len(version) <= column.type.length, (
+                f"{table_name}.{column_name} is VARCHAR({column.type.length}) but "
+                f"PREFERENCE_CATALOG_VERSION is {len(version)} chars: {version!r}"
+            )
+
+    def test_every_purpose_fits_its_column(self):
+        """A purpose added to the config must be writable before the DDL catches up."""
+        column = models.Base.metadata.tables["user_consent_events"].columns["purpose"]
+        for purpose in pref.CONSENT_PURPOSE_BY_NAME:
+            assert len(purpose) <= (column.type.length or 999), purpose
+
+    def test_every_lawful_basis_fits_its_column(self):
+        column = models.Base.metadata.tables["user_consent_events"].columns[
+            "lawful_basis"
+        ]
+        for row in pref.CONSENT_PURPOSES:
+            basis = str(row["lawful_basis"])
+            assert len(basis) <= (column.type.length or 999), basis
+
+    def test_every_preference_key_and_category_fits_if_it_were_stored(self):
+        """The keys live in a JSON blob today; this guards a future column split."""
+        for row in pref.PREFERENCE_CATALOG:
+            assert len(row["key"]) <= 50, row["key"]
+            assert len(row["category"]) <= 30, row["category"]

@@ -1,16 +1,33 @@
 """add booking events and admin flag
 
-Revision ID: 20260905_01_add_booking_events_and_admin_flag
-Revises: 
+Revision ID: 0002_booking_events
+Revises: 0001_initial
 Create Date: 2026-09-05 00:00:00.000000
+
+Revision ID: 0002_booking_events
+Revises: 0001_initial
+Create Date: 2026-09-05 00:00:00.000000
+
+The revision id is deliberately short and opaque. `alembic_version.version_num`
+is `VARCHAR(32)`, and a descriptive id like
+`20260905_01_add_booking_events_and_admin_flag` (45 chars) cannot be written
+there at all:
+
+    asyncpg.exceptions.StringDataRightTruncationError:
+      value too long for type character varying(32)
+
+so `alembic upgrade` failed the moment it tried to record the revision. The
+date and the description live in the filename and this docstring, where they
+cost nothing; the id stays inside the column that has to hold it.
 """
+
 from alembic import op
 import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = "20260905_01_add_booking_events_and_admin_flag"
-down_revision = None
+revision = "0002_booking_events"
+down_revision = "0001_initial"
 branch_labels = None
 depends_on = None
 
@@ -28,18 +45,23 @@ def upgrade() -> None:
     #   near "ALTER": syntax error
     #   [SQL: ALTER TABLE users ALTER COLUMN is_admin DROP DEFAULT]
     #
-    # `recreate="always"` is required, not decorative. Batch mode rebuilds a
-    # table when it is adding or dropping a column, but a bare `alter_column`
-    # that only changes a server default is not a rebuild trigger -- it emits
-    # the native statement and SQLite answers:
+    # `recreate="always"` would fix that on SQLite, and it was used here on the
+    # understanding that PostgreSQL would "still get a plain ALTER TABLE". That
+    # is not what `recreate="always"` does: it forces a rebuild on *every*
+    # dialect, and a rebuild is DROP + CREATE. On PostgreSQL that fails as soon
+    # as anything references the table:
     #
-    #   NotImplementedError: No support for ALTER of constraints in SQLite
-    #   dialect. Please refer to the batch mode feature...
+    #   asyncpg.exceptions.DependentObjectsStillExistError:
+    #     cannot drop constraint users_pkey on table users because other
+    #     objects depend on it
+    #   DETAIL: constraint bookings_user_id_fkey on table bookings depends on
+    #           index users_pkey
     #
-    # Forcing the rebuild makes SQLite take the copy-and-move path. PostgreSQL
-    # still gets a plain `ALTER TABLE ... DROP DEFAULT`, so this stays correct on
-    # both rather than correct on whichever one it was written against.
-    with op.batch_alter_table("users", schema=None, recreate="always") as batch_op:
+    # which is why `alembic upgrade head` against a real database died here. The
+    # rebuild is a workaround for a *SQLite* limitation, so it is applied on
+    # SQLite only and the native statement is used everywhere else.
+    recreate = "always" if op.get_bind().dialect.name == "sqlite" else "auto"
+    with op.batch_alter_table("users", schema=None, recreate=recreate) as batch_op:
         batch_op.alter_column("is_admin", server_default=None)
 
     op.create_table(

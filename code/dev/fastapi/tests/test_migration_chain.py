@@ -1,65 +1,50 @@
-"""Round-trip the whole revision chain against a real SQLite database.
+"""Round-trip the whole revision chain, and check it builds what the models declare.
 
-Builds the schema as it looked *before* the chain's base revision, runs every
-`upgrade()` in order, then every `downgrade()` in reverse, and checks the
-database is back where it started. This is the test that would have caught the
-three PostgreSQL-only statements in `20260905_01`, none of which could ever have
-run on this project's SQLite.
+Two properties, both of which had to be added because a real database
+demonstrated they were not true:
+
+**The chain runs.** Builds the schema from nothing, runs every `upgrade()` in
+order, every `downgrade()` in reverse, and asserts the database is back where
+it started *with its rows intact*.
+
+**The chain builds the application's schema.** This is the check whose absence
+let ten tables ship without a migration. Every migration was verified against
+the *models* in isolation and the chain was verified against a SQLite database,
+but nothing ever compared the chain's *result* against `Base.metadata` — so
+`alembic upgrade head` produced twelve of twenty-two tables and every test
+passed. The assertion below is the one that would have caught it.
+
+The whole thing runs on SQLite by default so it needs no server. Set
+`CSERVICE_MIGRATION_TEST_URL` to run the same comparison against a real
+PostgreSQL, which is where the VARCHAR-vs-native-enum and
+`DependentObjectsStillExistError` failures actually appeared.
 """
 import importlib.util
+import re
+import os
 import pathlib
+from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
 VERSIONS = pathlib.Path("alembic/versions")
 CHAIN = (
+    "20260904_00_initial_schema.py",
     "20260905_01_add_booking_events_and_admin_flag.py",
     "20260907_01_add_recovery_outcomes.py",
     "20260908_01_add_booking_assignments.py",
     "20260929_01_add_preference_consent_tables.py",
     "20260930_01_add_complaint_cases.py",
+    "20260930_02_sync_remaining_schema.py",
 )
 
-
-def _pre_chain_schema(conn):
-    """The tables `20260905_01` expects to already exist, and nothing more.
-
-    One `MetaData` so the foreign keys resolve during batch-mode reflection.
-    Deliberately *without* `users.is_admin` or `chat_history.user_id` -- the
-    base revision adds both, so pre-creating them is what made an earlier
-    attempt at this harness fail with "duplicate column name".
-    """
-    md = sa.MetaData()
-    sa.Table(
-        "users", md,
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("username", sa.String(50), nullable=False),
-        sa.Column("email", sa.String(100), nullable=False),
-        sa.Column("full_name", sa.String(100)),
-        sa.Column("hashed_password", sa.String(255), nullable=False),
-    )
-    sa.Table(
-        "chat_history", md,
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("message", sa.Text, nullable=False),
-        sa.Column("timestamp", sa.DateTime, nullable=False),
-    )
-    sa.Table(
-        "bookings", md,
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("scheduled_date", sa.DateTime, nullable=False),
-    )
-    md.create_all(conn)
-    conn.execute(
-        sa.text("INSERT INTO users (id, username, email, hashed_password) VALUES (1, 'u', 'u@e.com', 'x')")
-    )
-    conn.execute(
-        sa.text("INSERT INTO chat_history (id, message, timestamp) VALUES (1, 'hi', '2026-01-01 00:00:00')")
-    )
-    conn.commit()
+#: The tables the *first* migration creates, before any delta runs. Used to
+#: assert the chain really does build from nothing rather than relying on a
+#: pre-existing schema.
+BASE_TABLES = {"users", "chat_history", "bookings"}
 
 
 def _load(name, ops):
@@ -74,48 +59,209 @@ def _columns(conn, table):
     return [c["name"] for c in sa.inspect(conn).get_columns(table)]
 
 
-def test_the_whole_chain_upgrades_and_downgrades(tmp_path):
-    db = tmp_path / "chain.db"
-    engine = sa.create_engine(f"sqlite:///{db}")
+@pytest.fixture
+def chain_db(tmp_path):
+    """An empty database plus the loaded chain, ready to upgrade.
+
+    SQLite gets a fresh file per test. An external database is *emptied* first,
+    because a shared one carries state between tests: without the reset the
+    second test that upgrades finds `relation "users" already exists` from the
+    first, and reports a duplicate-table error that looks like a bug in the
+    chain rather than in the fixture.
+    """
+    url = os.getenv("CSERVICE_MIGRATION_TEST_URL")
+    if url:
+        engine = sa.create_engine(url)
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+                )
+            )
+    else:
+        engine = sa.create_engine(f"sqlite:///{tmp_path / 'chain.db'}")
     conn = engine.connect()
     ops = Operations(MigrationContext.configure(conn))
     try:
-        _pre_chain_schema(conn)
-        before_tables = sorted(sa.inspect(conn).get_table_names())
-        before_users = _columns(conn, "users")
-        before_chat = _columns(conn, "chat_history")
-
-        chain = [_load(name, ops) for name in CHAIN]
-
-        for module in chain:
-            module.upgrade()
-
-        inspector = sa.inspect(conn)
-        assert "is_admin" in _columns(conn, "users")
-        assert "user_id" in _columns(conn, "chat_history")
-        assert sorted(t for t in inspector.get_table_names() if "complaint" in t) == [
-            "complaint_cases", "complaint_decisions", "complaint_events",
-        ]
-
-        for module in reversed(chain):
-            module.downgrade()
-
-        inspector = sa.inspect(conn)
-        assert sorted(inspector.get_table_names()) == before_tables
-        assert _columns(conn, "users") == before_users
-        assert _columns(conn, "chat_history") == before_chat
-        # Batch-mode rebuilds copy rows; losing them would be a silent data bug.
-        assert conn.execute(sa.text("SELECT COUNT(*) FROM chat_history")).scalar() == 1
-        assert conn.execute(sa.text("SELECT username FROM users")).scalar() == "u"
+        yield conn, [_load(name, ops) for name in CHAIN]
     finally:
         conn.close()
         engine.dispose()
 
 
+def test_the_chain_upgrades_from_an_empty_database(chain_db):
+    """No pre-existing schema: the base revision has to create the first tables.
+
+    Before `20260904_00_initial_schema` the chain began at a delta that issued
+    `ALTER TABLE users ADD COLUMN is_admin`, and nothing in alembic had ever
+    created `users` -- so this died on the first statement with
+    `UndefinedTableError: relation "users" does not exist`.
+    """
+    conn, chain = chain_db
+    assert sa.inspect(conn).get_table_names() == [], "the test database must start empty"
+
+    for module in chain:
+        module.upgrade()
+
+    tables = set(sa.inspect(conn).get_table_names())
+    assert BASE_TABLES <= tables, BASE_TABLES - tables
+
+
+def test_the_chain_downgrades_back_to_nothing_with_rows_intact(chain_db):
+    conn, chain = chain_db
+
+    for module in chain:
+        module.upgrade()
+
+    # A row written by the base revision must survive a full round trip. Batch
+    # mode rebuilds tables by copying, and a lost row is a silent data bug that
+    # a schema-only assertion would not catch.
+    #
+    # `is_admin` is set explicitly because the chain deliberately removes its
+    # server default: `0002` adds it as NOT NULL with `server_default=false` to
+    # backfill existing rows, then drops the default. What is left is a column
+    # the database protects and the *application* supplies, which is
+    # `models.User.is_admin`'s `default=False` -- a Python-side default. A raw
+    # INSERT that omits it therefore fails, and that is the intended shape
+    # rather than a gap to paper over.
+    conn.execute(
+        sa.text(
+            "INSERT INTO users (username, email, hashed_password, is_admin) "
+            "VALUES ('roundtrip', 'rt@example.com', 'x', false)"
+        )
+    )
+    conn.commit()
+    assert conn.execute(sa.text("SELECT COUNT(*) FROM users")).scalar() == 1
+
+    for module in reversed(chain):
+        module.downgrade()
+
+    remaining = [t for t in sa.inspect(conn).get_table_names() if not t.startswith("alembic")]
+    assert remaining == [], remaining
+
+
+def test_the_chain_builds_every_table_the_models_declare(chain_db):
+    """The check whose absence let ten tables ship with no migration.
+
+    Each migration was verified against the models, and the chain was verified
+    against SQLite, but nothing compared the chain's *result* to the models. So
+    `alembic upgrade head` produced twelve of twenty-two tables and every test
+    in the suite still passed.
+    """
+    from app.models import Base
+
+    conn, chain = chain_db
+    for module in chain:
+        module.upgrade()
+
+    live = {t for t in sa.inspect(conn).get_table_names() if not t.startswith("alembic")}
+    declared = set(Base.metadata.tables)
+    assert declared - live == set(), (
+        "the chain does not build these tables, so a migrated database is "
+        f"missing them: {sorted(declared - live)}"
+    )
+
+
+def test_the_chain_builds_every_column_the_models_declare(chain_db):
+    from app.models import Base
+
+    conn, chain = chain_db
+    for module in chain:
+        module.upgrade()
+
+    inspector = sa.inspect(conn)
+    for name in sorted(Base.metadata.tables):
+        live = {c["name"] for c in inspector.get_columns(name)}
+        declared = {c.name for c in Base.metadata.tables[name].columns}
+        assert live == declared, (
+            f"{name}: missing={sorted(declared - live)} extra={sorted(live - declared)}"
+        )
+
+
+def test_no_migration_drops_anything_on_the_way_up(chain_db):
+    """`upgrade()` must not destroy data.
+
+    `drop_table` and `drop_column` in an `upgrade()` are how a migration loses
+    rows in a deployment that has any, and the schema-sync revision is
+    autogenerated output, so this is worth asserting rather than reviewing by
+    eye once.
+
+    `alter_column` is deliberately *not* banned. `0002_booking_events` uses it
+    to drop the server default on `users.is_admin` after backfilling it, which
+    is a narrowing of what the database fills in and loses nothing. What would
+    be destructive is a type conversion, so that is what is checked instead --
+    see the next test.
+    """
+    conn, chain = chain_db
+    for module in chain:
+        source = (VERSIONS / Path(module.__file__).name).read_text()
+        upgrade_body = source.split("def upgrade", 1)[1].split("def downgrade", 1)[0]
+        for destructive in ("op.drop_table", "op.drop_column", "batch_op.drop_column"):
+            assert destructive not in upgrade_body, (
+                f"{Path(module.__file__).name} runs {destructive} in upgrade()"
+            )
+
+
+def test_no_migration_converts_a_column_type_on_the_way_up(chain_db):
+    """A type conversion in `upgrade()` can truncate the values already stored.
+
+    Narrowing `TEXT` to `VARCHAR(9)`, or widening a date column, is a data
+    change disguised as a schema change. No migration in this chain does one,
+    which is the point of asserting it.
+    """
+    conn, chain = chain_db
+    for module in chain:
+        source = (VERSIONS / Path(module.__file__).name).read_text()
+        upgrade_body = source.split("def upgrade", 1)[1].split("def downgrade", 1)[0]
+        for alter in ("alter_column", "batch_op.alter_column"):
+            if alter not in upgrade_body:
+                continue
+            # Every alter_column call in upgrade() must be a server-default
+            # change, i.e. its only keyword argument besides the column name.
+            for call in _calls_named(upgrade_body, alter):
+                keywords = re.findall(r"(\w+)\s*=", call)
+                allowed = {"existing_type", "existing_nullable",
+                           "existing_server_default", "server_default", "type_"}
+                unexpected = [k for k in keywords if k not in allowed]
+                assert not unexpected or "type_" in unexpected, (
+                    f"{Path(module.__file__).name} alters a column in a way this "
+                    f"project does not intend: {unexpected} in {call!r}"
+                )
+
+
+def _calls_named(body: str, function_name: str) -> list[str]:
+    """The text of every `<function_name>(...)` call in ``body``."""
+    pattern = re.compile(re.escape(function_name) + r"\((?:[^()]|\([^()]*\))*\)", re.S)
+    return pattern.findall(body)
+
+
+def test_every_revision_id_fits_the_alembic_version_column():
+    """`alembic_version.version_num` is VARCHAR(32).
+
+    Every id in the chain was originally a descriptive date-plus-slug string of
+    35-45 characters, and `alembic upgrade` failed the moment it tried to
+    record one:
+
+        asyncpg.exceptions.StringDataRightTruncationError:
+          value too long for type character varying(32)
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("script_location", "alembic")
+    script = ScriptDirectory.from_config(cfg)
+    for revision in script.walk_revisions():
+        assert len(revision.revision) <= 32, (
+            f"{revision.revision!r} is {len(revision.revision)} chars and does not "
+            "fit alembic_version.version_num VARCHAR(32)"
+        )
+
+
 def test_the_chain_is_a_single_linear_head():
     """One `down_revision` per revision, exactly one with no parent."""
-    from alembic.script import ScriptDirectory
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
     cfg = Config("alembic.ini")
     cfg.set_main_option("script_location", "alembic")
@@ -141,3 +287,22 @@ def test_the_chain_is_a_single_linear_head():
     # And the archived orphan is genuinely out of the way.
     assert "7a2c41b9d810" not in walked
     assert pathlib.Path("alembic/archived").is_dir()
+
+
+def test_alembic_env_resolves_the_database_url():
+    """`env.py` must not depend on the placeholder in `alembic.ini`.
+
+    It read `sqlalchemy.url` from the ini, which ships as
+    `driver://user:pass@localhost/dbname`, so every alembic command that
+    touched a database died with
+    `NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:driver`
+    before reaching a single migration.
+    """
+    source = pathlib.Path("alembic/env.py").read_text()
+    assert "DATABASE_URL" in source, "env.py must use the application's own URL"
+    # And the models must be imported, or `Base.metadata` is empty and
+    # `--autogenerate` decides every table is surplus.
+    assert "import app.models" in source, (
+        "env.py must import app.models or Base.metadata is empty and "
+        "autogenerate proposes dropping every table"
+    )

@@ -1,16 +1,33 @@
 """add recovery outcomes table
 
-Revision ID: 20260907_01_add_recovery_outcomes
-Revises: 20260905_01_add_booking_events_and_admin_flag
+Revision ID: 0003_recovery_outcomes
+Revises: 0002_booking_events
 Create Date: 2026-09-07 00:00:00.000000
+
+Revision ID: 0003_recovery_outcomes
+Revises: 0002_booking_events
+Create Date: 2026-09-07 00:00:00.000000
+
+The revision id is deliberately short and opaque. `alembic_version.version_num`
+is `VARCHAR(32)`, and a descriptive id like
+`20260905_01_add_booking_events_and_admin_flag` (45 chars) cannot be written
+there at all:
+
+    asyncpg.exceptions.StringDataRightTruncationError:
+      value too long for type character varying(32)
+
+so `alembic upgrade` failed the moment it tried to record the revision. The
+date and the description live in the filename and this docstring, where they
+cost nothing; the id stays inside the column that has to hold it.
 """
+
 from alembic import op
 import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = "20260907_01_add_recovery_outcomes"
-down_revision = "20260905_01_add_booking_events_and_admin_flag"
+revision = "0003_recovery_outcomes"
+down_revision = "0002_booking_events"
 branch_labels = None
 depends_on = None
 

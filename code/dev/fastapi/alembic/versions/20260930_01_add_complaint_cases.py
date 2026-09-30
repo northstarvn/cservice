@@ -1,7 +1,7 @@
 """add complaint cases, events and decisions
 
-Revision ID: 20260930_01_add_complaint_cases
-Revises: 20260929_01_add_preference_consent_tables
+Revision ID: 0006_complaints
+Revises: 0005_preference_consent
 Create Date: 2026-09-30 00:00:00.000000
 
 The complaint surface had no spine. ``RecoveryOutcome`` carried
@@ -49,14 +49,31 @@ Two deliberate non-constraints, both declared in ``UNCONSTRAINED_REFERENCE_COLUM
 
 ``satisfaction_score`` is the one genuinely bounded column: it is a 0-10 scale
 with a real domain, so it gets both ends of a CHECK.
+
+Revision ID: 0006_complaints
+Revises: 0005_preference_consent
+Create Date: 2026-09-30 00:00:00.000000
+
+The revision id is deliberately short and opaque. `alembic_version.version_num`
+is `VARCHAR(32)`, and a descriptive id like
+`20260905_01_add_booking_events_and_admin_flag` (45 chars) cannot be written
+there at all:
+
+    asyncpg.exceptions.StringDataRightTruncationError:
+      value too long for type character varying(32)
+
+so `alembic upgrade` failed the moment it tried to record the revision. The
+date and the description live in the filename and this docstring, where they
+cost nothing; the id stays inside the column that has to hold it.
 """
+
 from alembic import op
 import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = "20260930_01_add_complaint_cases"
-down_revision = "20260929_01_add_preference_consent_tables"
+revision = "0006_complaints"
+down_revision = "0005_preference_consent"
 branch_labels = None
 depends_on = None
 

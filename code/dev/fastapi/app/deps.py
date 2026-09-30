@@ -49,6 +49,7 @@ from fastapi import params as _fastapi_params
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterator, Mapping, Sequence
 import inspect
@@ -1143,7 +1144,11 @@ async def get_optional_principal(
     username = validation.subject
     if not username:
         return None
-    result = await db.execute(select(models.User).where(models.User.username == username))
+    result = await db.execute(
+        select(models.User)
+        .where(models.User.username == username)
+        .options(selectinload(models.User.policy_score))
+    )
     user = result.scalar_one_or_none()
     if user is None:
         return None
@@ -1204,8 +1209,24 @@ async def get_current_user(
     if not username:
         raise credentials_exception
 
-    # Get user from database
-    query = select(models.User).where(models.User.username == username)
+    # Get user from database.
+    #
+    # `policy_score` is eager-loaded, and it has to be: `current_control_posture`
+    # (which `routers/users.py:/me` calls) reads `user.policy_score`, and that
+    # relationship is lazy by default. Touching a lazy attribute outside a
+    # greenlet context attempts IO from synchronous code, which SQLAlchemy
+    # refuses:
+    #
+    #   MissingGreenlet: greenlet_spawn has not been called; can't call
+    #   await_only() here. Was IO attempted in an unexpected place?
+    #
+    # so `GET /users/me` -- the most-used authenticated route in the app --
+    # returned 500 on every request against a real database and passed in the
+    # test suite, where the user is a stand-in object with no lazy loading.
+    # One extra LEFT JOIN is the cost of not failing.
+    query = select(models.User).where(models.User.username == username).options(
+        selectinload(models.User.policy_score)
+    )
     result = await db.execute(query)
     user = result.scalar_one_or_none()
 
@@ -1232,7 +1253,9 @@ async def get_current_user_optional(
     username = payload.get("sub")
     if not username:
         return None
-    query = select(models.User).where(models.User.username == username)
+    query = select(models.User).where(models.User.username == username).options(
+        selectinload(models.User.policy_score)
+    )
     result = await db.execute(query)
     return result.scalar_one_or_none()
 

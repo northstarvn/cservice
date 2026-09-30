@@ -264,7 +264,14 @@ class UserPreferenceProfile(Base, TimestampMixin):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     preferences_json = Column(Text, nullable=False, default="{}")
     consents_json = Column(Text, nullable=False, default="{}")
-    consent_version = Column(String(20), nullable=False, default="1.0")
+    # VARCHAR(20) could not hold `PREFERENCE_CATALOG_VERSION`
+    # ("preference_catalog_v1", 21 chars), so every write of a preference row
+    # failed with a truncation error -- the centre could not save a single
+    # preference. Sized generously rather than fitted to today's value: the
+    # column holds a version *identifier*, and truncating one silently is the
+    # worst outcome for the field that records which catalog a consent was
+    # given against.
+    consent_version = Column(String(50), nullable=False, default="1.0")
 
 
 class UserConsentEvent(Base, TimestampMixin):
@@ -291,7 +298,10 @@ class UserConsentEvent(Base, TimestampMixin):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     purpose = Column(String(50), nullable=False, index=True)
     granted = Column(Boolean, nullable=False, default=False)
-    version = Column(String(20), nullable=False, default="1.0")
+    # Same VARCHAR(20) overflow as `user_preference_profiles.consent_version`:
+    # the service writes `PREFERENCE_CATALOG_VERSION` (21 chars) here, so every
+    # consent event would have failed to insert.
+    version = Column(String(50), nullable=False, default="1.0")
     lawful_basis = Column(String(30), nullable=False, default="legitimate_interest")
     recorded_by_id = Column(Integer, nullable=True, index=True)
     note = Column(Text, nullable=False, default="")

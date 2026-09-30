@@ -643,49 +643,52 @@ async def build_customer_360(
     unavailable: dict[str, str] = {}
     built: dict[str, Any] = {}
 
-    async def _attempt(name: str, builder, *args):
-        if name not in wanted:
+    async def _attempt(public_name: str, builder, *args):
+        """Build one section, keyed by its **public** name.
+
+        The key is the public section name and nothing else. This used to be
+        the internal `"_profile"` spelling while `wanted` was built from
+        `CUSTOMER_360_SECTIONS` (unprefixed), so `name not in wanted` was true
+        for *every* section and each one returned `None` without running. The
+        360 therefore built nothing and raised with "section not built" for a
+        profile it had never attempted -- and it passed 100+ tests, because
+        every one of them exercised the pure helpers rather than this
+        orchestrator. Keying both sides by the same name is what makes the
+        check mean anything.
+        """
+        if public_name not in wanted:
             return None
         try:
             result = await builder(*args)
         except Exception as exc:  # noqa: BLE001 - a section failure must not 500
-            unavailable[name] = f"{type(exc).__name__}: {exc}"
+            unavailable[public_name] = f"{type(exc).__name__}: {exc}"
             return None
-        built[name] = result
+        built[public_name] = result
         return result
 
-    profile_block = await _attempt("_profile", _build_profile, db, int(user_id), int(window_days))
-    if profile_block is None and "_profile" in wanted:
-        unavailable.pop("_profile", None)
-        unavailable["profile"] = unavailable.pop("_profile", "profile build failed")
-    await _attempt("_interactions", _build_interactions, db, int(user_id), int(window_days))
+    profile_block = await _attempt("profile", _build_profile, db, int(user_id), int(window_days))
+    await _attempt("interactions", _build_interactions, db, int(user_id), int(window_days))
     await _attempt(
-        "_sentiment",
+        "sentiment",
         _build_sentiment,
         db,
         int(user_id),
         int(window_days),
         profile_block or {},
     )
-    await _attempt("_recovery", _build_recovery, db, int(user_id), int(window_days))
-    await _attempt("_journey", _build_journey, db, int(user_id), int(window_days))
-    await _attempt("_communication", _build_communication, db, int(user_id), int(window_days))
-    await _attempt("_payments", _build_payments, db, int(user_id))
-    await _attempt("_points", _build_points, db, int(user_id))
-    await _attempt("_preferences", _build_preferences, db, int(user_id))
-
-    # Internal keys are stripped: a caller asking for "profile" must not see a
-    # "_profile" key as well, and an internal block leaking into the response
-    # is the kind of thing that gets copied into a client contract.
-    for internal in ("_profile", "_interactions", "_sentiment", "_recovery", "_journey", "_communication", "_payments", "_points", "_preferences"):
-        built.pop(internal, None)
+    await _attempt("recovery", _build_recovery, db, int(user_id), int(window_days))
+    await _attempt("loyalty_journey", _build_journey, db, int(user_id), int(window_days))
+    await _attempt("communication", _build_communication, db, int(user_id), int(window_days))
+    await _attempt("payments", _build_payments, db, int(user_id))
+    await _attempt("points", _build_points, db, int(user_id))
+    await _attempt("preferences", _build_preferences, db, int(user_id))
 
     now = datetime.now(timezone.utc)
     profile_obj = (profile_block or {}).get("profile")
     interactions_obj = (built.get("interactions") or {}).get("interactions")
     sentiment_obj = (built.get("sentiment") or {}).get("sentiment")
     recovery_obj = (built.get("recovery") or {}).get("recovery")
-    journey_obj = (built.get("journey") or {}).get("journey")
+    journey_obj = (built.get("loyalty_journey") or {}).get("journey")
     communication_obj = (built.get("communication") or {}).get("communication")
     payments_obj = (built.get("payments") or {}).get("payments")
     points_obj = (built.get("points") or {}).get("points")
@@ -702,13 +705,22 @@ async def build_customer_360(
         ("points", points_obj),
         ("preferences", preferences_obj),
     ) if obj is None]
+    # A section that was *not requested* is absent from `unavailable` entirely,
+    # which is different from one that was requested and failed. The `missing`
+    # list is computed against the response objects, so a section omitted by
+    # `sections=` lands here too -- and calling that "not built" would report a
+    # partial request as a failure.
     for name in missing:
-        unavailable.setdefault(name, "section not built")
+        unavailable.setdefault(name, "section not requested")
 
     if profile_obj is None:
+        # The reason has to be the exception, not a restatement of the fact. The
+        # whole point of catching per section is that the cause survives to the
+        # surface that reports it.
+        reason = unavailable.get("profile") or "unknown reason"
         raise ValueError(
             f"customer 360 for user {user_id} could not build the profile section: "
-            f"{unavailable.get('profile', 'unknown reason')}"
+            f"{reason}"
         )
 
     summary_text = build_summary_text(

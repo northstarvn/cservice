@@ -1531,8 +1531,12 @@ class TestMigration:
             engine.dispose()
 
     def test_the_revision_chain_continues_the_previous_migration(self):
+        # Revision ids are short and opaque because
+        # `alembic_version.version_num` is VARCHAR(32) and a descriptive id
+        # cannot be written there. The date and description live in the
+        # filename; the id is what has to fit.
         module, _engine, _connection = self._module()
-        assert module.down_revision == "20260929_01_add_preference_consent_tables"
+        assert module.down_revision == "0005_preference_consent"
 
     def test_every_deliberate_non_constraint_is_declared_with_a_reason(self):
         """A non-constraint with no stated reason is a bug waiting to happen.

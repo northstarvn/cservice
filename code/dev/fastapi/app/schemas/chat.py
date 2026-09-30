@@ -1478,7 +1478,15 @@ class ChatHistoryOut(BaseModel):
     user_id: Optional[int] = None
     message: str
     response: str
-    timestamp: str
+    # `datetime`, not `str`. `chat_history.timestamp` is a DATETIME column, so
+    # the route hands this model a real `datetime`, and pydantic v2 does not
+    # coerce a datetime into a string -- `GET /chat/history` raised
+    # ResponseValidationError and returned 500 on every call against a real
+    # database, while the unit test passed because it constructed the model from
+    # a string. The JSON is unchanged either way (pydantic serialises a
+    # datetime as an ISO-8601 string), so this is a correction to the declared
+    # type, not to the wire format.
+    timestamp: datetime
 
 
 class ChatHistorySummary(BaseModel):

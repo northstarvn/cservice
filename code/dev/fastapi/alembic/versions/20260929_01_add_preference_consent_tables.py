@@ -1,7 +1,7 @@
 """add preference & consent centre tables
 
-Revision ID: 20260929_01_add_preference_consent_tables
-Revises: 20260908_01_add_booking_assignments
+Revision ID: 0005_preference_consent
+Revises: 0004_booking_assignments
 Create Date: 2026-09-29 00:00:00.000000
 
 Two tables, deliberately split rather than combined:
@@ -21,14 +21,31 @@ Two tables, deliberately split rather than combined:
 ``purpose`` carries a non-empty CHECK but deliberately not a membership one:
 the vocabulary is ``CONSENT_PURPOSES``, and a constraint hard-coded to today's
 list would reject a purpose the config already accepts.
+
+Revision ID: 0005_preference_consent
+Revises: 0004_booking_assignments
+Create Date: 2026-09-29 00:00:00.000000
+
+The revision id is deliberately short and opaque. `alembic_version.version_num`
+is `VARCHAR(32)`, and a descriptive id like
+`20260905_01_add_booking_events_and_admin_flag` (45 chars) cannot be written
+there at all:
+
+    asyncpg.exceptions.StringDataRightTruncationError:
+      value too long for type character varying(32)
+
+so `alembic upgrade` failed the moment it tried to record the revision. The
+date and the description live in the filename and this docstring, where they
+cost nothing; the id stays inside the column that has to hold it.
 """
+
 from alembic import op
 import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = "20260929_01_add_preference_consent_tables"
-down_revision = "20260908_01_add_booking_assignments"
+revision = "0005_preference_consent"
+down_revision = "0004_booking_assignments"
 branch_labels = None
 depends_on = None
 
@@ -46,7 +63,7 @@ def upgrade() -> None:
         sa.Column("preferences_json", sa.Text(), nullable=False, server_default="{}"),
         sa.Column("consents_json", sa.Text(), nullable=False, server_default="{}"),
         sa.Column(
-            "consent_version", sa.String(length=20), nullable=False, server_default="1.0"
+            "consent_version", sa.String(length=50), nullable=False, server_default="1.0"
         ),
         sa.Column(
             "created_at",
@@ -84,7 +101,7 @@ def upgrade() -> None:
         ),
         sa.Column("purpose", sa.String(length=50), nullable=False),
         sa.Column("granted", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("version", sa.String(length=20), nullable=False, server_default="1.0"),
+        sa.Column("version", sa.String(length=50), nullable=False, server_default="1.0"),
         sa.Column(
             "lawful_basis",
             sa.String(length=30),

@@ -53,78 +53,143 @@ placeholder left in it.
 
 ## Why the chain looks redundant — because it is
 
-Every migration in `versions/` creates a table that `create_all` already
-creates from the same models:
+## The chain now builds the whole schema from nothing (2026-09-30)
 
-| migration | creates | also in `create_all`? |
-|---|---|---|
-| `20260905_01_add_booking_events_and_admin_flag` | `booking_events`, `retention_snapshots` | yes |
-| `20260907_01_add_recovery_outcomes` | `recovery_outcomes` | yes |
-| `20260908_01_add_booking_assignments` | `booking_assignments` | yes |
-| `20260929_01_add_preference_consent_tables` | `user_preference_profiles`, `user_consent_events` | yes |
-| `20260930_01_add_complaint_cases` | `complaint_cases`, `complaint_events`, `complaint_decisions` | yes |
-
-Consequently `alembic upgrade head` against an **empty** database still fails,
-and that is not a bug in any one migration:
+This used to be untrue, and the previous version of this file documented the
+failure rather than fixing it. Verified against a real PostgreSQL 16.15:
 
 ```
-sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: users
+$ alembic upgrade head          # empty database
+asyncpg.exceptions.UndefinedTableError: relation "users" does not exist
 [SQL: ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT false NOT NULL]
 ```
 
-`20260905_01` — the chain's base — issues `ALTER TABLE users ADD COLUMN
-is_admin`, but `create_all` already created `users` *with* `is_admin`, and on an
-empty database there is no `users` at all. That migration belongs to a world
-where the schema pre-dated `create_all`. It is a leftover from the same
-reorganisation that produced the archived orphan.
+Three separate problems, all of which had to be fixed for `upgrade head` to
+work on a real database:
 
-## The workflow that works
+1. **No base revision.** The chain started at a *delta*
+   (`20260905_01_add_booking_events_and_admin_flag`) against a schema nothing
+   in alembic had ever created — only `main.py`'s `create_all` had.
+   `20260904_00_initial_schema` now creates `users`, `chat_history` and
+   `bookings` in the state that revision expects.
+2. **Revision ids too long.** `alembic_version.version_num` is `VARCHAR(32)`
+   and every id was a descriptive date-plus-slug string of 35-45 characters:
 
-For a database created by the app (i.e. by `create_all`), the chain is already
-satisfied, so the baseline is `head`:
+   ```
+   asyncpg.exceptions.StringDataRightTruncationError:
+     value too long for type character varying(32)
+   ```
 
-```bash
-# 1. let the app create the schema (or run create_all yourself)
-python -c "import asyncio; from app.db import Base, engine; \
-  asyncio.run(engine.begin().__aenter__())" # or just start the app once
+   Ids are now short and opaque (`0001_initial` ... `0007_sync_remaining_schema`);
+   the date and description live in the filename. `test_migration_chain.py`
+   asserts every id fits.
+3. **`recreate="always"` on PostgreSQL.** `20260905_01` forces a batch rebuild
+   to work around a *SQLite* limitation, but `recreate="always"` applies to
+   every dialect, and a rebuild is DROP + CREATE — which fails as soon as
+   anything references the table:
 
-# 2. record that the chain is satisfied
-alembic stamp head
+   ```
+   asyncpg.exceptions.DependentObjectsStillExistError:
+     cannot drop constraint users_pkey on table users because other objects depend on it
+   DETAIL: constraint bookings_user_id_fkey on table bookings depends on index users_pkey
+   ```
 
-# 3. subsequent migrations apply normally
-alembic upgrade head
+   It is now applied on SQLite only.
+
+`0007_sync_remaining_schema` adds the **ten tables that were never migrated at
+all**. Every migration was verified against the models in isolation and the
+chain was verified against SQLite, but nothing compared the chain's *result*
+against `Base.metadata`, so `upgrade head` produced 12 of 22 tables and the
+whole suite passed. `scripts/schema_drift_report.py` is that check, and
+`test_migration_chain.py` now runs it inside the suite:
+
+```
+$ alembic upgrade head && python3 scripts/schema_drift_report.py
+live tables    : 22
+declared tables: 22
+
+in sync: the database matches Base.metadata
 ```
 
-Verified for the complaints migration specifically:
+### The chain
 
-- `create_all` → `stamp head` → `upgrade head` is a **no-op** (the tables are
-  already there and already match the models)
-- `downgrade -1` **does** drop `complaint_decisions`, `complaint_events` and
-  `complaint_cases` cleanly, so the migration is genuinely reversible
+| revision | what it does |
+|---|---|
+| `0001_initial` | `users`, `chat_history`, `bookings` — the base that was missing |
+| `0002_booking_events` | `is_admin`, `booking_events`, `retention_snapshots`, `chat_history.user_id` |
+| `0003_recovery_outcomes` | `recovery_outcomes` |
+| `0004_booking_assignments` | `booking_assignments` |
+| `0005_preference_consent` | `user_preference_profiles`, `user_consent_events` |
+| `0006_complaints` | `complaint_cases`, `complaint_events`, `complaint_decisions` |
+| `0007_sync_remaining_schema` | the ten tables the hand-written chain never covered |
+
+### `alembic/env.py` also had to be fixed
+
+It read `sqlalchemy.url` from `alembic.ini`, which ships as the placeholder
+`driver://user:pass@localhost/dbname`, so **every** command that touched a
+database failed before reaching a migration:
+
+```
+sqlalchemy.exc.NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:driver
+```
+
+It now reads `app.db.DATABASE_URL` (so migrations and the app cannot be pointed
+at different databases by accident) and drives the migrations **asynchronously**,
+because the URL carries `asyncpg` and the synchronous `engine_from_config` could
+never load it. It also imports `app.models`, without which `Base.metadata` is
+empty and `--autogenerate` decides every table in the database is surplus.
+
+## The workflow
+
+`alembic upgrade head` on an empty database now works, so use it:
+
+```bash
+alembic upgrade head
+python3 scripts/schema_drift_report.py    # must say "in sync"
+```
+
+For a database the app has already `create_all`ed, stamp instead of upgrading,
+because the tables already exist:
+
+```bash
+alembic stamp head
+```
 
 ## Rules that follow
 
 1. **A new table needs two things, not one.** The model in `app/models.py`
    (that is what `create_all` emits) *and* a migration in `versions/` (that is
-   what a deployment already past the baseline applies). Adding only the model
-   means `create_all` builds the table and the migration then fails on
-   "table already exists" for anyone who stamps from base. Adding only the
-   migration means the model and the chain disagree.
-2. **A migration's `upgrade()` must be checked against a database built by
-   `create_all`**, not only against an empty one. `tests/test_complaints_expansion.py::TestMigration`
-   does the stronger version of this — it runs `upgrade()` on a bare SQLite
-   database and diffs the result column-for-column and index-for-index against
-   `Base.metadata`.
-3. **Do not re-add the archived orphan to `versions/`.** It reintroduces an
+   what a deployment past the baseline applies). Adding only the model means
+   `create_all` builds the table and the migration then fails on "table
+   already exists" for anyone who stamps from base; adding only the migration
+   means the model and the chain disagree.
+2. **Run `scripts/schema_drift_report.py` after `alembic upgrade head`.** It
+   is the only check that compares the chain's *result* against
+   `Base.metadata`, and its absence is why ten tables shipped without a
+   migration while the suite stayed green. `test_migration_chain.py` runs the
+   same comparison, so CI catches it without a server.
+3. **A revision id must fit `alembic_version.version_num` (32 chars).** The
+   date and the description belong in the filename.
+4. **`upgrade()` must be additive.** No `drop_table`, no `drop_column`, no
+   type conversion. `test_migration_chain.py` asserts the first two, and
+   `alter_column` is allowed only for a server-default change.
+5. **Keep a string column wide enough for what the application writes into
+   it.** `user_preference_profiles.consent_version` was `VARCHAR(20)` and
+   `PREFERENCE_CATALOG_VERSION` is 21 characters, so the preference centre
+   could not save a single preference. Only a real database enforces a length.
+6. **Do not re-add the archived orphan to `versions/`.** It reintroduces an
    unresolvable `down_revision`, and one such file breaks *every* alembic
    command, not just the one being run. See `archived/README.md`.
 
-## If alembic is ever made authoritative
+## The remaining duplication: `create_all` and the chain
 
-That is a real piece of work and out of scope for now. It would mean: removing
-the unconditional `create_all` from the lifespan, deciding a baseline for
-databases already in production, rewriting `20260905_01` so it is a no-op
-against a `create_all` schema, and making every migration idempotent. The
-migrations as written are additive-only, which is a good foundation for it, but
-the `ALTER TABLE users` base and the `create_all` bootstrap would have to be
-reconciled first. Recorded in `../../BLOCKAGES.md`.
+`main.py`'s lifespan still calls `Base.metadata.create_all` unconditionally, so
+a database the app boots is already at head and `alembic upgrade` is not in the
+running path. Both routes now produce the *same* schema — that is what
+`scripts/schema_drift_report.py` verifies — so this is redundancy, not a
+conflict.
+
+It is still worth removing, and the order matters: decide the baseline for any
+database already deployed first, then drop `create_all` from the lifespan, then
+let `alembic upgrade` be the only path. Doing it the other way round would
+leave every existing deployment with a schema no migration recorded.
