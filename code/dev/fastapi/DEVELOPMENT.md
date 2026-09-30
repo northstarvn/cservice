@@ -59,6 +59,101 @@ uvicorn app.main:app --port 8123 --log-level warning &
 CSERVICE_SMOKE_URL=http://127.0.0.1:8123 python3 scripts/smoke_live_api.py
 ```
 
+## Simulating every real-life flow
+
+`app/real_life_flows.py` runs 12 flows across 41 subflows against 5 personas —
+loyal-with-points, abandoned-pending, repeatedly-cancelled, dormant-45-days,
+and the admin console — and reports what did not hold. It reads every
+expectation from the engines' own config, so it survives a rename, and it is
+deliberately useless as a detector of an intentional edit to the table it
+validates; that limit is stated in the module and covered from the other side
+by `tests/test_kaizen_shadow_release.py::TestPinningOracle`, which spells the
+posture deltas out as literals.
+
+```bash
+# run the simulation and print what it found
+python3 scripts/run_flow_simulation.py
+
+# append the findings to BLOCKAGES.md (refuses a duplicate section unless
+# --allow-repeat; a log nobody reads is indistinguishable from no log)
+python3 scripts/run_flow_simulation.py --append
+
+# non-zero exit on any blocker, for CI
+python3 scripts/run_flow_simulation.py --strict
+```
+
+Findings carry a **conclusion** and a **suggestion**, and the suggestion is
+text. The module reports; it never edits the codebase. Applying a suggestion is
+a separate, promoted candidate.
+
+## The shadow environment, and why it is one-way
+
+`app/shadow_env.py` answers one question: can this process affect live? Six
+checks decide it, and every one **fails closed** when unconfigured — an
+unobserved check is a failed check, because a guard that passes because nobody
+answered it is the "published number is not the enforced one" defect this repo
+has now found three times.
+
+Isolation is proven by comparing **database identities**
+`(scheme, host, port, database)`, not by reading a config value. A shadow
+pointed at live's database with the variable set is exactly the case worth
+catching. The username is deliberately excluded from the identity, so a
+read-only replication role does not read as a different database.
+
+```bash
+# six checks, each with what it asserts and what to do about it
+python3 scripts/run_shadow_env.py
+
+# non-zero exit when the shadow is not isolated, for CI
+python3 scripts/run_shadow_env.py --strict
+```
+
+To actually stand one up, see the `shadow environment` block in
+`.env.example`. The asymmetry that matters: `CSERVICE_SHADOW_DATABASE_URL` has
+**no fallback** to `DATABASE_URL`.
+
+## The maturity ladder, and the five-event rollback
+
+`app/release_ladder.py` moves a change along
+`l0_draft → l1_verified → l2_shadow → l3_canary → l4_live`. Each rung has entry
+gates evaluated against the **destination**, not the rung already occupied — an
+earlier version read `required_gates_for(candidate.level)`, which checked the
+gates it had already passed and never consulted the next rung's, so `l4_live`
+was reachable with `canary_error_rate` never measured.
+
+- **Code and data version as one pair.** A rollback that restores the code and
+  keeps the data is not a rollback.
+- **A gate nobody measured fails.** `unmeasured` folds to `fail`, so there is no
+  way to advance by supplying fewer measurements.
+- **A refused advance is a 200, not a 409.** An admin asking why a candidate is
+  not moving is asking a question, and a 409 would throw the answer away.
+- **Rollback appends.** `kind: "rollback"` with `restores: <event_id>`, so
+  7 → 8 → 7 is three events and the history stays honest. The window is the
+  last **5** events, not 5 versions.
+- **Deployment is not an HTTP verb.** Promoting a candidate and changing what is
+  live are two acts; only the first is exposed, so the gates are read before
+  anyone can act on them.
+
+```bash
+# the whole surface, admin-gated under /kaizen/admin* (NOT /meta*, which is
+# public by intent and this contains three mutating endpoints)
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/kaizen/admin/catalog
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/kaizen/admin/safe-levels
+curl -X POST -H "Authorization: Bearer $TOKEN" localhost:8000/kaizen/admin/candidates \
+  -H 'content-type: application/json' \
+  -d '{"candidate_id":"c1","commit":"abc123def456","revision":"0007_x"}'
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  localhost:8000/kaizen/admin/candidates/c1/measure \
+  -H 'content-type: application/json' \
+  -d '{"measured":{"tests_failed":0},"from_app":["authz","flows"]}'
+```
+
+`from_app` names the measurements the server computes rather than accepts.
+`authz` is the important one: it is a property of the live route table, so a
+hand-typed `authz_in_sync: true` would be an assertion about the running system
+rather than a measurement of it. App-computed values are merged last, so a
+number in the request body cannot override one this process measured.
+
 `schema_drift_report.py` and `smoke_live_api.py` are not decoration. Every
 defect in the "found by running it against a real database" list below was
 invisible to the unit suite, because the suite's fakes do not enforce a column

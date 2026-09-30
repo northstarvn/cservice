@@ -73,7 +73,8 @@ TREE = _node(
             # Config-table driven authorization governance. The request path
             # is unchanged; these are the readers, the engine and the reports.
             "scope_catalog", "role_scope_grants", "denial_contract",
-            "step_up_ranks", "rate_tiers", "route_rules", "decision_engine",
+            "step_up_ranks", "rate_tiers", "route_rules", "public_write_exceptions",
+            "decision_engine",
             "drift", "simulation", "validation", "authz_catalog",
             "rate_tier",
         ),
@@ -153,6 +154,29 @@ TREE = _node(
                   "json_merge_patch", "retry_updates", "lock_sets",
                   "merge_semantics", "advisory_locks", "audit", "catalog"),
         ),
+        _node(  # Kaizen: simulated real-life flows, the one-way shadow, and
+            # the graded maturity ladder. Three modules, one surface: a kaizen
+            # change is simulated, run against replicated data in an environment
+            # that cannot reach live, and promoted one measured rung at a time.
+            # Its own layer rather than leaves under `services` because the code
+            # is about changes to the other code -- nothing here is a business
+            # engine, and putting it beside the engines it simulates would make
+            # the map say it was one.
+            "kaizen",
+            _node("flow_simulation",
+                  "personas", "probes", "flow_catalog", "runs", "comparisons",
+                  "blockage_classification", "blockage_report", "blockage_append",
+                  "measurement", "validation", "catalog"),
+            _node("shadow_env",
+                  "environments", "feeds", "isolation_checks", "database_identity",
+                  "direction_arithmetic", "replicated_field_audit", "leakage_paths",
+                  "observations", "process_observations", "isolation_verdict",
+                  "validation", "catalog"),
+            _node("release_ladder",
+                  "levels", "gates", "gate_evaluator", "candidates",
+                  "candidate_registry", "ledger", "rollback_window", "rollback",
+                  "safe_levels", "measurements", "validation", "catalog"),
+        ),
         _node(  # Stage 1: business-rule hyper-flexibility
             "business_rules",
             _node("rule_engine",
@@ -225,6 +249,17 @@ TREE = _node(
               "decision_support", "apply", "customer_visibility",
               "queue", "sla_report", "auto_escalation_sweep", "decision_audit",
               "governance"),
+        # The release surface. Its own router node rather than leaves under
+        # `main`: every other node here is a business surface a customer or an
+        # operator uses, and this one is the set of acts that change what the
+        # others do -- simulation, verification, promotion, rollback. Grouped
+        # into business surfaces per maintenance rule 3, not one leaf per route.
+        _node("kaizen",
+              "catalog", "flow_catalog", "flow_simulation", "flow_sweep",
+              "blockage_report", "blockage_log",
+              "shadow_report", "shadow_verification",
+              "maturity_levels", "candidate_registry", "candidate_measurement",
+              "promotion", "safe_levels", "deployment_ledger", "rollback"),
         _node("audit",
               "efficiency", "enhancements", "audit_catalog", "trail_catalog", "log",
               "logs", "summary", "pipeline_stats", "pipeline_event", "transactions",

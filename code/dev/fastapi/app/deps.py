@@ -759,11 +759,26 @@ AUTHZ_RULES: list[dict[str, Any]] = [
      "note": "The policy a new caller has to satisfy; publishing it cannot leak anything."},
     {"rule_id": "health", "methods": ("GET",), "path": "/health", "exposure": "public",
      "enforced_by": (), "hardening": {}, "note": "Liveness probe."},
+    {"rule_id": "decision_canary_admin", "methods": ("POST",),
+     "path": "/meta/decisions/canary/*", "exposure": "admin",
+     "enforced_by": ("get_current_admin_user",), "hardening": {"step_up": "loa2", "scopes": ("read",)},
+     "note": (
+         "The one part of /meta* that changes what the next request is answered with. "
+         "`canary/run` writes a trace and moves the model's divergence counters; "
+         "`canary/promote` makes a candidate the model every customer is scored by. Both were "
+         "unauthenticated while `meta_surface` classified them public with no dependency and no "
+         "drift -- the rule table was right about the *intent* and wrong about the *effect*, so "
+         "the drift report had nothing to report. Declared before `meta_surface` because the "
+         "lookup is first-match-wins, and a read-only /meta* stays public underneath it."
+     )},
     {"rule_id": "meta_surface", "methods": ("GET", "POST"), "path": "/meta*", "exposure": "public",
      "enforced_by": (), "hardening": {"scopes": ("read",)},
      "note": (
          "Public by intent -- a service must be able to discover itself. Worth saying out loud "
-         "that this includes the config dumps, the drift reports and the decision simulators."
+         "that this includes the config dumps and the drift reports. It does NOT include the two "
+         "decision-canary routes: those mutate and are claimed above by `decision_canary_admin`, "
+         "because 'public by intent' is a statement about discovery and this tree has now seen "
+         "that sentence used to cover a write."
      )},
     {"rule_id": "audit_catalog", "methods": ("GET",), "path": "/audit/catalog", "exposure": "public",
      "enforced_by": (), "hardening": {}, "note": "Static table of the audit surface."},
@@ -1007,6 +1022,15 @@ AUTHZ_RULES: list[dict[str, Any]] = [
     {"rule_id": "topic_authenticated", "methods": ("GET",), "path": "/topics/*", "exposure": "authenticated",
      "enforced_by": ("get_current_user",), "hardening": {"scopes": ("read",)},
      "note": "Caller-scoped topic reads: coverage, history, intelligence, workspace, recommendations."},
+    {"rule_id": "kaizen_admin", "methods": ("GET", "POST"), "path": "/kaizen/admin*", "exposure": "admin",
+     "enforced_by": ("get_current_admin_user",), "hardening": {"scopes": ("read",), "step_up": "loa2"},
+     "note": (
+         "The release surface: the flow simulation, the shadow environment's isolation report, the "
+         "maturity ladder, candidate promotion, and the code+data rollback. Deliberately NOT under "
+         "/meta*, because /meta* is public by intent and this router contains three mutating "
+         "endpoints -- appending to BLOCKAGES.md, advancing a candidate, and rolling back a "
+         "deployment. Gated as one block rather than per-route so a new endpoint added under this "
+         "prefix inherits the gate rather than needing to remember it.")},
     # --- fallback
     {"rule_id": "catch_all", "methods": ("GET", "POST", "PUT", "PATCH", "DELETE"), "path": "*",
      "exposure": "public", "enforced_by": (), "hardening": {},
@@ -1066,7 +1090,95 @@ AUTHZ_OPS: dict[str, Any] = {
     "hardening_gap_limit": 0,
     "default_probe": "customer",
     "unknown_method": "UNKNOWN",
+    "mutating_methods": ("POST", "PUT", "PATCH", "DELETE"),
+    "public_exposure": "public",
 }
+
+
+#: Every ``(method, path)`` a mutating route may reach while classified
+#: ``public``. Anything else is an error in :func:`authz_public_write_audit`.
+#:
+#: **Why a table rather than a heuristic.** ``authz_drift_report`` compares each
+#: rule's declared ``enforced_by`` against the dependency the route really binds.
+#: For the two decision-canary routes that comparison returned ``match``:
+#: ``meta_surface`` declared ``enforced_by: ()``, the route bound no security
+#: dependency, and the two agreed. The table was internally consistent and the
+#: hole was total -- ``POST /meta/decisions/canary/promote`` decided which model
+#: scores every customer, with no credential of any kind. No amount of
+#: self-consistency finds that, because the defect *is* the consistency.
+#:
+#: So the invariant is stated where it can be violated visibly: a mutating route
+#: is public only if somebody has written down that it is, and said why. The
+#: ``claim`` field exists because two of these routes are public on the strength
+#: of an assertion in a docstring that nothing checks; writing the assertion
+#: here puts it in a reviewable table instead of in prose.
+AUTHZ_PUBLIC_WRITE_EXCEPTIONS: list[dict[str, Any]] = [
+    {
+        "method": "POST",
+        "path": "/users/register",
+        "rule_id": "register",
+        "claim": "creates the principal and nothing else; there is no principal to authenticate before the first one exists",
+    },
+    {
+        "method": "POST",
+        "path": "/users/login",
+        "rule_id": "login",
+        "claim": "the credential check itself; it grants a token and mutates nothing durable",
+    },
+    {
+        "method": "POST",
+        "path": "/users/refresh",
+        "rule_id": "token_refresh",
+        "claim": "exchanges a refresh token for an access token; it cannot widen the claims it was issued from",
+    },
+    {
+        "method": "POST",
+        "path": "/users/logout",
+        "rule_id": "token_logout",
+        "claim": "revokes the caller's own token, so the blast radius is the caller's own session",
+    },
+    {
+        "method": "POST",
+        "path": "/webhooks/webhooks/{provider}",
+        "rule_id": "webhook_ingest",
+        "claim": "unauthenticated by necessity: the caller is an external provider, and the HMAC signature header is the credential",
+    },
+    {
+        "method": "POST",
+        "path": "/meta/decisions/simulate",
+        "rule_id": "meta_surface",
+        "claim": (
+            "what-if simulation: live config, weight state and partitions are never mutated. "
+            "Asserted in the handler's docstring and nowhere else -- which is why it is written "
+            "down here, where adding a route to it is a visible act."
+        ),
+    },
+]
+
+def authz_public_write_exception_pairs() -> frozenset[tuple[str, str]]:
+    """The exception pairs, derived from the table on every call.
+
+    Deliberately not a module-level frozenset. A cached index of a mutable table
+    means the two disagree the moment either is edited, and the caller has no
+    way to tell which one is stale -- the same reason
+    :func:`validate_authz` reads the tables rather than the import-time
+    indexes derived from them. It also means a test can make a public write
+    unlisted by removing its row, which is the only way to show the audit
+    actually catches anything.
+    """
+    return frozenset(
+        (str(row["method"]).upper(), str(row["path"]))
+        for row in AUTHZ_PUBLIC_WRITE_EXCEPTIONS
+        if str(row.get("path") or "")
+    )
+
+
+def _public_write_claim(method: str, path: str) -> str:
+    """The recorded reason a mutating route is public, or ``""`` if unlisted."""
+    for row in AUTHZ_PUBLIC_WRITE_EXCEPTIONS:
+        if (str(row.get("method") or "").upper(), str(row.get("path") or "")) == (method, path):
+            return str(row.get("claim") or "")
+    return ""
 
 
 # --- Resolution ----------------------------------------------------------------
@@ -2218,15 +2330,88 @@ def authz_coverage_report(routes: Any = None) -> dict[str, Any]:
     }
 
 
+def authz_public_write_audit(routes: Any) -> dict[str, Any]:
+    """Every mutating route that reaches the world while classified ``public``.
+
+    This is the question ``authz_drift_report`` structurally cannot ask. The
+    drift report compares a rule's declared ``enforced_by`` against the
+    dependency the route binds, and for an unauthenticated mutating route the two
+    agree: ``enforced_by: ()`` and no security dependency is a *match*. The
+    defect is the agreement. The two decision-canary routes sat exactly there --
+    ``meta_surface`` said public, the code bound nothing, drift reported
+    ``in_sync: true`` -- while ``canary/promote`` decided which model scores
+    every customer.
+
+    So the invariant is inverted: a mutating route is public only if its pair
+    appears in :data:`AUTHZ_PUBLIC_WRITE_EXCEPTIONS`. There is no heuristic, no
+    inspection of whether a handler happens to be harmless, and no attempt to
+    guess whether a docstring is telling the truth. Somebody has to write the
+    row down, and every row carries a ``claim`` so the reasoning survives
+    renames.
+
+    ``stale`` is the other half. An exception for a route that no longer exists
+    is dead configuration that reads as live coverage -- the same
+    ``first-match-wins`` rot as an unreachable rule.
+    """
+    inventory = authz_route_inventory(routes)
+    mutating = {str(method).upper() for method in AUTHZ_OPS["mutating_methods"]}
+    public = str(AUTHZ_OPS["public_exposure"])
+    exceptions = authz_public_write_exception_pairs()
+
+    def _row(pairs: set[tuple[str, str]] | frozenset[tuple[str, str]]) -> list[dict[str, Any]]:
+        """One entry per pair, with the deciding rule and the recorded claim."""
+        rule_by_pair = {
+            (row["method"], row["path"]): str(row["rule_id"]) for row in inventory
+        }
+        return [
+            {
+                "method": method,
+                "path": path,
+                "rule_id": rule_by_pair.get((method, path), ""),
+                "claim": _public_write_claim(method, path),
+            }
+            for method, path in sorted(pairs)
+        ]
+
+    live_pairs = {
+        (row["method"], row["path"])
+        for row in inventory
+        if row["method"] in mutating and row["exposure"] == public
+    }
+
+    unlisted = _row(set(live_pairs) - set(exceptions))
+    stale = _row(set(exceptions) - set(live_pairs))
+    recorded = _row(set(live_pairs) & set(exceptions))
+    return {
+        "routes_provided": True,
+        "public_writes": recorded,
+        "public_write_count": len(recorded),
+        "unlisted_public_writes": unlisted,
+        "stale_exceptions": stale,
+        "clean": not unlisted and not stale,
+        "note": (
+            "public_write_count is the count of mutating routes that are public *on the record*: "
+            "each one has a row in AUTHZ_PUBLIC_WRITE_EXCEPTIONS carrying the claim that makes it "
+            "acceptable. unlisted_public_writes is the defect list -- a mutating route nobody has "
+            "written down, which is how POST /meta/decisions/canary/promote served every customer "
+            "from whichever model an anonymous caller promoted. stale_exceptions are rows for "
+            "routes that no longer exist."
+        ),
+    }
+
+
 def authz_drift_report(routes: Any = None) -> dict[str, Any]:
     """Diff the described authorization posture against the app that enforces it.
 
-    Three questions, and the answers are the point of the table:
+    Four questions, and the answers are the point of the table:
 
     * does every live ``(method, path)`` pair have a rule, and is that rule's
       ``enforced_by`` the dependency the route really uses;
     * is every rule reachable;
-    * how much of the described posture is *proposed* rather than enforced.
+    * how much of the described posture is *proposed* rather than enforced;
+    * is every mutating route classified ``public`` one somebody wrote down --
+      the one class of hole where the rule table and the code agree perfectly
+      and are both wrong (see :func:`authz_public_write_audit`).
 
     Without a route table the report still returns its static sections, with
     ``routes_provided: false`` -- passing ``app.routes`` is what turns the first
@@ -2235,6 +2420,7 @@ def authz_drift_report(routes: Any = None) -> dict[str, Any]:
     """
     inventory = authz_route_inventory(routes) if routes is not None else []
     coverage = authz_coverage_report(routes)
+    public_writes = authz_public_write_audit(routes) if routes is not None else {}
     deltas: dict[str, int] = {}
     for row in inventory:
         deltas[str(row["delta"])] = deltas.get(str(row["delta"]), 0) + 1
@@ -2258,10 +2444,15 @@ def authz_drift_report(routes: Any = None) -> dict[str, Any]:
         "routes_provided": routes is not None,
         "method_path_pairs": len(inventory),
         "drift": deltas,
-        "in_sync": not mismatched and not coverage["unclassified_routes"],
+        "in_sync": (
+            not mismatched
+            and not coverage["unclassified_routes"]
+            and bool(public_writes.get("clean", True))
+        ),
         "mismatched": mismatched,
         "unreachable_rules": coverage["unreachable_rules"],
         "unclassified_routes": coverage["unclassified_routes"],
+        "public_writes": public_writes,
         "bound_factories": {
             name: {"routes": len(paths), "sample": sorted(paths)[:3]}
             for name, paths in sorted(bound_factories.items())
@@ -2273,7 +2464,10 @@ def authz_drift_report(routes: Any = None) -> dict[str, Any]:
         "note": (
             "unbound_factories lists the require_* dependency factories that no route binds. "
             "They work and are tested, but nothing in the app routes calls them, so their "
-            "requirements appear in this table's hardening blocks and nowhere else."
+            "requirements appear in this table's hardening blocks and nowhere else. "
+            "public_writes is the fourth section and the one that finds real holes: mismatched "
+            "only catches a route whose gate disagrees with its rule, which an unauthenticated "
+            "write satisfies perfectly."
         ),
     }
 
@@ -2729,6 +2923,49 @@ def validate_authz() -> dict[str, Any]:
         )
     if AUTHZ_RULES and str(AUTHZ_RULES[0].get("rule_id")) == fallback_id:
         errors.append("the catch-all rule is first, so it shadows every other rule")
+
+    # --- public-write exceptions
+    #
+    # The table is the *only* thing standing between "this route mutates and is
+    # public" and "this route mutates and is public on purpose", so its own
+    # integrity is checked here rather than assumed. A row naming a rule that
+    # does not exist, a method that is not mutating, or a pair listed twice is
+    # a claim about a route nobody can look up.
+    seen_exceptions: set[tuple[str, str]] = set()
+    for index, row in enumerate(AUTHZ_PUBLIC_WRITE_EXCEPTIONS):
+        pair = (str(row.get("method") or "").upper(), str(row.get("path") or ""))
+        if not pair[1]:
+            errors.append(f"AUTHZ_PUBLIC_WRITE_EXCEPTIONS[{index}] has no path")
+            continue
+        if pair[0] not in {str(m).upper() for m in AUTHZ_OPS["mutating_methods"]}:
+            errors.append(
+                f"AUTHZ_PUBLIC_WRITE_EXCEPTIONS[{index}]: method {pair[0]!r} does not mutate; "
+                "a read-only route needs no exception and listing one hides a real write"
+            )
+        if pair in seen_exceptions:
+            errors.append(f"duplicate AUTHZ_PUBLIC_WRITE_EXCEPTIONS entry: {pair[0]} {pair[1]}")
+        seen_exceptions.add(pair)
+        claim = str(row.get("claim") or "")
+        if len(claim) < 20:
+            errors.append(
+                f"AUTHZ_PUBLIC_WRITE_EXCEPTIONS[{index}] ({pair[0]} {pair[1]}): the claim is "
+                f"too short to be a reason ({claim!r})"
+            )
+        rule_id = str(row.get("rule_id") or "")
+        if rule_id not in seen_rules:
+            errors.append(
+                f"AUTHZ_PUBLIC_WRITE_EXCEPTIONS[{index}]: rule_id {rule_id!r} has no AUTHZ_RULES row"
+            )
+        else:
+            owner = AUTHZ_RULE_BY_ID[rule_id]
+            # A rule can cover the pair by prefix or placeholder; what must hold
+            # is that the row is not claiming the wrong rule decided it, because
+            # that is the field an operator reads to find the gate.
+            if str(owner.get("exposure") or "") != str(AUTHZ_OPS["public_exposure"]):
+                errors.append(
+                    f"AUTHZ_PUBLIC_WRITE_EXCEPTIONS[{index}] ({pair[0]} {pair[1]}): names rule "
+                    f"{rule_id!r}, which is not public -- nothing to except"
+                )
 
     # --- probes
     seen_probes: set[str] = set()

@@ -453,45 +453,169 @@ def test_simulate_endpoint_risk_and_retention():
     assert bad.status_code == 422
 
 
+class _CanaryAdmin:
+    """The admin the decision-canary routes require.
+
+    ``is_admin`` is not read by ``get_current_admin_user`` itself -- overriding
+    the dependency replaces the whole check -- but the attribute is kept so the
+    fixture cannot silently satisfy a gate that reads it.
+    """
+
+    id = 1
+    username = "tester"
+    is_admin = True
+
+
 def test_canary_endpoints_run_and_promote_with_optimistic_conflict():
+    """The canary routes are admin-gated, so the test authenticates.
+
+    ``canary/run`` and ``canary/promote`` were reachable without a credential
+    while ``AUTHZ_RULES["meta_surface"]`` classified all of ``/meta*`` as public
+    with no dependency -- a rule table that was internally consistent and
+    completely wrong, because ``promote`` decides which model scores every
+    customer. See ``test_canary_endpoints_refuse_an_anonymous_caller`` below.
+    """
+    from fastapi.testclient import TestClient
+
+    from app import deps
+    from app.main import app
+
+    async def _current_admin_user():
+        return _CanaryAdmin()
+
+    app.dependency_overrides[deps.get_current_admin_user] = _current_admin_user
+    try:
+        client = TestClient(app)
+        registry = model_versioning.get_default_registry()
+        active = registry.active_snapshot("risk_rules")
+        candidate = [dict(r) for r in active["rules"]]
+        candidate[0]["weight"] = float(candidate[0]["weight"]) + 10
+        registry.add_version(
+            "risk_rules",
+            {"rules": candidate, "levels": active["levels"]},
+            label="endpoint-canary",
+        )
+        guard = registry.guard_version("risk_rules")
+
+        run = client.post(
+            "/meta/decisions/canary/run",
+            json={"model_name": "risk_rules", "context": {"device_proven": False}, "entity_ref": "endpoint:canary"},
+        )
+        assert run.status_code == 200
+        body = run.json()
+        assert body["served"] and body["shadow"] and "confidence" in body
+
+        promote = client.post("/meta/decisions/canary/promote", json={"model_name": "risk_rules"})
+        assert promote.status_code == 200
+        promoted = promote.json()
+        assert promoted["to_version"] == promoted["from_version"] + 1
+
+        # stale expected_version -> 409 conflict, no silent clobber
+        conflict = client.post(
+            "/meta/decisions/canary/promote",
+            json={"model_name": "risk_rules", "expected_version": guard},
+        )
+        assert conflict.status_code == 409
+    finally:
+        app.dependency_overrides.pop(deps.get_current_admin_user, None)
+        # restore a clean default registry for sibling tests
+        model_versioning.set_default_registry(model_versioning.seed_default_registry())
+
+
+def test_canary_endpoints_refuse_an_anonymous_caller():
+    """The 401 is asserted on the wire, not inferred from the rule table.
+
+    ``authz_drift_report`` compares a rule's declared ``enforced_by`` against the
+    dependency the route binds, and for an unauthenticated mutating route the two
+    *agree* -- which is why this hole reported ``in_sync: true`` for months. The
+    table cannot detect it; the request can.
+    """
     from fastapi.testclient import TestClient
 
     from app.main import app
 
     client = TestClient(app)
+    for path, payload in (
+        ("/meta/decisions/canary/run", {"model_name": "risk_rules"}),
+        ("/meta/decisions/canary/promote", {"model_name": "risk_rules"}),
+    ):
+        response = client.post(path, json=payload)
+        assert response.status_code in (401, 403), (path, response.status_code)
+
+    # And the refusal actually left the model alone. A gate that returns 401
+    # after the mutation is not a gate.
     registry = model_versioning.get_default_registry()
-    active = registry.active_snapshot("risk_rules")
-    candidate = [dict(r) for r in active["rules"]]
-    candidate[0]["weight"] = float(candidate[0]["weight"]) + 10
-    registry.add_version(
-        "risk_rules",
-        {"rules": candidate, "levels": active["levels"]},
-        label="endpoint-canary",
+    assert registry.active_snapshot("risk_rules") == model_versioning.seed_default_registry().active_snapshot(
+        "risk_rules"
     )
-    guard = registry.guard_version("risk_rules")
 
-    run = client.post(
-        "/meta/decisions/canary/run",
-        json={"model_name": "risk_rules", "context": {"device_proven": False}, "entity_ref": "endpoint:canary"},
-    )
-    assert run.status_code == 200
-    body = run.json()
-    assert body["served"] and body["shadow"] and "confidence" in body
 
-    promote = client.post("/meta/decisions/canary/promote", json={"model_name": "risk_rules"})
-    assert promote.status_code == 200
-    promoted = promote.json()
-    assert promoted["to_version"] == promoted["from_version"] + 1
+def test_the_canary_routes_are_the_only_public_writes_under_meta():
+    """`/meta*` is public by intent -- except where it mutates.
 
-    # stale expected_version -> 409 conflict, no silent clobber
-    conflict = client.post(
-        "/meta/decisions/canary/promote",
-        json={"model_name": "risk_rules", "expected_version": guard},
-    )
-    assert conflict.status_code == 409
+    Regression guard on the rule *ordering*: ``decision_canary_admin`` must sit
+    before ``meta_surface`` because the lookup is first-match-wins, and moving
+    it after would silently reclassify the two routes as public without changing
+    a line of the handlers.
+    """
+    from app import deps
 
-    # restore a clean default registry for sibling tests
-    model_versioning.set_default_registry(model_versioning.seed_default_registry())
+    canary = deps.match_authz_rule("POST", "/meta/decisions/canary/promote")
+    assert canary["rule_id"] == "decision_canary_admin"
+    assert canary["rule"]["exposure"] == "admin"
+
+    # The rest of /meta* stays public -- the rule above is narrow on purpose.
+    for path in ("/meta/decisions", "/meta/features", "/meta/authz", "/meta/health"):
+        matched = deps.match_authz_rule("GET", path)
+        assert matched["rule"]["exposure"] == "public", path
+
+    # And `simulate`, the one mutating /meta* route that is still public, is on
+    # the record with a reason rather than merely being unremarked.
+    pairs = {
+        (row["method"], row["path"]) for row in deps.AUTHZ_PUBLIC_WRITE_EXCEPTIONS
+    }
+    assert ("POST", "/meta/decisions/simulate") in pairs
+    assert ("POST", "/meta/decisions/canary/promote") not in pairs
+
+
+def test_every_public_mutating_route_is_written_down():
+    """The structural gate: an unlisted public write is an error, not a note.
+
+    This is the check that would have caught the canary hole at the time it was
+    introduced. It has no heuristic and makes no attempt to guess whether a
+    handler happens to be harmless -- the only way past it is a row in
+    ``AUTHZ_PUBLIC_WRITE_EXCEPTIONS`` carrying the claim that makes the public
+    surface acceptable.
+    """
+    from app import deps
+    from app.main import app
+
+    audit = deps.authz_public_write_audit(app.routes)
+    assert audit["clean"] is True, audit["unlisted_public_writes"]
+    assert audit["unlisted_public_writes"] == []
+    assert audit["stale_exceptions"] == []
+
+    # A stale row is rot in the other direction: an exception for a route that
+    # no longer exists reads as live coverage of a hole nobody is looking at.
+    for row in audit["public_writes"]:
+        assert row["rule_id"] in deps.AUTHZ_RULE_BY_ID
+        assert len(row["claim"]) >= 20, row
+
+    # And the audit flips to not-clean when a mutating route is public without a
+    # row, which is what an added public POST looks like.
+    saved = deps.AUTHZ_PUBLIC_WRITE_EXCEPTIONS
+    deps.AUTHZ_PUBLIC_WRITE_EXCEPTIONS = [
+        row for row in saved if row["path"] != "/users/logout"
+    ]
+    try:
+        broken = deps.authz_public_write_audit(app.routes)
+        assert broken["clean"] is False
+        assert broken["unlisted_public_writes"] == [
+            {"method": "POST", "path": "/users/logout", "rule_id": "token_logout", "claim": ""}
+        ]
+        assert deps.authz_drift_report(app.routes)["in_sync"] is False
+    finally:
+        deps.AUTHZ_PUBLIC_WRITE_EXCEPTIONS = saved
 
 
 def test_explanations_endpoint_list_and_detail():

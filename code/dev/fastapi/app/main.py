@@ -22,7 +22,16 @@ from app import models
 from app.schemas import audit as audit_schemas
 from app import deps
 from app import enrichment
-from app.routers import audit, bookings, chat, complaints, topics, users, webhooks
+from app.routers import (
+    audit,
+    bookings,
+    chat,
+    complaints,
+    kaizen,
+    topics,
+    users,
+    webhooks,
+)
 from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
@@ -37,8 +46,11 @@ from app import (
     partition_manager,
     protobuf_transaction_spec,
     regional_policy,
+    real_life_flows,
+    release_ladder,
     risk_evaluator,
     rule_engine,
+    shadow_env,
     simulation_engine,
     tenant_router,
 )
@@ -201,6 +213,13 @@ app.include_router(topics.router, tags=["topics"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 app.include_router(complaints.router, tags=["complaints"])
+# The release surface. Admin-gated on every route, and deliberately NOT under /meta*:
+# /meta* is public by intent and three of these endpoints mutate. See the note in
+# app/routers/kaizen.py and the BLOCKAGES entry for this subsystem.
+# No prefix: the router's own paths already carry /kaizen, and adding a prefix here
+# produced /kaizen/kaizen/... on the first attempt, which the authz drift report
+# caught immediately as 16 unclassified routes.
+app.include_router(kaizen.router, tags=["kaizen"])
 
 
 @app.get("/meta")
@@ -235,6 +254,7 @@ async def app_metadata():
             "preference_consent_center",
             "customer_visible_recovery",
             "self_service_status",
+            "kaizen_release_surface",
         ],
     }
 
@@ -581,6 +601,13 @@ async def app_ecosystem():
                 "purpose": "decision quality & consistency: formal model versioning with shadow-mode canary, what-if simulation, explainability traces, optimistic concurrency",
                 "status": "ready",
                 "canary_auto_promote": model_versioning.CANARY_AUTOPROMOTE,
+                "notes": (
+                    "the two canary routes are admin-gated, unlike the rest of "
+                    "/meta*: canary/run moves the model's divergence counters and "
+                    "canary/promote decides which model scores every customer, so "
+                    "'public by intent' -- a statement about discovery -- cannot "
+                    "cover them. See AUTHZ_RULES['decision_canary_admin']"
+                ),
             },
             "rule_engine": {
                 "routes": [
@@ -954,6 +981,53 @@ async def app_ecosystem():
                     "sum of the weights"
                 ),
             },
+            "kaizen_release_surface": {
+                "routes": [
+                    "/kaizen/admin/catalog",
+                    "/kaizen/admin/flows",
+                    "/kaizen/admin/flows/run",
+                    "/kaizen/admin/blockages",
+                    "/kaizen/admin/shadow",
+                    "/kaizen/admin/levels",
+                    "/kaizen/admin/candidates",
+                    "/kaizen/admin/safe-levels",
+                    "/kaizen/admin/deployments",
+                ],
+                "purpose": (
+                    "how a change to *this* code gets tested and released: the "
+                    "real-life flow simulation that exercises every subflow "
+                    "against varied personas and appends findings to "
+                    "BLOCKAGES.md, the one-way shadow environment whose impact on "
+                    "live is structurally impossible, and the graded maturity "
+                    "ladder an admin promotes along one measured rung at a time. "
+                    "Backend-only for now; the frontend is out of scope"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "SHADOW_ENVIRONMENTS",
+                    "SHADOW_FEEDS",
+                    "ISOLATION_CHECKS",
+                    "NEVER_REPLICATED_FIELDS",
+                    "MATURITY_LEVELS",
+                    "PROMOTION_GATES",
+                    "EVENT_KINDS",
+                    "PERSONAS",
+                    "PROBES",
+                    "FLOW_CATALOG",
+                    "BLOCKAGE_POLICY",
+                ],
+                "notes": (
+                    "NOT under /meta*, deliberately: /meta* is public by intent "
+                    "and this prefix carries three mutating endpoints (append to "
+                    "BLOCKAGES.md, advance a candidate, roll back a deployment). "
+                    "Gated as one block by AUTHZ_RULES['kaizen_admin'] so a route "
+                    "added under the prefix inherits the gate instead of "
+                    "remembering it. Code and data version move as one "
+                    "promotable pair, and the rollback window is the last five "
+                    "deployment events -- a rollback appends rather than "
+                    "rewrites, so the history stays honest"
+                ),
+            },
         },
         "capabilities": capabilities,
     }
@@ -1035,6 +1109,21 @@ async def app_feature_summary():
             "decision_simulate": "/meta/decisions/simulate",
             "decision_canary_run": "/meta/decisions/canary/run",
             "decision_canary_promote": "/meta/decisions/canary/promote",
+            "kaizen_catalog": "/kaizen/admin/catalog",
+            "kaizen_flows": "/kaizen/admin/flows",
+            "kaizen_flow_simulate": "/kaizen/admin/flows/{flow_id}/simulate",
+            "kaizen_flow_run": "/kaizen/admin/flows/run",
+            "kaizen_blockages": "/kaizen/admin/blockages",
+            "kaizen_blockages_append": "/kaizen/admin/blockages/append",
+            "kaizen_shadow": "/kaizen/admin/shadow",
+            "kaizen_shadow_verify": "/kaizen/admin/shadow/verify",
+            "kaizen_levels": "/kaizen/admin/levels",
+            "kaizen_candidates": "/kaizen/admin/candidates",
+            "kaizen_candidate_measure": "/kaizen/admin/candidates/{candidate_id}/measure",
+            "kaizen_candidate_advance": "/kaizen/admin/candidates/{candidate_id}/advance",
+            "kaizen_safe_levels": "/kaizen/admin/safe-levels",
+            "kaizen_deployments": "/kaizen/admin/deployments",
+            "kaizen_rollback": "/kaizen/admin/deployments/{event_id}/rollback",
             "explanations": "/meta/decisions/explanations",
             "explanation_detail": "/meta/decisions/explanations/{decision_id}",
             "rule_engine_core": "/meta/scoring-catalog",
@@ -1503,11 +1592,21 @@ async def simulate_decision(payload: DecisionSimulateRequest):
 
 
 @app.post("/meta/decisions/canary/run")
-async def run_canary_shadow(payload: CanaryRunRequest):
+async def run_canary_shadow(
+    payload: CanaryRunRequest,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
     """Shadow-mode scoring: serve from the active model, score with the canary.
 
     Served decisions never come from the candidate; the run records a canary
     trace and updates divergence/confidence for the model.
+
+    That last clause is why this is gated. No customer is answered from the
+    candidate, but the run *does* move the model's divergence and confidence
+    counters -- which is what `canary_error_rate_below_threshold` reads on the
+    release ladder. An unauthenticated caller who could write those counters
+    could unblock their own promotion, so "no traffic" is not the same as "no
+    effect". See `AUTHZ_RULES["decision_canary_admin"]`.
     """
     try:
         result = model_versioning.get_default_runner().shadow_score(
@@ -1526,11 +1625,20 @@ async def run_canary_shadow(payload: CanaryRunRequest):
 
 
 @app.post("/meta/decisions/canary/promote")
-async def promote_canary(payload: CanaryPromoteRequest):
+async def promote_canary(
+    payload: CanaryPromoteRequest,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
     """Promote the canary candidate to active (optimistic-lock guarded).
 
     Pass the ``guard_version`` you observed; a stale write returns 409 instead
     of silently clobbering a concurrent promotion.
+
+    The optimistic lock guards against a *concurrent* admin. It does not guard
+    against an anonymous caller, which is why the dependency is here and not
+    only in the rule table: this endpoint decides which model scores every
+    customer, and it previously did so with no credential of any kind. See
+    `AUTHZ_RULES["decision_canary_admin"]`.
     """
     try:
         return model_versioning.get_default_registry().promote(

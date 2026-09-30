@@ -37,6 +37,16 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   `user_consent_events.purpose` vocabulary in `ENUM_FIELD_SPECS` and in
   `CONSENT_PURPOSES`). A duplicate table can drift; a cycle cannot be repaired
   without breaking the import graph.
+- **A promotion gate failing is not a reason to add a bypass.** The ladder has
+  no override flag, and the fix for "this candidate cannot pass
+  `authorization_complete`" is to close the route or document the exception in
+  `AUTHZ_PUBLIC_WRITE_EXCEPTIONS` — a visible act — not to add a flag that
+  silently means the gate is advisory.
+- **`high_trust` declares `delta: 0.0` and that is correct**, so a probe
+  demanding that every posture move the score would flag a working
+  configuration. `TestPinningOracle` pins the deltas as literals precisely so
+  that editing the table to satisfy a broken expectation fails there instead of
+  quietly making a probe pass.
 
 ### Complaints keep-as-is decisions (do not "fix")
 
@@ -225,6 +235,178 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
 
 ## Expansion log
+
+### Kaizen: simulated flows, a one-way shadow, and a graded ladder (2026-09-30)
+
+Backend-only pass. Three modules, one admin-gated router, two CLI drivers, and
+one confirmed security defect fixed on the way. Frontend is out of scope for
+now.
+
+#### A confirmed pre-existing hole: `canary/promote` was unauthenticated
+
+- **Conclusion:** `POST /meta/decisions/canary/promote` and
+  `POST /meta/decisions/canary/run` decided which model scores every customer
+  and moved the model's divergence counters, with **no credential of any kind**.
+  `AUTHZ_RULES["meta_surface"]` classified all of `/meta*` as `public` with
+  `enforced_by: ()`, the routes bound no security dependency, and
+  `authz_drift_report` reported `in_sync: true` with `delta: match`.
+  **Suggestion:** this is the one class of hole the drift report structurally
+  cannot find, and the reason is worth writing down: a rule declaring
+  `enforced_by: ()` and a route binding no dependency are *the same thing*, so
+  the table was not wrong about the code — it was wrong about the world, and the
+  defect **was** the agreement. Self-consistency cannot reach it.
+- **Fix applied.** `AUTHZ_RULES["decision_canary_admin"]` (`exposure: admin`,
+  `enforced_by: ("get_current_admin_user",)`, declared *before* `meta_surface`
+  because the lookup is first-match-wins), `Depends(deps.get_current_admin_user)`
+  on both handlers, and 4 new tests — including the 401 asserted on the wire and
+  the model asserted unmoved afterwards, because a gate that returns 401 after
+  the mutation is not a gate.
+- **Structural gate added so the class cannot recur.**
+  `AUTHZ_PUBLIC_WRITE_EXCEPTIONS` records every mutating route allowed to be
+  public, each with the `claim` that makes it acceptable (6 rows: register,
+  login, refresh, logout, webhook ingest, and `meta/decisions/simulate` — whose
+  "never mutates live config" was an assertion in a docstring and nothing else,
+  so it is now in a reviewable table). `authz_public_write_audit(routes)` names
+  any mutating route nobody wrote down, plus any *stale* row for a route that no
+  longer exists, and folds both into `drift.in_sync`.
+- **And on the ladder.** `authorization_complete` is a **blocking** gate at
+  `l3_canary` — the first rung that serves a real customer — measured by
+  `release_ladder.authorization_measurements(app.routes)`, which goes and looks
+  rather than accepting a number from the caller. `MeasureIn.from_app` lets a
+  request name measurements the *server* computes; app-computed values are
+  merged **last**, so `{"authz_in_sync": true}` in a body cannot override what
+  this process measured. `validate_release_ladder()` caught the gate being added
+  before its `_apply_rule` comparison, which is the check doing its job.
+
+#### `app/real_life_flows.py` — 12 flows, 41 subflows, 5 personas
+
+- **The finding that shaped the design:** a simulation with wrong assumptions
+  manufactures *confident* false findings. The first version of this harness
+  reported **12** blockages on a healthy tree from three mistakes — an access
+  band read as a 0–1 scale when it is 0–100, `risk_rules` used as a rule-pack
+  name when it is a *model* name from `model_versioning`, and a delta that would
+  have been "missing" for a posture declaring `delta: 0.0`. The failure mode of
+  this kind of harness is not crashing; it is being wrong while looking right.
+- **Every expectation is read from config, never hardcoded** —
+  `POSTURE_ADJUSTMENTS`, `CONSENT_GATED_PURPOSES`, `RULE_PACK_BY_NAME`,
+  `ACCESS_BAND_RULES`, `ESCALATION_GUARDS`. Reading the table is what makes a
+  probe survive a rename.
+- **A probe that raises counts as *failed*,** and the `probe_raised` category
+  tells the reader to read the traceback first: a raising probe is usually a
+  wrong argument, and adjusting the engine to match the probe would invert the
+  test.
+- **5 negative controls**, all verified: consent-gating `service` → 3
+  `gate_withheld_a_fix`; the catch-all posture row's `default` flag flipped →
+  `invariant_violated`; a stubbed `_posture_adjustment_row` → `invariant_violated`;
+  shadow pointed at live → `isolation_violation`; a feed flipped to
+  shadow → live → `isolation_violation`; a forced authz drift →
+  `unclassified_route`. Each restores what it touched, and
+  `test_the_baseline_is_clean` runs first — without it the controls prove
+  nothing.
+- **Honest limit, stated in the module and pinned from the other side.** A probe
+  whose expectation derives from the table it validates cannot detect an edit to
+  that table; that is what makes it survive a rename.
+  `TestPinningOracle` spells the posture deltas, band cut points and guard
+  count out as **literals**, which is the independent oracle the probes
+  deliberately do not have. The limit is not removed — it is covered from the
+  other direction, and the module says so rather than implying a detection it
+  cannot perform.
+
+#### `app/shadow_env.py` — one-way, proven by identity rather than by config
+
+- 6 isolation checks, 7 replicated feeds, 3 declared environments. **Every check
+  fails closed when unobserved** — an unobserved check is a failed check.
+- Identity is `(scheme, host, port, database)`. `identity_key` **excludes the
+  username**, so a read-only replication role does not read as a different
+  database. `same_database()` treats an uncomparable identity as *the same*
+  database, which also fails closed.
+- `CSERVICE_SHADOW_DATABASE_URL` has **no fallback** to `DATABASE_URL`. A shadow
+  that inherited live's URL by default would be a live deployment wearing a
+  shadow's name, and the only defence would be a convention somebody remembers.
+- **4 defects fixed here.** `database_identity` treated an unparseable or
+  databaseless URL as `comparable` — fail-open, so a typo produced
+  `isolated: true`; it now requires a plausible host and a database name.
+  `evaluate_isolation` let a check *implementation* raise, which aborted the
+  whole verdict; a raising check is now recorded as failed. `validate_shadow_env`
+  read the module `SHADOW_FEEDS` for its direction report while using
+  observations for the verdict; it now honours the observed feeds. And
+  `?severity=` on the blockages endpoint was a free `str`, so
+  `?severity=catastroph` returned `200` with `count: 0` — a filter that fails
+  open on the input an operator is most likely to get wrong; now a `Literal`
+  and a 422.
+
+#### `app/release_ladder.py` — 5 levels, 11 gates, a 5-event ledger
+
+- Level entry gates: `l0_draft → ()`; `l1_verified → (unit_suite_green,
+  flow_simulation_clean)`; `l2_shadow → (shadow_isolation_clean,
+  flow_simulation_clean, data_pipelines_one_way)`; `l3_canary →
+  (shadow_divergence_within_tolerance, rollback_target_available,
+  regressions_none, authorization_complete)`; `l4_live →
+  (canary_error_rate_below_threshold, rollback_target_available)`.
+- **Code and data version as one promotable pair.** A rollback that restores the
+  code and keeps the data is not a rollback. Rollback **appends**
+  (`kind: "rollback"`, `restores: <event_id>`), so 7 → 8 → 7 is three events and
+  the history stays honest. Window is the last **5** *events*, not 5 versions.
+- **3 defects fixed here, the first of them the worst.**
+  `gates_for_candidate` read `required_gates_for(candidate.level)` — the rung
+  **already occupied** — so the check could only ever fail on evidence already
+  used and the *next* rung's gates were never consulted: `l4_live` was reachable
+  with `canary_error_rate` never measured. It now defaults to `next_level(...)`,
+  and `for_level=` preserves the "how is this candidate doing" reading. Second,
+  `rollback_targets` excluded the *oldest* event instead of the currently-live
+  one (`live_events()` is oldest-first). Third, the threshold fields were listed
+  in gate `checks`, which made `DEFAULT_DIVERGENCE_TOLERANCE` and
+  `DEFAULT_CANARY_ERROR_THRESHOLD` unreachable — a gate is unmeasured until every
+  name in `checks` is supplied — so they were removed from `checks` and are now
+  usable as per-candidate overrides.
+- Gates evaluate the **destination** rung. A refused advance is `200` with the
+  blocking failures, not a `409`: an admin asking why a candidate is not moving
+  is asking a question, and a 409 throws the answer away.
+- **Deploying is deliberately not an HTTP verb.** Only promotion is exposed, so
+  the gates are read before anyone can act on them.
+
+#### The router, and why it is not under `/meta*`
+
+- 16 routes under `/kaizen/admin*`, gated as **one block** by
+  `AUTHZ_RULES["kaizen_admin"]` so a route added under the prefix inherits the
+  gate rather than remembering it. Not `/meta*`, which is public by intent and
+  this contains three mutating endpoints. Included **without** a prefix — a
+  prefix produced `/kaizen/kaizen/...`, caught by the drift report.
+- `POST .../blockages/append` is separate from `GET .../blockages` so a polling
+  dashboard cannot append on every poll. It refuses a duplicate section unless
+  `allow_repeat`, and says so.
+- `CandidateIn` is `extra="forbid"`, because a body naming `level: l4_live`
+  would otherwise get a `201` and a candidate at draft — a request that asked to
+  go live and was told yes, with a body that says otherwise.
+- `/kaizen/admin/shadow/verify` now overrides **all six** blocking inputs. It
+  previously overrode only `shadow_url` and `shadow_env_name`, which left
+  `write_scope` and `live_read_only` reachable only by mutating the environment
+  of the process being asked whether it is safe.
+
+#### Verification
+
+- `python3 -m pytest tests/ -q` → **2330 passed** (187 in the new
+  `tests/test_kaizen_shadow_release.py`).
+- `python3 scripts/run_flow_simulation.py` → 21 runs, 41 subflows, **0
+  failures**, 0 blockers, 0 warnings.
+- `python3 scripts/run_shadow_env.py --strict` → exit **1**. Unconfigured, and it
+  **fails closed** with `database_identity`, `environment_marker` and
+  `write_scope` rather than passing for no reason; `feed_direction` is the one
+  check that passes, and it passes because 7 channels really are one-way.
+- `python3 scripts/run_flow_simulation.py --strict` → exit **0** (exit 2 on a
+  blocker).
+- `authz_drift_report(app.routes)` → 262 pairs, **0 unclassified, 0 mismatched,
+  6 public writes, all on the record, `in_sync: true`**.
+- `scripts/build_code_map.py` → `leaves=704 internal_nodes=65`; revision stays
+  **`r6`** (leaf-level additions only, maintenance rule 6) with an r6 addendum;
+  `scripts/sync_code_map_md.py --check` → in sync.
+- `scripts/schema_drift_report.py` → 22 live tables, 22 declared, in sync.
+
+Code map: `/meta/` `kaizen_release_surface` + `authz_catalog.public_writes`, and
+`CODE_MAP.md` r6 addendum · `/meta/ecosystem`, `/meta/features`,
+`/meta/authz`, `/meta/scoring-catalog` · Tests:
+`tests/test_kaizen_shadow_release.py`,
+`tests/test_decision_quality_expansion.py`
 
 ### Complaints: case spine, escalation engine, decision support (2026-09-30)
 - `app/models.py`: `ComplaintCase` / `ComplaintEvent` / `ComplaintDecision`,
