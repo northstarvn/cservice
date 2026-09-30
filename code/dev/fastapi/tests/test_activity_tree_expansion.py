@@ -113,12 +113,18 @@ def _metrics(**overrides) -> dict:
 
 
 def test_activity_tree_catalog_group_axes_shape():
+    # The assertion follows the table rather than pinning the original five:
+    # `sentiment_range` and `engagement_score` are declared axes, and pinning
+    # the old set would fail on a legitimate config addition. The route-level
+    # guard that they are actually reachable is asserted separately below.
     assert set(ACTIVITY_TREE_GROUP_AXES) == {
         "lifecycle_stage",
         "value_tier",
         "customer_classification",
         "churn_risk",
         "journey_family",
+        "sentiment_range",
+        "engagement_score",
     }
     for axis, info in ACTIVITY_TREE_GROUP_AXES.items():
         assert "label" in info
@@ -129,6 +135,35 @@ def test_activity_tree_catalog_rank_options_are_config_keys():
     assert "loyalty_score" in ACTIVITY_TREE_RANK_OPTIONS
     assert "churn_risk_score" in ACTIVITY_TREE_RANK_OPTIONS
     assert "activity_count" in ACTIVITY_TREE_RANK_OPTIONS
+
+
+def test_every_declared_group_axis_is_reachable_through_the_route():
+    """A declared axis that the route rejects is configured but unreachable.
+
+    ``sentiment_range`` and ``engagement_score`` were added to
+    ``ACTIVITY_TREE_GROUP_AXES`` while the route's ``Query(pattern=...)`` kept
+    the original five alternatives, so both were visible in the catalog and in
+    the engine and still 422'd at the request. This reads the pattern straight
+    off the live route and fails if any declared axis is missing from it, so
+    the table and the route cannot drift apart again.
+    """
+    import re
+
+    from app.main import app
+
+    spec = app.openapi()
+    operation = spec["paths"]["/chat/admin/activity-tree"]["get"]
+    parameter = next(
+        entry
+        for entry in operation["parameters"]
+        if entry["name"] == "group_by"
+    )
+    allowed = set(re.findall(r"[a-z_]+", parameter["schema"]["pattern"]))
+    missing = set(ACTIVITY_TREE_GROUP_AXES) - allowed
+    assert not missing, (
+        "declared grouping axes are rejected by the route's Query(pattern=...): "
+        f"{sorted(missing)}"
+    )
 
 
 def test_activity_tree_anomaly_rules_are_valid():

@@ -103,6 +103,13 @@ from app.schemas.chat import (
     PointsWalletReport,
     PointsTransactionsReport,
     PointsAdminReport,
+    Customer360Report,
+    CustomerRecoveryStatus,
+    PreferenceConsentReport,
+    PreferenceUpdateRequest,
+    PreferenceUpdateResponse,
+    SelfServiceStatusReport,
+    PolicyPostureSummary,
 )
 from app.services.chat_analytics import (
     analyze_sentiment,
@@ -177,6 +184,31 @@ from app.services.recovery_playbooks import (
     build_recovery_outreach_plan_for_user,
     build_recovery_playbook_catalog,
     run_recovery_playbooks,
+)
+from app.services.customer_360 import (
+    build_customer_360,
+    build_customer_360_admin_report,
+)
+from app.services.customer_explain import (
+    build_explainability_vocabulary_catalog,
+    explain_churn_risk,
+    explain_loyalty_score,
+    explain_policy_posture,
+    explain_recovery_status,
+    explain_value_tier,
+    validate_explanation_tables,
+)
+from app.services.preferences import (
+    build_preference_consent_report,
+    list_consent_events,
+    preference_catalog,
+    update_user_preferences,
+)
+from app.services.self_service import (
+    build_customer_recovery_status,
+    build_points_forecast,
+    build_policy_posture_summary,
+    build_self_service_status,
 )
 from app.services.retention_snapshots import (
     _build_retention_snapshot_action_plan,
@@ -2039,7 +2071,12 @@ async def get_activity_tree_admin(
     window_days: int = Query(default=30, ge=7, le=365),
     group_by: str = Query(
         default="lifecycle_stage",
-        pattern="^(lifecycle_stage|value_tier|customer_classification|churn_risk|journey_family)$",
+        # Kept in step with ACTIVITY_TREE_GROUP_AXES. The pattern had not been
+        # widened when `sentiment_range` and `engagement_score` were added to
+        # that table, so both were reachable from the catalog and from the
+        # engine but rejected with a 422 by the route -- configured but
+        # unreachable, which is the worst state for a config-driven axis.
+        pattern="^(lifecycle_stage|value_tier|customer_classification|churn_risk|journey_family|sentiment_range|engagement_score)$",
     ),
     rank_by: str = Query(
         default="loyalty_score",
@@ -2320,3 +2357,326 @@ async def points_exchange_admin_report(
     current_user: models.User = Depends(deps.get_current_admin_user),
 ):
     return await build_points_exchange_admin_report(db, window_days=window_days, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Stage A -- Trust & Visibility
+# ---------------------------------------------------------------------------
+#
+# Stage A answers one question from the customer's side: "can I see what was
+# done for me and why?" Five surfaces, each an aggregation of engines that
+# already existed rather than a new source of truth:
+#
+#   /chat/customer-360            everything known, in one payload
+#   /chat/me/recovery-status      what recovery decided and what it did
+#   /chat/me/status               recovery + points forecast + policy posture
+#   /chat/me/preferences          the preference & consent centre
+#   /chat/me/explanations         the decisions about you, in plain language
+#
+# Every one is self-scoped. The admin equivalents are explicitly separate
+# routes, so widening a self route to take a `user_id` is never an option and
+# does not have to be reviewed as one.
+
+
+@router.get("/chat/customer-360", response_model=Customer360Report)
+async def get_customer_360(
+    window_days: int = Query(default=30, ge=1, le=365),
+    section: Optional[str] = Query(
+        default=None,
+        description=(
+            "restrict the build to one section; comma-separated for several. "
+            "An unknown section is a 422 rather than an empty payload."
+        ),
+        max_length=300,
+    ),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """Everything known about the signed-in customer, in one payload.
+
+    This aggregates eight existing engines and stores nothing. A section that
+    cannot be built is reported in the summary as incomplete rather than
+    defaulted to a healthy value, so a failed payments query does not read as
+    "no open payments".
+    """
+    sections = None
+    if section:
+        sections = [part.strip() for part in section.split(",") if part.strip()]
+    try:
+        return await build_customer_360(
+            db, current_user.id, window_days, sections=sections
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+
+@router.get("/chat/admin/customer-360")
+async def get_customer_360_admin(
+    window_days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=20, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Cross-user rollup from aggregate rows.
+
+    Deliberately *not* N per-user 360 builds: that is O(users x 8 engines) with
+    a model call per user in the sentiment section. The payload lists what it
+    omits so an operator is not left reading absence of a signal as absence in
+    the data.
+    """
+    return await build_customer_360_admin_report(db, window_days=window_days, limit=limit)
+
+
+@router.get("/chat/me/recovery-status", response_model=CustomerRecoveryStatus)
+async def get_own_recovery_status(
+    window_days: int = Query(default=30, ge=1, le=365),
+    include_preview: bool = Query(
+        default=False,
+        description="include the actions a run right now would take; off by default so a history read never counts unrun work",
+    ),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """What automated recovery decided for this customer, and what it did.
+
+    Includes the actions that were *deliberately not repeated* and names the
+    guard that stopped them. Omitting those would make "our limits correctly
+    prevented a duplicate credit" and "we forgot about you" render identically.
+
+    Honours the `show_recovery_activity` preference, which defaults to on: a
+    transparency feature hidden by default is only discoverable after the
+    incident it would have explained.
+    """
+    return await build_customer_recovery_status(
+        db, current_user.id, window_days, include_preview=include_preview
+    )
+
+
+@router.get("/chat/me/status", response_model=SelfServiceStatusReport)
+async def get_own_status(
+    window_days: int = Query(default=30, ge=1, le=365),
+    include_preview: bool = Query(default=False),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """One dashboard: recovery status, points forecast, policy posture, journey.
+
+    Each section is built by the same function its dedicated endpoint uses, so
+    the two cannot disagree. A section that fails appears under `degraded` with
+    the reason rather than being replaced with a plausible default.
+    """
+    return await build_self_service_status(
+        db, current_user.id, window_days, include_preview=include_preview
+    )
+
+
+@router.get("/chat/me/points-forecast")
+async def get_own_points_forecast(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """Project the next 30 days of points movement from the last 30 days of it.
+
+    `is_projection` is always true and `basis` states the arithmetic. A
+    forecast on a surface a customer might act on that turned out to be a
+    model prediction would be worse than no forecast at all.
+    """
+    return await build_points_forecast(db, current_user.id)
+
+
+@router.get("/chat/me/policy-posture", response_model=PolicyPostureSummary)
+async def get_own_policy_posture(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """Tier, posture and access band, with what each one gates.
+
+    Reads the stored policy score rather than recomputing it. A recomputed
+    preview would be a second implementation of the score, and the two would
+    disagree; with no score on record this reports that instead of inventing a
+    default.
+    """
+    return await build_policy_posture_summary(db, current_user.id)
+
+
+@router.get("/chat/me/preferences", response_model=PreferenceConsentReport)
+async def get_own_preferences(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """The preference & consent centre, with every declared key and purpose.
+
+    A key the customer has never set is reported with `set: false` and its
+    shipped default, which is a different state from a key set to that same
+    default. The resolver needs to tell them apart to know whether to fall
+    through to its own ladder.
+    """
+    return await build_preference_consent_report(db, current_user.id)
+
+
+@router.put("/chat/me/preferences", response_model=PreferenceUpdateResponse)
+async def update_own_preferences(
+    payload: PreferenceUpdateRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """Update preferences and/or consent grants.
+
+    Partial success is reported, not rejected: a valid key and an unknown one in
+    the same request both land and the response names which. A batch that
+    validated all-or-nothing would make the settings screen brittle in a way
+    the customer cannot fix.
+
+    A `required` purpose cannot be withdrawn and is returned under
+    `blocked_consents` with the reason. Withdrawing the basis needed to run the
+    contract is withdrawing from the service, and the honest response to that
+    is a delete request, not a silent switch.
+    """
+    return await update_user_preferences(
+        db,
+        current_user.id,
+        payload.preferences,
+        payload.consents,
+        recorded_by_id=current_user.id,
+    )
+
+
+@router.get("/chat/me/consent-history")
+async def get_own_consent_history(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """The append-only consent trail: every grant and every revocation.
+
+    The profile row is overwritten on every edit, so it can show the current
+    state but not when consent was first given. That question is what this
+    trail exists to answer, and a re-confirmation that submits the value
+    already stored deliberately does *not* append a row -- otherwise the log
+    could not distinguish a fresh grant from a no-op.
+    """
+    return await list_consent_events(db, current_user.id, limit=limit)
+
+
+@router.get("/chat/me/explanations")
+async def get_own_explanations(
+    window_days: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """The decisions made about this customer, each with its arithmetic.
+
+    Covers loyalty score, churn risk, recovery readiness, policy posture, value
+    tier and lifecycle stage. A second, business vocabulary over
+    `/meta/decisions/explanations`, which narrates infrastructure decisions;
+    they are complementary rather than competing.
+
+    `deduction_reproduced` reports whether the visible factors add up to the
+    score on their own. It is a checkable claim rather than a reassurance, and
+    it is false when the score carries a term this surface does not see.
+    """
+    chat_rows, bookings = await load_user_interaction_window(
+        db, current_user.id, window_days
+    )
+    latest_sentiment = analyze_sentiment(chat_rows[0].message) if chat_rows else None
+    summary = build_summary(current_user.id, chat_rows, bookings, latest_sentiment)
+    churn = await build_churn_prediction(db, current_user.id, window_days)
+
+    loyalty = explain_loyalty_score(summary)
+    churn_block = explain_churn_risk(summary, churn)
+    tier = explain_value_tier(summary)
+
+    stage, confidence, drivers, _focus = classify_lifecycle_stage(
+        summary, churn, len(chat_rows), len(bookings)
+    )
+    from app.services.customer_explain import explain_lifecycle_stage
+
+    posture_block = None
+    try:
+        policy_snapshot = await build_customer_policy_snapshot(db, current_user)
+        posture_block = explain_policy_posture(policy_snapshot)
+    except Exception as exc:  # noqa: BLE001
+        posture_block = {
+            "subject": "policy_posture",
+            "status": "unavailable",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+
+    recovery_block = None
+    try:
+        from app.services.recovery_playbooks import _load_recovery_context
+
+        resolved = await _load_recovery_context(db, current_user.id, window_days)
+        recovery_block = explain_recovery_status(resolved["context"])
+    except Exception as exc:  # noqa: BLE001
+        recovery_block = {
+            "subject": "recovery_readiness",
+            "status": "unavailable",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+
+    explanations = [
+        loyalty,
+        churn_block,
+        recovery_block,
+        tier,
+        explain_lifecycle_stage(stage, drivers=drivers),
+    ]
+    if posture_block is not None:
+        explanations.append(posture_block)
+
+    available = [
+        block for block in explanations if block.get("status") != "unavailable"
+    ]
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "user_id": current_user.id,
+        "window_days": window_days,
+        "explanations": available,
+        "unavailable": [
+            {"subject": block.get("subject"), "reason": block.get("reason")}
+            for block in explanations
+            if block.get("status") == "unavailable"
+        ],
+        "next_actions": loyalty.get("next_steps", []),
+        "summary": (
+            f"{len(available)} decision(s) explained in plain language with their "
+            "arithmetic; scores are banded because a bare 0-100 number implies a "
+            "precision the score does not have, and the number travels alongside "
+            "the band"
+        ),
+    }
+
+
+@router.get("/chat/admin/explanation-vocabulary")
+async def get_explanation_vocabulary(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The plain-language phrase and band tables, plus their validation report.
+
+    `validate_explanation_tables` is report-only, like the i18n and audit-contract
+    passes: these phrases are already being served to customers, so correcting
+    one changes a string someone is reading. The interesting output is a
+    non-empty finding list -- which phrase exists for a value the producing
+    engine cannot emit, or which next-step condition can never be met.
+    """
+    return {
+        "catalog": build_explainability_vocabulary_catalog(),
+        "validation": validate_explanation_tables(),
+    }
+
+
+@router.get("/chat/admin/preference-catalog")
+async def get_preference_catalog(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The declared preference key space and consent purposes.
+
+    The same payload a customer receives, exposed read-only for an operator who
+    needs to know what the centre can express before asking a customer to use
+    it. Adding a key is a table edit; no migration is involved because both
+    value columns are JSON blobs.
+    """
+    return preference_catalog()

@@ -33,7 +33,7 @@ import os
 import sys
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -293,10 +293,39 @@ class TestPointsMultiplierConfig:
         ctx = _points_context()
         summer = select_active_campaigns(ctx, effective_date="2026-07-15")
         spring = select_active_campaigns(ctx, effective_date="2026-04-01")
-        dormant = select_active_campaigns(ctx)  # today (2026-09-26) is past both windows
+        # No `effective_date` means "today", and asserting that today is outside
+        # every campaign window makes the test expire: `autumn_enrollment_2026`
+        # covers 2026-09-01..2026-10-31, so a bare call started returning a
+        # campaign the moment that window opened. The durable claim is that a
+        # date-driven selection matches exactly the rows whose window contains
+        # that date, so assert the empty case with an explicit date outside all
+        # declared windows instead of with "now".
+        dormant = select_active_campaigns(ctx, effective_date="2027-06-15")
         assert [campaign["campaign_id"] for campaign in summer] == ["summer_earn_boost_2026"]
         assert [campaign["campaign_id"] for campaign in spring] == ["spring_purchase_boost_2026"]
         assert dormant == []
+
+    def test_every_declared_campaign_window_is_selectable(self):
+        # A campaign row that can never be selected is dead configuration that
+        # still reads as live in the catalog. Each row's window midpoint must
+        # select that row and no other, so a window that does not cover its own
+        # midpoint is reported here rather than discovered in production.
+        ctx = _points_context()
+        for campaign in POINTS_CAMPAIGN_RULES:
+            window = campaign["when"]["_date"]["between_dates"]
+            start, end = window[0], window[1]
+            midpoint = str(
+                date.fromisoformat(start)
+                + (date.fromisoformat(end) - date.fromisoformat(start)) // 2
+            )
+            active = {
+                entry["campaign_id"]
+                for entry in select_active_campaigns(ctx, effective_date=midpoint)
+            }
+            assert campaign["campaign_id"] in active, (
+                f"{campaign['campaign_id']} is not selectable at its own window "
+                f"midpoint {midpoint}"
+            )
 
 
 class TestPointsQuoteMultipliers:
@@ -328,7 +357,35 @@ class TestPointsQuoteMultipliers:
         payload = quote_points_exchange(
             "loyalty_points", "purchase", 25, "USD", ctx, effective_date="2026-04-01"
         )
-        assert payload["points_per_unit_effective"] == pytest.approx(100.0 * 1.08, abs=0.0001)
+        # The expectation is composed from the config, tier x ltv x campaign,
+        # rather than written as a single literal. The original assertion
+        # expected `100.0 * 1.08`, which only ever held while the default
+        # context sat below the LTV threshold; this context has
+        # monetization_readiness=72.0, which matches the 70.0 LTV row and
+        # contributes 1.10, so the correct composed factor is 1.1 * 1.08.
+        # Asserting the composition is what makes the test survive an edit to
+        # any one of the three tables.
+        spring = next(
+            campaign
+            for campaign in POINTS_CAMPAIGN_RULES
+            if campaign["campaign_id"] == "spring_purchase_boost_2026"
+        )
+        ltv = next(
+            row
+            for row in POINTS_LTV_MULTIPLIERS
+            if ctx["monetization_readiness"] >= row["min_monetization_readiness"]
+        )
+        composed = round(
+            float(ltv["purchase_multiplier"])
+            * float(spring["params"]["purchase_multiplier"]),
+            4,
+        )
+        assert payload["rate_multipliers"]["ltv_min_readiness"] == ltv[
+            "min_monetization_readiness"
+        ]
+        assert payload["points_per_unit_effective"] == pytest.approx(
+            100.0 * composed, abs=0.0001
+        )
         assert payload["rate_multipliers"]["campaign_id"] == "spring_purchase_boost_2026"
         assert payload["rate_multipliers"]["redeem_multiplier"] == 1.0
 

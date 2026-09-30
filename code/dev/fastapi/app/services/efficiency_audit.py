@@ -199,7 +199,6 @@ SYSTEM_DATA_METRICS: list[tuple[str, Any]] = [
     ("retention_snapshots", models.RetentionSnapshot),
     ("recovery_outcomes", models.RecoveryOutcome),
     ("recovery_actions", models.RecoveryAction),
-    ("api_endpoints", models.APIEndpoint),  # NEW
 ]
 
 MAX_FILE_READ_BYTES = 2 * 1024 * 1024  # guard against huge/binary files
@@ -362,6 +361,17 @@ def scan_component(
     file_count = len(files)
     line_count = analysis["line_count"]
     avg = round(line_count / file_count, 2) if file_count else 0.0
+    # `doc_file_count` is precomputed here rather than left to the scorer to
+    # derive. The scorer used to read `raw["per_file"]`, but this return value
+    # never carried that key -- `per_file` holds `Path` objects, so it is
+    # deliberately not serialized into a JSON-friendly payload. Passing the
+    # per-file list across the boundary is what produced a KeyError on every
+    # docs-component audit.
+    doc_file_count = sum(
+        1
+        for _, path_entry in per_file
+        if path_entry.suffix in {".md", ".rst", ".txt"}
+    )
     return {
         "component": target["component"],
         "kind": target["kind"],
@@ -377,6 +387,7 @@ def scan_component(
         "marker_density_per_1000": round(analysis["marker_count"] * 1000.0 / max(line_count, 1), 2),
         "test_files": test_files,
         "test_ratio": round(test_files / max(file_count, 1), 2),
+        "doc_file_count": doc_file_count,
     } | {"findings_text": [], "score": 0.0, "classification": "missing"}
 
 
@@ -529,10 +540,7 @@ def score_component(raw: dict[str, Any]) -> tuple[float, str, list[_Finding]]:
         )
     # Docs component: penalize low comment-to-code ratio
     if raw["kind"] == "docs" and raw["file_count"] > 0:
-        doc_lines = sum(
-            1 for _, p in raw["per_file"]
-            if p.suffix in {".md", ".rst", ".txt"}  # markdown/rst/text docs
-        )
+        doc_lines = int(raw.get("doc_file_count", 0) or 0)
         if doc_lines == 0:
             score -= 5.0
             findings_text.append("no documentation files found with expected extensions")

@@ -18,6 +18,25 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
 - Overlapping scoring terms are legitimate and pinned by tests: `booking`
   contains "book" (booking_flow), `reminder` matches "remind"+"reminder",
   `follow_up` includes "again".
+- **`resolve_communication_strategy` must not read user preferences directly.**
+  Its output is pinned by existing consumers, so the stated preference is
+  applied at the presentation point (`customer_360._build_communication`,
+  `self_service.build_self_service_status`) and the override is reported
+  explicitly rather than folded into the engine.
+- **The consent gate must never suppress `service` or `recovery` outreach.**
+  A customer who reported a problem must not have the fix withheld because of a
+  marketing setting. `CONSENT_GATED_PURPOSES` is the published list of which
+  purposes actually gate; if a purpose is added there, that is a deliberate
+  change, not a default.
+- **`recovery_playbooks` statuses are a contract, not a display choice.**
+  `skipped` means a guard stopped the action and is *not* a failure. A
+  customer-visible view must show it; collapsing it into "executed" or
+  dropping it makes a correct limit and a silent bug look the same.
+- **`app/models.py` still does not import `app/services/*`**, so a judgment two
+  services would share is declared twice rather than imported (e.g. the
+  `user_consent_events.purpose` vocabulary in `ENUM_FIELD_SPECS` and in
+  `CONSENT_PURPOSES`). A duplicate table can drift; a cycle cannot be repaired
+  without breaking the import graph.
 
 ## Expansion log
 
@@ -1225,3 +1244,192 @@ decision is whether to commit the full expansion or re-rank and iterate.
 ## Open blockages
 
 - None.
+
+## Stage A implemented — Trust & Visibility (2026-09-29)
+
+The "Reviews by 29 Sep" plan's **Stage A** is now built. Suite green at
+**1984 passing** (from a tree where all 20 test files failed to even collect).
+
+### What shipped
+
+| # | Plan item | Surface | Status |
+|---|-----------|---------|--------|
+| 1 | Unified **Customer 360** | `app/services/customer_360.py`, `GET /chat/customer-360`, `GET /chat/admin/customer-360` | done |
+| 2 | Plain-language **human explainability** | `app/services/customer_explain.py`, `GET /chat/me/explanations`, `GET /chat/admin/explanation-vocabulary` | done |
+| 3 | **Customer-visible recovery actions** | `app/services/self_service.py`, `GET /chat/me/recovery-status` | done |
+| 4 | **Preference & consent centre v1** | `app/services/preferences.py`, `GET|PUT /chat/me/preferences`, `GET /chat/me/consent-history` | done |
+| 5 | Self-service **status / forecast / posture** | `GET /chat/me/status`, `GET /chat/me/points-forecast`, `GET /chat/me/policy-posture` | done |
+
+12 routes, 4 new service engines, 2 new tables + 1 Alembic revision, 1 new
+`/meta` endpoint, 4 `/meta/ecosystem` subservices, 11 `/meta/features` keys,
+5 `/meta/scoring-catalog` keys. All 18 `/meta/` endpoints return 200.
+
+### The five decisions worth arguing with
+
+- **The 360 is an aggregator, not a store.** Every input is composed from an
+  engine that already existed. A 360 that keeps its own copy of a score becomes
+  a second source of truth that disagrees with the first, and the disagreement
+  is what a customer sees. Cost: N engines per build, which is why the admin
+  rollup reads aggregate rows and publishes `omitted_by_design` instead of
+  running N full builds.
+- **A blocked recovery action is shown, not hidden.** A `skipped` action means
+  a guard stopped us repeating something. Omitting it makes "our limits
+  correctly prevented a duplicate credit" and "we forgot about you" render
+  identically. The customer-facing reason is translated; the internal one
+  ("daily budget would be exceeded") is kept for an agent, not served as prose.
+- **Consent gates marketing, not recovery.** See keep-as-is above. A consent
+  control that could suppress the fix for a customer's own complaint is a way
+  to lose them silently.
+- **`show_recovery_activity` defaults to on.** A transparency feature hidden by
+  default is only discoverable after the incident it would have explained.
+- **Explanations carry the arithmetic, and nothing is softened.** A churn risk
+  of `high` is described as a churn risk of `high`. A factor's `impact` is
+  *derived from the sign of its contribution*, so a term can never be described
+  as helping when it subtracted from the score. Scores are banded (a bare 0-100
+  implies precision the capped heuristics lack) but the number always travels
+  alongside the band.
+
+### Pre-existing defects found and fixed (none introduced by this pass)
+
+The tree did not import at all on `52c04be`. All 20 test files errored at
+collection.
+
+1. `services/efficiency_audit.py` referenced `models.APIEndpoint` — a model
+   that exists in **no** module, no migration and no other file. Removed the
+   row rather than inventing a table.
+2. `services/efficiency_audit.py`: `score_component` read `raw["per_file"]`,
+   which `scan_component` never returned — and cannot, since the value holds
+   `Path` objects and the payload is JSON-friendly. Now precomputed as
+   `doc_file_count`.
+3. `services/loyalty_journey.py`: `build_journey_context` read
+   `summary.engagement_score` / `.ltv_estimate` / `.referral_count`, none of
+   which is declared on `InteractionSummary`. `AttributeError` on every call —
+   this had taken out the journey endpoint, the activity tree and the 360.
+4. `services/loyalty_journey.py`: `list(generator) + [...]` is a `TypeError`;
+   the appended families were also dead (all three already declared by rows).
+5. `main.py` used `webhooks` and `enrichment` without importing either.
+6. `routers/chat.py`: the admin activity-tree `Query(pattern=...)` was never
+   widened when `sentiment_range` / `engagement_score` were added to
+   `ACTIVITY_TREE_GROUP_AXES` — configured, catalogued, engine-reachable, and
+   still 422. Fixed, plus a test that reads the pattern off the live route.
+7. `deps.py` `AUTHZ_RULES`: the new `PUT /chat/me/preferences` and three
+   pre-existing `/webhooks/*` routes fell through to the catch-all.
+   `webhook_status` also had to precede the `{provider}` rules, because
+   first-match-wins would otherwise let `/webhooks/webhooks/{provider}` claim it.
+
+### Bugs in this pass's own new code, each now pinned by a test
+
+- `ACCESS_BAND_PHRASES` was written against four band names
+  (`full`/`elevated`/`partial`/`minimal`) `policy_scoring` cannot emit. The real
+  vocabulary is `elite`/`strong`/`moderate` plus the `limited` default — caught
+  by the shipped validator before it was ever served.
+- `effective_contact_plan` computed `held = quiet and not permitted` against a
+  service gate that is *unconditionally permitted*, so `quiet_hours_enabled`
+  was a structural no-op.
+- `_producible_labels` read only `ACCESS_BAND_RULES` and missed the
+  `default_band` fallback — the same "the check read a partial view" defect the
+  i18n and audit-contract passes each found once.
+
+### Two unbounded-memory defects in the pre-existing `webhooks` / `enrichment` modules
+
+Found while reviewing files that were already in the tree untracked. **Both are
+the same shape: a capacity that is reported but not enforced.** A write-only
+workload grows the structure without limit while the API advertises a fixed
+number, so the published number is fiction.
+
+- `routers/webhooks.py` — `_seen_events` was a `deque(maxlen=10000)` that was
+  *written but never read*; `_seen_events_ts`, the dict `_is_replay` actually
+  consults, had no bound and was cleaned from exactly one call path. The status
+  endpoints reported the deque's `maxlen` as the guard's capacity. The deque is
+  now the authority for *what is remembered*, with timestamps reconciled on
+  both the read and write paths. **Keep-as-is decision:** the residual is a
+  real memory/replay-guarantee trade and is now written down — more than
+  10 000 distinct events inside the 24h window can age the oldest out.
+  `WEBHOOK_REPLAY_MEMORY` makes the budget tunable per deployment.
+- `enrichment.py` — `_EnrichmentCache.stats()` advertised
+  `max_entries: 10000` against an unbounded dict whose only cleanup was a
+  `get()` miss on an already-expired key. Now bounded by LRU eviction on the
+  write path, with `max_entries` as a constructor argument.
+
+Both are pinned by tests that write 3× the reported cap and assert the bound
+holds — the shape that would have caught each. **This is the second occurrence
+of "a published number is not the enforced one" in this tree** (the
+`SCORE_BANDS` boundary check was the other class of it). When a surface
+publishes a limit, a test should drive past it and assert the limit held.
+
+### One test assertion corrected rather than the source
+
+The band-direction check compared each band's **midpoint against hardcoded
+magic numbers** (0.3 / 0.5 / 18.0). It flagged four *correct* bands and proved
+nothing about the rows it did flag. Replaced with a **monotonicity** invariant
+— direction must not regress as the value moves away from the good end — which
+cannot produce a false positive and needs no thresholds. Two date-sensitive
+campaign tests had also expired the moment the September–October
+`autumn_enrollment_2026` window opened, and one points test expected
+`100.0 * 1.08` while its own context qualified for the 1.10 LTV multiplier.
+
+### Governance
+
+- Code map **560 → 608 leaves**, 54 → **58 internal nodes**, revision stays
+  **`r5`** (leaf-level only, rule 6). **Zero prior leaves lost**, verified by
+  token-multiset diff against the `HEAD` Newick.
+- The 12 routes are recorded as **4 business surfaces** under `routers.chat`,
+  not 12 leaves — rule 3 forbids enumerating endpoints.
+- New `scripts/sync_code_map_md.py` **generates** the `CODE_MAP.md` rendering
+  and verifies token equality (`--check`). The previous pass had found it
+  silently drifted by seven leaves; it is now generated, not hand-maintained.
+  A test asserts both scripts are clean.
+- `validate_explanation_tables()`: **0 errors, 0 warnings**.
+  `authz_drift_report`: `in_sync`, 0 fallback routes, 0 unreachable rules.
+  `validate_authz()`: 0 errors, 0 warnings.
+- `tests/test_customer_360_stage_a.py` (108) — several tests exist purely to
+  pin the decisions above rather than the implementation.
+
+### Next targets
+
+- **Stage B** — customer-facing save offers, preference-driven messaging,
+  loyalty status/experiential ledger, customer what-if, closed-loop recovery
+  measurement.
+- **Stage C/D** — long-horizon ledger, LTV/investment engine, journey
+  orchestrator, proactive nudges, agent copilot, multi-region care,
+  continuous playbook learning.
+
+## Reviews by 29 Sep
+Both deliverables are ready and focused on **user convenience + loyalty**, re-baselined against CODE_MAP r5.
+
+**Files (preview + download):**
+
+
+
+
+
+
+### Snapshot of the plan
+
+The backend is already strong on decision quality, automated recovery, rule flexibility, audit, identity, and zero-trust. The remaining gaps that most hurt **loyalty and convenience** are:
+
+1. No unified **Customer 360**
+2. Recovery actions mostly invisible to the customer
+3. Explainability still infra-level (not plain-language for agent/customer)
+4. Thin preference / consent control
+5. Loyalty still mostly transactional points rather than status + experiential value
+6. Journeys still chat-centric
+
+### Stages (priority order)
+
+| Stage | Focus | Key outcomes for the user |
+|-------|--------|---------------------------|
+| **A – Trust & Visibility** | Customer 360, human explainability, recovery transparency, preference/consent v1, self-service status | “I can see what you did for me and why” |
+| **B – Effortless Save & Personal Value** | Customer-facing save offers, preference-driven messaging, loyalty status/experiential ledger, customer what-if, closed-loop recovery measurement | “Saving me was easy and felt personal” |
+| **C – Relationship Depth** | Long-horizon loyalty ledger, LTV/investment engine, journey orchestrator, proactive nudges, agent copilot | Consistent care across time and touchpoints |
+| **D – Scale of Care** | Multi-region care, purpose-limited personalization, continuous playbook learning, relationship-health dashboard | Personal feel even at volume |
+
+### Highest-leverage next moves (Stage A)
+
+- **Customer 360** aggregator (extend existing services + chat/users)
+- Plain-language explanation surface on top of existing `explainability` / `decision_trace`
+- Make recovery playbook actions **customer-visible** (goodwill, escalation, policy adjustment)
+- Preference & consent center (channel / frequency / topic / purpose)
+- Self-service “my recovery status / points forecast / policy posture”
+
+All recommendations prefer **extending existing leaves** (`recovery_playbooks`, `explainability`, `points_exchange`, `communication_strategy`, `users`, `chat`) rather than inventing new top-level domains, in line with CODE_MAP maintenance rules.

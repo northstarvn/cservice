@@ -766,6 +766,25 @@ AUTHZ_RULES: list[dict[str, Any]] = [
      )},
     {"rule_id": "audit_catalog", "methods": ("GET",), "path": "/audit/catalog", "exposure": "public",
      "enforced_by": (), "hardening": {}, "note": "Static table of the audit surface."},
+    {"rule_id": "webhook_ingest", "methods": ("POST",), "path": "/webhooks/webhooks/{provider}",
+     "exposure": "public", "enforced_by": (), "hardening": {"rate_tier": "interactive"},
+     "note": (
+         "Unauthenticated by necessity: the caller is an external provider, not a principal. "
+         "The HMAC signature header is the credential and is verified inside the handler, so "
+         "this rule documents where that control lives rather than claiming a dependency "
+         "enforces it. This is the one public write surface that reaches the pipeline."
+     )},
+    {"rule_id": "webhook_status", "methods": ("GET",), "path": "/webhooks/webhooks/status",
+     "exposure": "public", "enforced_by": (), "hardening": {},
+     "note": (
+         "Per-provider status rollup. Declared *before* the {provider} rules because "
+         "first-match-wins would otherwise let `/webhooks/webhooks/{provider}` claim this "
+         "path, leaving the rollup reachable but classified as a per-provider route."
+     )},
+    {"rule_id": "webhook_provider_health", "methods": ("GET",),
+     "path": "/webhooks/webhooks/{provider}/health", "exposure": "public",
+     "enforced_by": (), "hardening": {},
+     "note": "Whether a provider's secret is configured. Reports a boolean, never the secret."},
     {"rule_id": "audit_trail_catalog", "methods": ("GET",), "path": "/audit/trail-catalog",
      "exposure": "public", "enforced_by": (), "hardening": {},
      "note": "Static table. The entries it describes are admin-gated."},
@@ -925,6 +944,15 @@ AUTHZ_RULES: list[dict[str, Any]] = [
     {"rule_id": "chat_writes", "methods": ("POST",), "path": "/chat/*", "exposure": "authenticated",
      "enforced_by": ("get_current_user",), "hardening": {"scopes": ("write",)},
      "note": "Caller-scoped chat writes: arrears open, points exchange, playbook execution."},
+    {"rule_id": "chat_me_preferences_write", "methods": ("PUT",), "path": "/chat/me/preferences",
+     "exposure": "authenticated", "enforced_by": ("get_current_user",),
+     "hardening": {"scopes": ("write",), "rate_tier": "interactive"},
+     "note": (
+         "Its own rule rather than a widening of chat_writes to PUT. The preference and "
+         "consent centre is the only mutating surface under /chat/me, so naming it "
+         "separately means a future PUT route has to be classified on its own instead of "
+         "being absorbed by a method wildcard."
+     )},
     {"rule_id": "topic_policy_decisions", "methods": ("GET",), "path": "/topic-policy-decisions",
      "exposure": "authenticated", "enforced_by": ("get_current_user",), "hardening": {"scopes": ("read",)},
      "note": "Explains why a topic was selected for the caller."},

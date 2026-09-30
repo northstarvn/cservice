@@ -654,10 +654,15 @@ def build_journey_context(
         days_since_last_activity=days_since_last_activity,
         top_issues=list(summary.top_issues),
         signal_total=chat_count + booking_count,
-        # --- NEW fields ---
-        engagement_score=float(summary.engagement_score) if summary.engagement_score is not None else 0.0,
-        lifetime_value_estimate=float(summary.ltv_estimate) if summary.ltv_estimate is not None else 0.0,
-        referral_count=int(summary.referral_count or 0),
+        # Read through getattr with the same defaulting the rest of this
+        # constructor uses. Direct attribute access here raised
+        # AttributeError on every call: `engagement_score` / `ltv_estimate` /
+        # `referral_count` were never declared on `InteractionSummary`, so
+        # these three lines made `build_journey_context` unusable and took the
+        # journey endpoint, the activity tree and the customer 360 with it.
+        engagement_score=float(getattr(summary, "engagement_score", 0.0) or 0.0),
+        lifetime_value_estimate=float(getattr(summary, "ltv_estimate", 0.0) or 0.0),
+        referral_count=int(getattr(summary, "referral_count", 0) or 0),
         tier_status=str(summary.value_tier or "standard"),
     )
 
@@ -884,9 +889,18 @@ def build_loyalty_scenario_catalog() -> dict[str, object]:
                 "condition_fields": sorted(rule["when"].keys()),
             }
         )
-    all_families = list(dict.fromkeys(
-        str(rule["family"]) for rule in LOYALTY_SCENARIO_CATALOG
-    ) + ["referral", "reactivation", "upgrade"])
+    # A generator cannot be concatenated with a list, so the families are
+    # materialised first. The explicit append was also dead: all three extra
+    # names ('referral', 'reactivation', 'upgrade') are already declared as
+    # families by rows in LOYALTY_SCENARIO_CATALOG, so dict.fromkeys would
+    # have dropped them anyway. Kept as an explicit union so a family that
+    # exists only in the append list still shows up.
+    all_families = list(
+        dict.fromkeys(
+            [str(rule["family"]) for rule in LOYALTY_SCENARIO_CATALOG]
+            + ["referral", "reactivation", "upgrade"]
+        )
+    )
     return {
         "catalog_version": "loyalty_journey_v1",
         "total_scenarios": len(scenarios),

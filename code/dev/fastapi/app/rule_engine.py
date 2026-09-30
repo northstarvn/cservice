@@ -170,14 +170,27 @@ NULL_OPS: list[dict[str, Any]] = [
     {"op": "not_null", "arity": "any", "description": "Value is not None."},
     {"op": "is_blank", "arity": "any", "description": "None, empty string, or whitespace only."},
     {"op": "not_blank", "arity": "any", "description": "Has a meaningful value."},
-    {"op": "coalesce_eq", "arity": "any, any", "description": "Equals the threshold after falling back through the `default` chain."},
+    {"op": "coalesce_eq", "arity": "any, any", "description": "Equals the threshold after falling back through the `default chain."},
     {"op": "default_to", "arity": "any, any", "description": "The value the rule should treat as this when it is blank."},
+]
+
+# External enrichment operators — only usable in async/background rules.
+# These are NOT evaluated by matches_field / evaluate_when (v1 engine).
+# They are reachable only through evaluate_when_external, which is called
+# by the pipeline enrichment stage, never by the sync request path.
+EXTERNAL_OPS: list[dict[str, Any]] = [
+    {"op": "enriched_field", "arity": "str, any", "description": "Compare an enriched field (from enrichment stage) against a threshold."},
+    {"op": "enriched_present", "arity": "str", "description": "True if the enrichment stage produced a value for this field."},
+    {"op": "enriched_absent", "arity": "str", "description": "True if the enrichment stage did not produce a value for this field."},
+    {"op": "webhook_received", "arity": "str", "description": "True if a webhook event from this provider was received in the last N hours."},
+    {"op": "external_api_ok", "arity": "str", "description": "True if the external API health check passed in the last N minutes."},
 ]
 
 OPERATOR_FAMILIES: dict[str, str] = {
     **{entry["op"]: "string" for entry in STRING_OPS},
     **{entry["op"]: "collection" for entry in COLLECTION_OPS},
     **{entry["op"]: "null" for entry in NULL_OPS},
+    **{entry["op"]: "external" for entry in EXTERNAL_OPS},
     **{name: "numeric" for name in _NUMERIC_OPS},
     **{name: "date" for name in _DATE_OPS},
 }
@@ -1156,6 +1169,124 @@ def _validate_threshold(op_name: str, threshold: Any) -> list[dict[str, str]]:
         except (TypeError, ValueError):
             problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs a number, got {threshold!r}"})
     return problems
+
+
+# --- external enrichment operators ------------------------------------------
+#
+# These operators are NOT evaluated by matches_field / evaluate_when (v1).
+# They are reachable only through evaluate_when_external, which is called
+# by the pipeline enrichment stage or by async/background rule evaluation.
+# The sync request path never blocks on a provider.
+
+
+def _external_op_holds(
+    op_name: str,
+    value: Any,
+    threshold: Any,
+    enriched_context: dict[str, Any] | None = None,
+) -> bool:
+    """Evaluate an external enrichment operator.
+
+    ``enriched_context`` is the dict produced by the pipeline enrichment
+    stage (``EnrichmentClient.enrich_event``). When it is None, every
+    external operator fails closed — a rule that references an enriched
+    field without the enrichment stage running is a configuration error,
+    not a passing condition.
+    """
+    if enriched_context is None:
+        return False
+    if op_name == "enriched_field":
+        # value = enriched field name, threshold = operator dict
+        if not isinstance(threshold, dict):
+            return False
+        field_value = enriched_context.get(value)
+        if field_value is None:
+            return False
+        for op, compare_val in threshold.items():
+            numeric_op = _NUMERIC_OPS.get(op)
+            if numeric_op is None:
+                return False
+            try:
+                if not numeric_op(field_value, compare_val):
+                    return False
+            except TypeError:
+                return False
+        return True
+    if op_name == "enriched_present":
+        return value in enriched_context and enriched_context[value] is not None
+    if op_name == "enriched_absent":
+        return value not in enriched_context or enriched_context[value] is None
+    if op_name == "webhook_received":
+        # value = provider name, threshold = hours
+        # Check the webhook event log for recent events from this provider
+        # This is a placeholder — the actual implementation would query
+        # the pipeline's event store or a dedicated webhook_events table
+        return False
+    if op_name == "external_api_ok":
+        # value = provider name, threshold = minutes
+        # Check the enrichment client's circuit breaker state
+        from app.enrichment import get_enrichment_client
+        client = get_enrichment_client()
+        stats = client.stats()
+        provider_stats = stats.get("providers", {}).get(value, {})
+        return provider_stats.get("circuit_breaker") == "closed"
+    return False
+
+
+def evaluate_when_external(
+    when: dict[str, object],
+    context: dict[str, Any],
+    *,
+    enriched_context: dict[str, Any] | None = None,
+    effective_date: Any = None,
+    now: Any = None,
+) -> tuple[bool, dict[str, Any]]:
+    """``evaluate_when_extended`` with external enrichment operators enabled.
+
+    Same ``(matched, matched_fields)`` contract. The only difference from
+    ``evaluate_when_extended`` is that ``EXTERNAL_OPS`` are recognised.
+    External operators require ``enriched_context`` (the dict produced by
+    the pipeline enrichment stage); without it they fail closed.
+    """
+    evaluation = _evaluation_date(effective_date=effective_date, now=now)
+    matched_fields: dict[str, Any] = {}
+    for field_name, rule_value in (when or {}).items():
+        if field_name in _COMBINATORS and field_name not in context:
+            ok, fields = _evaluate_combinator_extended(
+                field_name, rule_value, context, effective_date=effective_date, now=now
+            )
+            if not ok:
+                return False, {}
+            matched_fields[field_name] = fields
+            continue
+        if field_name == _RESERVED_DATE_KEY:
+            if evaluation is None or not matches_field_extended(
+                rule_value, evaluation, effective_date=effective_date, now=now
+            ):
+                return False, {}
+            matched_fields[field_name] = evaluation.isoformat()
+            continue
+        if field_name not in context:
+            return False, {}
+        if not matches_field_extended(
+            rule_value, context[field_name], effective_date=effective_date, now=now
+        ):
+            # Check if this is an external operator dict
+            if isinstance(rule_value, dict):
+                is_external = any(
+                    op in OPERATOR_FAMILIES and OPERATOR_FAMILIES[op] == "external"
+                    for op in rule_value
+                )
+                if is_external:
+                    if not _external_op_holds(
+                        field_name, context.get(field_name), rule_value, enriched_context
+                    ):
+                        return False, {}
+                    matched_fields[field_name] = _json_safe(context.get(field_name))
+                    continue
+            return False, {}
+        matched_fields[field_name] = _json_safe(context[field_name])
+    return True, matched_fields
 
 
 # --- rule packs -------------------------------------------------------------

@@ -251,6 +251,58 @@ class UserCommunicationOverride(Base, TimestampMixin):
     note = Column(Text, nullable=False, default="")
 
 
+class UserPreferenceProfile(Base, TimestampMixin):
+    """User-owned communication preferences and consent grants (preference centre).
+
+    One row per user (``unique user_id``), holding both the preference
+    key/value pairs and the consent grants as JSON blobs. A single row keeps
+    the preference centre a mutable singleton (like ``communication_overrides``
+    and ``customer_policy_scores``) rather than an append-only ledger, because
+    a customer editing a preference is a state change, not an event.
+
+    Both columns are TEXT holding a JSON object. That is deliberate: the
+    preference key space is config-driven (``PREFERENCE_CATALOG`` in
+    ``services/preferences.py``) and adding a key must not be a migration.
+    """
+    __tablename__ = "user_preference_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    preferences_json = Column(Text, nullable=False, default="{}")
+    consents_json = Column(Text, nullable=False, default="{}")
+    consent_version = Column(String(20), nullable=False, default="1.0")
+
+
+class UserConsentEvent(Base, TimestampMixin):
+    """Append-only history of every consent grant and revocation.
+
+    Separate from ``UserPreferenceProfile`` on purpose: the profile row is the
+    *current* state and is overwritten on every edit, but consent is a
+    compliance claim and a revocation has to be provable after the fact. A
+    mutable row cannot show that consent was granted on a date and withdrawn on
+    another, so the trail lives here as append-only rows.
+
+    ``granted`` carries the direction rather than a separate event-type column,
+    so "the customer consented to marketing" and "the customer withdrew
+    marketing consent" are the same row shape with a different boolean.
+    """
+    __tablename__ = "user_consent_events"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose <> ''", name="ck_user_consent_events_purpose_required"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    purpose = Column(String(50), nullable=False, index=True)
+    granted = Column(Boolean, nullable=False, default=False)
+    version = Column(String(20), nullable=False, default="1.0")
+    lawful_basis = Column(String(30), nullable=False, default="legitimate_interest")
+    recorded_by_id = Column(Integer, nullable=True, index=True)
+    note = Column(Text, nullable=False, default="")
+
+
 class ArrearsEntry(Base, TimestampMixin):
     """A deferred payment (pay-in-arrears) with policy-selected interest terms.
 
@@ -507,6 +559,16 @@ FIELD_SENSITIVITY: dict[str, str] = {
     "follow_up_json": "content",
     "escalation_path_json": "content",
     "handoff_outcome_json": "content",
+    # A preference blob is the customer stating a channel, a language and a
+    # cadence about themselves. It is not free text a person wrote, but it is
+    # behavioural and it is theirs, so `content` (redact by default) is the
+    # right default rather than `internal` (include by default).
+    "preferences_json": "content",
+    # The consent blob is a set of booleans over a fixed purpose vocabulary --
+    # no free text, no identifiers. `behavioral` keeps it in bulk exports
+    # because a consent state is exactly what an export needs and contains
+    # nothing that identifies anybody.
+    "consents_json": "behavioral",
     # money
     "principal": "financial",
     "annual_rate": "financial",
@@ -536,6 +598,7 @@ FIELD_SENSITIVITY: dict[str, str] = {
     "risk_score": "behavioral",
     "confidence": "behavioral",
     "is_admin": "internal",
+    "lawful_basis": "internal",
 }
 
 #: Per-table overrides, keyed ``"table.column"``. Used where a shared column
@@ -545,6 +608,11 @@ TABLE_FIELD_SENSITIVITY: dict[str, str] = {
     "recovery_actions.failure_reason": "content",
     # a policy score summary is machine-generated narrative about one person
     "customer_policy_scores.summary": "behavioral",
+    # A consent row is a legal record *about a person*, and its free-text note
+    # is written by whoever recorded the change. Both override the name-based
+    # classification above.
+    "user_consent_events.purpose": "behavioral",
+    "user_consent_events.lawful_basis": "internal",
     # the audit trail's own summary is written about an entity, not by a user
     "audit_log_entries.summary": "content",
     # a security event summary is machine-generated from a signal
@@ -739,6 +807,25 @@ ENUM_FIELD_SPECS: dict[str, dict[str, Any]] = {
         "aliases": {"unready": "blocked", "maxed": "exhausted"},
         "note": "no default and no constraint, so a blank value is representable",
     },
+    "user_consent_events.purpose": {
+        "enum": None,
+        "values": (
+            "service",
+            "recovery",
+            "analytics",
+            "marketing",
+            "personalization",
+            "third_party_sharing",
+        ),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"promotions": "marketing", "third_party": "third_party_sharing"},
+        "note": (
+            "the vocabulary is CONSENT_PURPOSES in services/preferences.py; the "
+            "column has a non-empty CHECK but not a membership one, so a purpose "
+            "added to the config is writable before the DDL catches up"
+        ),
+    },
 }
 # `interaction_signals.source` is deliberately *absent* from the table above even
 # though it is a non-nullable String like every entry in it. All seven `source`
@@ -882,6 +969,29 @@ TABLE_LIFECYCLE: dict[str, dict[str, Any]] = {
             "never rewrites an open agreement"
         ),
     },
+    "user_preference_profiles": {
+        "write_mode": MUTABLE,
+        "retention_days": None,
+        "owner": "services/preferences.py",
+        "note": (
+            "unique on user_id, so the database does enforce one profile per user. "
+            "Both value columns are TEXT holding a JSON object because the key space "
+            "is config-driven (PREFERENCE_CATALOG), so adding a preference is a data "
+            "edit rather than a migration"
+        ),
+    },
+    "user_consent_events": {
+        "write_mode": APPEND_ONLY,
+        "retention_days": 2555,
+        "owner": "services/preferences.py",
+        "note": (
+            "the consent trail is append-only while the profile row it mirrors is "
+            "overwritten on every edit: consent has to be provable after the fact, "
+            "so a grant and a later revocation are two rows rather than one current "
+            "value. purpose is checked non-empty but its vocabulary is config-driven, "
+            "so it is deliberately not in ENUM_FIELD_SPECS"
+        ),
+    },
 }
 
 #: Float columns with no non-negative check *on purpose*. Listed so that
@@ -965,6 +1075,8 @@ OPEN_TEXT_COLUMNS: dict[str, str] = {
     "point_type": "derived from the exchange-rule config table, so it is open by construction",
     "profile_id": "communication profiles are config-driven",
     "playbook_id": "recovery playbooks are config-driven",
+    "preference_key": "preference keys come from PREFERENCE_CATALOG, which is config-driven",
+    "purpose": "consent purposes come from CONSENT_PURPOSES, which is config-driven",
     "reference": "an external identifier, arbitrary text by nature",
     "policy_id": "arrears interest policies are config-driven",
     "note": "unbounded TEXT prose written by a human or an operator; no set of values is conceivable",
@@ -1017,6 +1129,23 @@ UNCONSTRAINED_REFERENCE_COLUMNS: dict[str, dict[str, str]] = {
     "recovery_actions.playbook_id": {
         "severity": "out_of_band",
         "reason": "a reference into the recovery-playbook config table, not a row",
+    },
+    "user_consent_events.purpose": {
+        "severity": "out_of_band",
+        "reason": (
+            "a reference into the CONSENT_PURPOSES config table, not a row. A "
+            "purpose retired from the config leaves a historical id that is still "
+            "the correct record of what was consented to at the time"
+        ),
+    },
+    "user_consent_events.recorded_by_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "nullable and deliberately not a foreign key: most consent changes are "
+            "self-service and record the user as both subject and actor, and a "
+            "foreign key to users.id would also have to tolerate the same row, "
+            "which it would"
+        ),
     },
     "communication_overrides.profile_id": {
         "severity": "out_of_band",

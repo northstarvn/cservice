@@ -21,8 +21,9 @@ from app import model_bases
 from app import models
 from app.schemas import audit as audit_schemas
 from app import deps
-from app.routers import audit, bookings, chat, topics, users
-from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention
+from app import enrichment
+from app.routers import audit, bookings, chat, topics, users, webhooks
+from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
 from app import (
@@ -198,6 +199,7 @@ app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
 app.include_router(chat.router, tags=["chat"])
 app.include_router(topics.router, tags=["topics"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
+app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 
 
 @app.get("/meta")
@@ -227,6 +229,11 @@ async def app_metadata():
             "i18n_governance",
             "contract_governance",
             "thin_infra_governance",
+            "customer_360",
+            "customer_explainability",
+            "preference_consent_center",
+            "customer_visible_recovery",
+            "self_service_status",
         ],
     }
 
@@ -768,6 +775,140 @@ async def app_ecosystem():
                     "six require_* factories as bound to no route at all"
                 ),
             },
+            "customer_360": {
+                "routes": [
+                    "/chat/customer-360",
+                    "/chat/admin/customer-360",
+                ],
+                "purpose": (
+                    "one aggregated view of everything already known about a "
+                    "customer: profile, interactions, sentiment, recovery, journey, "
+                    "communication, payments, points and preferences"
+                ),
+                "status": "ready",
+                "composition_only": True,
+                "sections": list(customer_360.CUSTOMER_360_SECTIONS),
+                "notes": (
+                    "an aggregator, not a store: every input is composed from an "
+                    "engine that already existed (chat_analytics, loyalty_journey, "
+                    "recovery_playbooks, communication_strategy, points_exchange, "
+                    "arrears_payments, policy_scoring), because a Customer 360 that "
+                    "keeps its own copy of a score becomes a second source of truth "
+                    "that disagrees with the first. A section that cannot be built is "
+                    "reported in the summary as incomplete rather than defaulted to a "
+                    "healthy value, so a failed payments query does not read as 'no "
+                    "open payments'. The admin rollup is built from aggregate rows and "
+                    "publishes omitted_by_design: it is not N per-user 360 builds, "
+                    "which would be O(users x 8 engines) with a model call per user"
+                ),
+            },
+            "customer_explainability": {
+                "routes": [
+                    "/chat/me/explanations",
+                    "/chat/admin/explanation-vocabulary",
+                ],
+                "purpose": (
+                    "plain-language explanation of the decisions a customer already "
+                    "has, with the arithmetic that produced each one"
+                ),
+                "status": "ready",
+                "complements": "decision_intelligence",
+                "config_tables": [
+                    "SCORE_BANDS",
+                    "INVERSE_SCORE_BANDS",
+                    "CHURN_RISK_PHRASES",
+                    "RECOVERY_READINESS_PHRASES",
+                    "POLICY_TIER_PHRASES",
+                    "CONTROL_POSTURE_PHRASES",
+                    "ACCESS_BAND_PHRASES",
+                    "VALUE_TIER_PHRASES",
+                    "LIFECYCLE_STAGE_PHRASES",
+                    "RECOVERY_ACTION_CUSTOMER_IMPACT",
+                    "RECOVERY_STATUS_PHRASES",
+                    "NEXT_STEP_TEMPLATES",
+                    "EXPLANATION_CODES",
+                ],
+                "notes": (
+                    "a second, business vocabulary over the decisions a customer would "
+                    "ask about. app/explainability.py narrates infrastructure decisions "
+                    "(risk score, canary, model promotion) and its 'customer' audience "
+                    "is a redaction profile over that infra vocabulary; neither can "
+                    "render 'why is my loyalty score 62'. Three properties make this "
+                    "useful rather than marketing copy: every explanation carries the "
+                    "real number and the threshold it was compared against, nothing is "
+                    "softened (a churn risk of high is described as a churn risk of "
+                    "high), and a factor's impact is derived from the sign of its "
+                    "contribution so a term can never be described as helping when it "
+                    "subtracted from the score. Scores are banded because a bare 0-100 "
+                    "number implies a precision build_summary's capped heuristics do not "
+                    "have -- but the number always travels alongside the band, since "
+                    "banding without it would be the dishonest version"
+                ),
+            },
+            "preference_consent_center": {
+                "routes": [
+                    "/chat/me/preferences",
+                    "/chat/me/consent-history",
+                    "/chat/admin/preference-catalog",
+                ],
+                "purpose": (
+                    "customer-owned communication preferences and consent grants, with "
+                    "a provable append-only trail of every grant and revocation"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "PREFERENCE_CATALOG",
+                    "PREFERENCE_CATEGORIES",
+                    "CONSENT_PURPOSES",
+                    "FREQUENCY_COOLDOWN_HOURS",
+                    "PREFERENCE_CATALOG_VERSION",
+                ],
+                "notes": (
+                    "this fills the layer the communication ladder was missing. "
+                    "resolve_communication_strategy picks a channel in precedence order "
+                    "from four layers (admin select, policy, culture, profile) and none "
+                    "of them is the customer's stated wish. The preference is applied at "
+                    "the presentation point rather than inside that engine, whose output "
+                    "is pinned by existing consumers. Two deliberate decisions: the "
+                    "consent gate applies to marketing and analytics but NOT to service or "
+                    "recovery, because a customer who reported a problem must not have "
+                    "the fix suppressed by a marketing setting -- CONSENT_GATED_PURPOSES "
+                    "publishes which purposes actually gate so that is a stated property "
+                    "and not a gap. And show_recovery_activity defaults to True, because a "
+                    "transparency feature hidden by default is only discoverable after the "
+                    "incident it would have explained"
+                ),
+            },
+            "customer_visible_recovery": {
+                "routes": [
+                    "/chat/me/recovery-status",
+                    "/chat/me/status",
+                    "/chat/me/points-forecast",
+                    "/chat/me/policy-posture",
+                ],
+                "purpose": (
+                    "the customer's own view of the recovery program: what it decided, "
+                    "what it did, and what it deliberately did not do"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "POINTS_FORECAST_WINDOW_DAYS",
+                    "POINTS_FORECAST_HORIZON_DAYS",
+                    "POINTS_FORECAST_MIN_ROWS",
+                ],
+                "notes": (
+                    "the recovery program was already thoroughly auditable internally -- "
+                    "every action is a RecoveryAction row and /chat/admin/recovery-analytics "
+                    "rolls it up -- but none of that reached the person it happened to. A "
+                    "blocked action is shown rather than hidden, naming the guard that "
+                    "stopped it, because omitting it makes 'our limits correctly prevented "
+                    "a duplicate credit' and 'we forgot about you' render identically. The "
+                    "points forecast is a scaled repeat of observed ledger movement, not a "
+                    "prediction model, and says so via method and basis: a forecast on a "
+                    "surface a customer might act on that turned out to be a guess would be "
+                    "worse than no forecast"
+                ),
+            },
             "policy_scoring_governance": {
                 "routes": [
                     "/meta/policy-scoring",
@@ -921,6 +1062,17 @@ async def app_feature_summary():
             "password_policy": "/users/password-policy",
             "password_feedback": "/users/me/password-feedback",
             "security_posture": "/users/me/security-posture",
+            "customer_360": "/chat/customer-360",
+            "customer_360_admin": "/chat/admin/customer-360",
+            "customer_recovery_status": "/chat/me/recovery-status",
+            "self_service_status": "/chat/me/status",
+            "customer_points_forecast": "/chat/me/points-forecast",
+            "customer_policy_posture": "/chat/me/policy-posture",
+            "customer_preferences": "/chat/me/preferences",
+            "customer_consent_history": "/chat/me/consent-history",
+            "customer_explanations": "/chat/me/explanations",
+            "explanation_vocabulary": "/chat/admin/explanation-vocabulary",
+            "preference_catalog": "/chat/admin/preference-catalog",
         },
     }
 
@@ -950,6 +1102,8 @@ async def scoring_catalog():
         "points_exchange": points_exchange.build_points_exchange_catalog(),
         "efficiency_audit": build_efficiency_audit_catalog(),
         "audit_log": audit_log.build_audit_log_catalog(),
+        "enrichment": enrichment.build_enrichment_catalog(),
+        "webhooks": webhooks.build_webhook_catalog(),
         "i18n": i18n.build_i18n_catalog(),
         "i18n_governance": i18n.build_i18n_governance_catalog(),
         "audit_contracts": audit_schemas.build_contract_catalog(routes=app),
@@ -982,6 +1136,18 @@ async def scoring_catalog():
         "authz_governance": deps.build_authz_catalog(app.routes),
         "identity": users.build_users_catalog(),
         "database_ops": db_infra.build_db_ops_catalog(),
+        "customer_360": {
+            "sections": list(customer_360.CUSTOMER_360_SECTIONS),
+            "composition_only": True,
+        },
+        "customer_explainability": customer_explain.build_explainability_vocabulary_catalog(),
+        "customer_explainability_validation": customer_explain.validate_explanation_tables(),
+        "preference_consent": {
+            **preferences_service.preference_catalog(),
+            "consent": preferences_service.consent_report(
+                preferences_service.default_consents()
+            ),
+        },
     }
 
 
@@ -1182,6 +1348,82 @@ async def audit_contract_catalog():
         "environment": APP_ENV,
         "contracts": audit_schemas.contract_inventory(routes=app),
         "governance": audit_schemas.build_contract_catalog(routes=app),
+    }
+
+
+@app.get("/meta/customer-360")
+async def customer_360_catalog():
+    """Describe the customer-facing visibility surfaces added in Stage A.
+
+    Four related capabilities, and the interesting part is that each one is
+    *composed* from an engine that already existed rather than introducing a new
+    source of truth:
+
+    * ``customer_360``      -- the aggregator and the sections it composes.
+    * ``explainability``    -- the plain-language bands, phrases and next-step
+      templates, plus a validation report over them.
+    * ``preferences``       -- the declared key space and the consent purposes,
+      including which purposes actually gate outreach.
+    * ``self_service``      -- the recovery, points-forecast and policy-posture
+      surfaces.
+
+    The validation report is the part worth reading first. It is report-only:
+    these phrases are already being served to customers, so correcting one
+    changes a string someone is reading. A *missing* phrase is an error because
+    the fallback text would be served silently; a band whose direction
+    regresses is an error because monotonicity is a property of the table
+    rather than of any threshold.
+    """
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "customer_360": {
+            "sections": list(customer_360.CUSTOMER_360_SECTIONS),
+            "composition_only": True,
+            "note": (
+                "every section is composed from an engine that already existed; a "
+                "section that cannot be built is reported rather than defaulted healthy"
+            ),
+        },
+        "explainability": {
+            **customer_explain.build_explainability_vocabulary_catalog(),
+            "validation": customer_explain.validate_explanation_tables(),
+        },
+        "preferences": {
+            **preferences_service.preference_catalog(),
+            "consent": preferences_service.consent_report(
+                preferences_service.default_consents()
+            ),
+        },
+        "self_service": {
+            "points_forecast": {
+                "window_days": self_service.POINTS_FORECAST_WINDOW_DAYS,
+                "horizon_days": self_service.POINTS_FORECAST_HORIZON_DAYS,
+                "min_rows": self_service.POINTS_FORECAST_MIN_ROWS,
+                "method": "scaled_repeat_of_observed_movement",
+                "is_projection": True,
+            },
+            "note": (
+                "the forecast is a scaled repeat of observed ledger movement, not a "
+                "prediction model; a wallet with no exchange rule reports "
+                "no_exchange_rule rather than a number the customer cannot spend"
+            ),
+        },
+        "endpoints": {
+            "customer_360": "/chat/customer-360",
+            "customer_360_admin": "/chat/admin/customer-360",
+            "recovery_status": "/chat/me/recovery-status",
+            "status": "/chat/me/status",
+            "points_forecast": "/chat/me/points-forecast",
+            "policy_posture": "/chat/me/policy-posture",
+            "preferences": "/chat/me/preferences",
+            "consent_history": "/chat/me/consent-history",
+            "explanations": "/chat/me/explanations",
+            "explanation_vocabulary": "/chat/admin/explanation-vocabulary",
+            "preference_catalog": "/chat/admin/preference-catalog",
+        },
     }
 
 

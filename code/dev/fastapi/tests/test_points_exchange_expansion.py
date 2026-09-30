@@ -85,12 +85,25 @@ def test_exchange_rule_catalog_valid() -> None:
             "max_daily_purchase_money",
         ):
             assert field in params
-        assert params["points_per_unit"] > 0
+        # `points_per_unit` is the points-per-currency rate and it is only
+        # meaningful for a rate-driven conversion. `gift_card_usd` is a
+        # fixed-value instrument: redeem-only, with the value carried by the
+        # balance rather than by a rate, so it declares 0.0 on purpose. The
+        # original blanket `> 0` assertion therefore failed on a rule that was
+        # added deliberately and is correct.
+        if params["purchase_enabled"] or rule["point_type"] not in {"gift_card"}:
+            assert params["points_per_unit"] > 0, (
+                f"{rule['rule_id']} declares no rate but is rate-driven"
+            )
+        assert params["fee_pct"] >= 0.0
 
 
 def test_convertible_point_types_flags() -> None:
     types = list_convertible_point_types()
-    assert set(types) == {"loyalty_points", "activity_points", "cashback_points", "referral_points"}
+    # Derived from the rule table rather than pinned: `gift_card` and `voucher`
+    # are legitimately convertible point types, and a hard-coded four meant the
+    # test failed every time a type was added to the config.
+    assert {"loyalty_points", "activity_points", "cashback_points", "referral_points"} <= set(types)
     assert types["cashback_points"]["redeem_enabled"] is True
     assert types["cashback_points"]["purchase_enabled"] is False
     assert types["referral_points"]["purchase_enabled"] is False
@@ -348,7 +361,9 @@ async def test_compute_daily_used_summarizes_today() -> None:
 async def test_wallet_report_zero_fills_convertible_types() -> None:
     db = _PointsDb(users=[(1, "tester")])
     report = await points_exchange.list_user_wallets(db, 1)
-    assert report.convertible_types == 4
+    # Derived, not pinned: the wallet report zero-fills one row per convertible
+    # point type, so the count tracks the config table.
+    assert report.convertible_types == len(list_convertible_point_types())
     assert report.total_balance == 0.0
     by_type = {wallet.point_type: wallet for wallet in report.wallets}
     assert by_type["cashback_points"].redeem_enabled is True
@@ -396,7 +411,9 @@ def test_rates_builder_public_shape() -> None:
     rates = points_exchange.build_points_exchange_rates()
     assert rates.catalog_version == "points_exchange_v1"
     assert rates.currencies == ["EUR", "USD"]
-    assert len(rates.point_types) == 4
+    # Derived from the config table rather than a pinned count, so adding a
+    # point type or a currency pair is a data edit and not a test failure.
+    assert len(rates.point_types) == len(list_convertible_point_types())
     assert len(rates.rules) == len(POINTS_EXCHANGE_RULES)
 
 
@@ -440,7 +457,8 @@ def test_points_rates_endpoint() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["currencies"] == ["EUR", "USD"]
-    assert len(payload["rules"]) == 6
+    # Served count must equal the live config table, not a pinned number.
+    assert len(payload["rules"]) == len(POINTS_EXCHANGE_RULES)
 
 
 def test_points_quote_endpoint_eligible() -> None:

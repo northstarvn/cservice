@@ -1914,3 +1914,301 @@ class PointsAdminReport(BaseModel):
     by_kind: Dict[str, int] = Field(default_factory=dict)
     by_point_type: Dict[str, int] = Field(default_factory=dict)
     transactions: List[PointsTransactionOut] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Stage A: Customer 360 & Trust & Visibility
+# ---------------------------------------------------------------------------
+
+class Customer360Profile(BaseModel):
+    """Unified customer profile aggregating all signals."""
+    user_id: int
+    username: str
+    email: Optional[str] = None
+    created_at: datetime
+    lifecycle_stage: str
+    value_tier: str
+    customer_classification: str
+    loyalty_score: float
+    churn_risk: str
+    monetization_readiness: float
+    engagement_score: float
+    lifetime_value_estimate: float
+    referral_count: int
+    tier_status: str
+
+
+class Customer360InteractionSummary(BaseModel):
+    """Interaction metrics for 360 view."""
+    total_chats: int = 0
+    total_bookings: int = 0
+    completed_bookings: int = 0
+    pending_bookings: int = 0
+    cancelled_bookings: int = 0
+    total_snapshots: int = 0
+    latest_chat_at: Optional[datetime] = None
+    latest_booking_at: Optional[datetime] = None
+    latest_snapshot_at: Optional[datetime] = None
+    days_since_last_activity: Optional[int] = None
+    dormant: bool = False
+
+
+class Customer360Sentiment(BaseModel):
+    """Sentiment overview for 360 view."""
+    current_label: str = "none"
+    current_score: float = 0.0
+    has_sentiment: bool = False
+    trend: str = "stable"  # improving, stable, declining
+    negative_count: int = 0
+    positive_count: int = 0
+    neutral_count: int = 0
+
+
+class Customer360Recovery(BaseModel):
+    """Recovery status for 360 view."""
+    recovery_readiness: str = "unknown"
+    dissatisfaction_score: float = 0.0
+    primary_risks: List[str] = Field(default_factory=list)
+    recent_recovery_actions: int = 0
+    blocked_recovery_actions: int = 0
+    last_recovery_at: Optional[datetime] = None
+    goodwill_points_credited: float = 0.0
+    escalation_count: int = 0
+    policy_guardrails_applied: int = 0
+
+
+class Customer360LoyaltyJourney(BaseModel):
+    """Loyalty journey status for 360 view."""
+    current_family: str = "none"
+    matched_scenarios: int = 0
+    scenario_families: List[str] = Field(default_factory=list)
+    next_best_actions: List[str] = Field(default_factory=list)
+    top_priority_scenario: Optional[str] = None
+
+
+class Customer360Communication(BaseModel):
+    """Communication strategy for 360 view."""
+    resolved_layer: str
+    precedence: int
+    profile_id: str
+    tone: str
+    channel: str
+    framing: str
+    reply_urgency: str
+    mood_label: str
+
+
+class Customer360Payments(BaseModel):
+    """Payments/arrears status for 360 view."""
+    open_arrears_count: int = 0
+    total_principal_at_risk: float = 0.0
+    total_interest_at_risk: float = 0.0
+    overdue_count: int = 0
+    settled_count: int = 0
+    waived_count: int = 0
+
+
+class Customer360Points(BaseModel):
+    """Points wallet summary for 360 view."""
+    total_balance: float = 0.0
+    redeemable_balance: float = 0.0
+    wallet_count: int = 0
+    recent_transactions: int = 0
+
+
+class Customer360Preferences(BaseModel):
+    """User preferences and consent for 360 view."""
+    communication_channel: Optional[str] = None
+    communication_frequency: Optional[str] = None
+    language: Optional[str] = None
+    timezone: Optional[str] = None
+    marketing_consent: bool = False
+    analytics_consent: bool = False
+    recovery_consent: bool = True
+    updated_at: Optional[datetime] = None
+
+
+class Customer360Report(BaseModel):
+    """Complete Customer 360 view."""
+    generated_at: datetime
+    window_days: int
+    profile: Customer360Profile
+    interactions: Customer360InteractionSummary
+    sentiment: Customer360Sentiment
+    recovery: Customer360Recovery
+    loyalty_journey: Customer360LoyaltyJourney
+    communication: Customer360Communication
+    payments: Customer360Payments
+    points: Customer360Points
+    preferences: Customer360Preferences
+    summary_text: str
+
+
+# ---------------------------------------------------------------------------
+# Plain-language explainability (human-readable decision explanations)
+# ---------------------------------------------------------------------------
+
+class PlainLanguageFactor(BaseModel):
+    """One factor in a decision, explained in plain language."""
+    factor: str
+    impact: str  # positive, negative, neutral
+    weight: float
+    explanation: str
+    evidence: str = ""
+
+
+class PlainLanguageExplanation(BaseModel):
+    """Plain-language explanation of a decision."""
+    decision_id: str
+    decision_type: str
+    outcome: str
+    confidence: str  # high, medium, low
+    generated_at: datetime
+    factors: List[PlainLanguageFactor]
+    summary: str
+    next_steps: List[str] = Field(default_factory=list)
+    related_decisions: List[str] = Field(default_factory=list)
+
+
+class ExplainabilityCatalogItem(BaseModel):
+    """Catalog entry for explainability templates."""
+    decision_type: str
+    template: str
+    factor_labels: Dict[str, str]
+    outcome_labels: Dict[str, str]
+
+
+# ---------------------------------------------------------------------------
+# Customer-visible recovery actions
+# ---------------------------------------------------------------------------
+
+class CustomerVisibleRecoveryAction(BaseModel):
+    """A recovery action visible to the customer."""
+    id: int
+    playbook_id: str
+    playbook_name: str
+    action: str
+    status: str  # executed, skipped, would_execute, failed
+    description: str
+    outcome: str
+    benefit_to_customer: str
+    executed_at: datetime
+    reference: Optional[str] = None
+
+
+class CustomerRecoveryStatus(BaseModel):
+    """Customer-facing recovery status."""
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    recovery_readiness: str
+    dissatisfaction_score: float
+    primary_risks: List[str]
+    matched_playbooks: List[Dict[str, Any]] = Field(default_factory=list)
+    executed_actions: List[CustomerVisibleRecoveryAction] = Field(default_factory=list)
+    skipped_actions: List[CustomerVisibleRecoveryAction] = Field(default_factory=list)
+    goodwill_points_credited: float = 0.0
+    tickets_escalated: int = 0
+    policy_guardrails: int = 0
+    next_review_at: Optional[datetime] = None
+    summary: str
+
+
+# ---------------------------------------------------------------------------
+# Preference & Consent Center
+# ---------------------------------------------------------------------------
+
+class PreferenceCategory(BaseModel):
+    """A category of preferences."""
+    category: str
+    label: str
+    description: str
+    options: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class UserPreference(BaseModel):
+    """A single user preference."""
+    key: str
+    category: str
+    value: Any
+    label: str
+    description: str
+    type: str  # string, boolean, number, select
+    options: Optional[List[Dict[str, Any]]] = None
+
+
+class ConsentRecord(BaseModel):
+    """A consent record."""
+    purpose: str
+    label: str
+    description: str
+    granted: bool
+    granted_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    version: str = "1.0"
+    lawful_basis: str = "legitimate_interest"
+
+
+class PreferenceConsentReport(BaseModel):
+    """Complete preferences and consent report."""
+    generated_at: datetime
+    user_id: int
+    preferences: List[UserPreference] = Field(default_factory=list)
+    consents: List[ConsentRecord] = Field(default_factory=list)
+    categories: List[PreferenceCategory] = Field(default_factory=list)
+    summary: str
+
+
+class PreferenceUpdateRequest(BaseModel):
+    """Request to update preferences."""
+    preferences: Dict[str, Any] = Field(default_factory=dict)
+    consents: Dict[str, bool] = Field(default_factory=dict)
+
+
+class PreferenceUpdateResponse(BaseModel):
+    """Response after updating preferences."""
+    generated_at: datetime
+    user_id: int
+    updated_preferences: List[str] = Field(default_factory=list)
+    updated_consents: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    summary: str
+
+
+# ---------------------------------------------------------------------------
+# Self-service status endpoints
+# ---------------------------------------------------------------------------
+
+class SelfServiceStatusReport(BaseModel):
+    """Self-service status dashboard for a customer."""
+    generated_at: datetime
+    user_id: int
+    window_days: int
+    recovery_status: CustomerRecoveryStatus
+    points_forecast: Dict[str, Any] = Field(default_factory=dict)
+    policy_posture: Dict[str, Any] = Field(default_factory=dict)
+    loyalty_journey: Customer360LoyaltyJourney
+    communication_preview: Customer360Communication
+    next_actions: List[str] = Field(default_factory=list)
+    summary: str
+
+
+class PointsForecastItem(BaseModel):
+    """Forecasted points change."""
+    source: str
+    estimated_points: float
+    timeframe: str
+    confidence: str
+
+
+class PolicyPostureSummary(BaseModel):
+    """Policy posture in plain language."""
+    tier: str
+    posture: str
+    access_band: str
+    access_score: float
+    customer_score: float
+    system_score: float
+    plain_language: str
+    restrictions: List[str] = Field(default_factory=list)
+    benefits: List[str] = Field(default_factory=list)

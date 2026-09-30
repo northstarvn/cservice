@@ -320,6 +320,7 @@ class HighThroughputPipeline:
         sample: bool = False,
         enforce_admission: bool = False,
         priority_order: bool = False,
+        enrichment: bool = False,
     ):
         self.name = name
         self.workers = workers if workers is not None else PIPELINE_WORKERS
@@ -332,6 +333,7 @@ class HighThroughputPipeline:
         self.sample = bool(sample)
         self.enforce_admission = bool(enforce_admission)
         self.priority_order = bool(priority_order)
+        self.enrichment = bool(enrichment)
         self._queue: asyncio.Queue[PipelineEvent] = asyncio.Queue(maxsize=self.max_queue)
         self._tasks: list[asyncio.Task] = []
         self._running = False
@@ -578,6 +580,20 @@ class HighThroughputPipeline:
                 self._in_flight.pop(key, None)
 
     async def _flush(self, batch: list[PipelineEvent]) -> None:
+        # Enrichment stage: call external providers before sinking (opt-in)
+        if self.enrichment:
+            from app.enrichment import get_enrichment_client
+            client = get_enrichment_client()
+            for event in batch:
+                try:
+                    enriched = await client.enrich_event(
+                        event.kind,
+                        dict(event.payload or {}),
+                    )
+                    if enriched:
+                        event.payload = {**(event.payload or {}), **enriched}
+                except Exception as exc:
+                    logger.warning("Enrichment failed for %s: %s", event.event_id, exc)
         try:
             await self._sink(batch)
             self._stats["processed"] += len(batch)

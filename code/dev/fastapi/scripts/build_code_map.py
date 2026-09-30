@@ -44,6 +44,7 @@ TREE = _node(
             "runtime", "scoring_catalog", "i18n_endpoint", "features", "ecosystem",
             "tenants", "tenants_policy", "partitions", "zero_trust", "decisions",
             "regional_endpoint", "model_bases_endpoint", "policy_scoring_endpoint",
+            "customer_360_endpoint",
         ),
         _node(
             "db",
@@ -181,6 +182,10 @@ TREE = _node(
         "interaction_signal", "retention_snapshot", "recovery_outcome", "recovery_action",
         "customer_policy_score", "topic_selection", "communication_override",
         "arrears_entry", "points_wallet", "points_transaction", "audit_log_entry",
+        # Stage A: the preference centre stores current state in a mutable
+        # singleton and the consent trail beside it in append-only rows, so a
+        # revocation stays provable after the profile row is overwritten.
+        "user_preference_profile", "user_consent_event",
     ),
     _node(  # routers ----------------------------------------------------------
         "routers",
@@ -196,7 +201,11 @@ TREE = _node(
               "history", "sentiment", "insights", "recovery", "recovery_playbooks",
               "loyalty_journey",
               "retention_dashboard", "snapshot_operations", "activity_tree",
-              "communication_strategy", "arrears_payments", "points_exchange", "topic_policy"),
+              "communication_strategy", "arrears_payments", "points_exchange", "topic_policy",
+              # Stage A, as four business surfaces rather than eleven routes:
+              # maintenance rule 3 forbids enumerating endpoints as leaves.
+              "customer_360", "self_service", "customer_explanations",
+              "preference_consent"),
         _node("topics",
               "catalog", "themes", "intelligence", "coverage", "portfolio", "workspace",
               "overview", "search", "suggestions", "recommendations",
@@ -251,6 +260,24 @@ TREE = _node(
         _node("recovery_playbooks",
               "realtime_context", "playbook_rules", "credit_points", "escalation",
               "policy_guardrail", "orchestrator", "auto_sweep", "catalog"),
+        # Stage A (Trust & Visibility). Four services, one per sub-surface; the
+        # aggregator is leaf-level under its own node because its sections are
+        # composable individually via the `section=` query parameter.
+        _node("customer_360",
+              "profile", "interactions", "sentiment", "recovery", "loyalty_journey",
+              "communication", "payments", "points", "preferences", "admin_rollup"),
+        _node("customer_explain",
+              "score_bands", "friction_bands", "phrases", "recovery_narration",
+              "next_steps", "loyalty_explanation", "churn_explanation",
+              "recovery_explanation", "posture_explanation", "validation",
+              "catalog"),
+        _node("preferences",
+              "catalog", "consents", "consent_trail", "consent_gate",
+              "contact_window", "frequency", "channel_preference", "contact_plan",
+              "update", "report"),
+        _node("self_service",
+              "recovery_status", "points_forecast", "policy_posture",
+              "status_dashboard", "visible_actions"),
         _node("audit_log",
               "record", "list", "summary", "action_catalog",
               "governed_record", "action_aliases", "action_specs",
@@ -268,7 +295,10 @@ TREE = _node(
               "session_lifecycle", "machine_credentials", "password_feedback",
               "security_posture", "step_up"),
         _node("schemas_chat",
-              "insight", "recovery", "recovery_playbooks", "retention", "snapshot_ops", "topic_ranking", "topic_policy"),
+              "insight", "recovery", "recovery_playbooks", "retention", "snapshot_ops", "topic_ranking", "topic_policy",
+              # Stage A contract families, one leaf per payload family.
+              "customer_360", "customer_explanations", "customer_recovery",
+              "preference_consent", "self_service"),
         _node("schemas_audit",
               "efficiency", "enhancements", "audit_trail",
               "governed_write", "integrity", "actors", "timeline",
