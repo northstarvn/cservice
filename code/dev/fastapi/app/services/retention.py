@@ -84,8 +84,6 @@ from app.services.chat_analytics import (
 from app.services.topics import (
     TOPIC_CATALOG,
     TOPIC_SECTORS,
-    TOPIC_THEME_GROUPS,
-    build_topic_coverage_report,
     build_topic_intelligence_report,
     build_topic_portfolio_report,
     build_topic_suggestion_report,
@@ -1317,8 +1315,22 @@ async def build_retention_recommendations(db: AsyncSession, user_id: int, window
             }
         )
 
-    # Band-derived recommendation, appended last so the pre-existing entries keep
-    # their order and the new one is strictly additive.
+    # Band-derived recommendation, appended last so the entries above keep their
+    # order and this one is strictly additive.
+    #
+    # This block referenced a local named `health` that the function never
+    # assigned, so it raised `NameError` on every call that got past the
+    # `if not snapshots` early return. It survived because the function has no
+    # callers -- `build_retention_recommendations` is unreachable from any
+    # router -- so the crash never fired. Ruff's F821 is what named it.
+    #
+    # Repaired through `build_retention_health_report` rather than by assembling
+    # the context here: that helper already does `snapshot_series_points` ->
+    # `build_retention_health_context` -> `resolve_retention_health` and is what
+    # the async dashboard helpers use, so calling it is what keeps this
+    # recommendation's band identical to the one shown everywhere else. Building
+    # the context locally would have been a second, free to drift.
+    health = build_retention_health_report(snapshots)["health"]
     if health["actions"]:
         recommendations.append(
             {

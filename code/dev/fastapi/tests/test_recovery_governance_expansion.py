@@ -43,9 +43,11 @@ from fastapi.testclient import TestClient
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from _doubles import Empty, FakeDb, Rows  # noqa: F401
+
 from app import models  # noqa: E402
 from app.main import app  # noqa: E402
-from app.rule_engine import evaluate_when, validate_when  # noqa: E402
+from app.rule_engine import validate_when  # noqa: E402
 from app.schemas.chat import (  # noqa: E402
     DissatisfactionRecoveryReport,
     InteractionSummary,
@@ -63,7 +65,6 @@ from app.services.recovery_playbooks import (  # noqa: E402
     RECOVERY_ACTION_SPECS,
     RECOVERY_CORE_PLAYBOOK_SET_VERSION,
     RECOVERY_GOVERNANCE_VERSION,
-    RECOVERY_GUARD_REASON_STATUS,
     RECOVERY_GUARD_RULES,
     RECOVERY_GUARD_SKIP_STATUS,
     RECOVERY_OUTREACH_PLAYBOOKS,
@@ -71,7 +72,6 @@ from app.services.recovery_playbooks import (  # noqa: E402
     RECOVERY_PLAYBOOK_SETS,
     RECOVERY_PLAYBOOK_SET_VERSIONS,
     RECOVERY_STATEFUL_ACTIONS,
-    build_escalation_result,
     evaluate_recovery_guards,
     evaluate_recovery_playbooks,
     plan_recovery_actions,
@@ -176,73 +176,10 @@ def _plan_item(index=0, playbook_id="pb", action="credit_points", spend=0.0, spe
     }
 
 
-class _Empty:
-    def scalars(self):
-        return self
-
-    def all(self):
-        return []
-
-    def first(self):
-        return None
-
-
-class _Rows:
-    def __init__(self, rows):
-        self.rows = list(rows)
-
-    def scalars(self):
-        return self
-
-    def all(self):
-        return self.rows
-
-    def first(self):
-        return self.rows[0] if self.rows else None
-
-
-class _FakeDb:
-    """Async session double: table-shaped execute routing + add/flush/commit."""
-
-    def __init__(self, wallets=(), chat_rows=(), bookings=(), users=(), recovery_actions=()):
-        self.wallets = list(wallets)
-        self.chat_rows = list(chat_rows)
-        self.bookings = list(bookings)
-        self.users = list(users)
-        self.recovery_actions = list(recovery_actions)
-        self.pending = []
-        self.next_id = 1
-        self.commits = 0
-
-    async def execute(self, statement, *_args, **_kwargs):
-        text = str(statement)
-        if "points_wallets" in text:
-            return _Rows(self.wallets)
-        if "chat_history" in text:
-            return _Rows(self.chat_rows)
-        if "bookings" in text:
-            return _Rows(self.bookings)
-        if "recovery_actions" in text:
-            return _Rows(self.recovery_actions)
-        if "FROM users" in text:
-            return _Rows(self.users)
-        return _Empty()
-
-    def add(self, obj):
-        if getattr(obj, "id", None) is None:
-            obj.id = self.next_id
-            self.next_id += 1
-        self.pending.append(obj)
-
-    async def flush(self):
-        pass
-
-    async def commit(self):
-        self.commits += 1
 
 
 def _seeded_db(**kwargs):
-    return _FakeDb(
+    return FakeDb(
         wallets=[
             models.PointsWallet(id=5, user_id=1, point_type="loyalty_points", balance=100.0)
         ],
@@ -542,7 +479,7 @@ class TestHistoryRow:
             failure_reason="",
         )
         record.created_at = now
-        db = _FakeDb(recovery_actions=[record])
+        db = FakeDb(recovery_actions=[record])
         rows = asyncio.run(
             recovery_playbooks._load_recovery_action_history(db, 1, now)
         )
@@ -565,7 +502,7 @@ class TestHistoryRow:
             failure_reason="",
         )
         record.created_at = now
-        db = _FakeDb(recovery_actions=[record])
+        db = FakeDb(recovery_actions=[record])
         rows = asyncio.run(recovery_playbooks._load_recovery_action_history(db, 1, now))
         assert rows[0]["spend"] == 0.0
 
@@ -1220,7 +1157,7 @@ class TestOrchestratorGuards:
         )
         recent.created_at = now
         rows = [recent]
-        db = _FakeDb(users=[1], recovery_actions=rows)
+        db = FakeDb(users=[1], recovery_actions=rows)
         payload = asyncio.run(recovery_playbooks.run_auto_recovery_pass(db))
         assert payload["users_scanned"] == 1
         # The seeded history is returned for every user by this fake, so the
@@ -1402,7 +1339,7 @@ class TestAnalytics:
         assert result["by_action"]["retired_action"]["registered"] is False
 
     def test_analytics_for_user_uses_the_loaded_history(self):
-        db = _FakeDb()
+        db = FakeDb()
         result = asyncio.run(
             recovery_playbooks.build_recovery_action_analytics_for_user(db, 7, 7)
         )

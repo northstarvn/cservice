@@ -137,7 +137,7 @@ async def get_db():
     async with SessionLocal() as session:
         try:
             yield session
-        except Exception as e:
+        except Exception:
             await session.rollback()
             raise
         finally:

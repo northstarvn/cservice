@@ -52,7 +52,6 @@ from app.services.policy_scoring import (
     COMPOSITE_RULES,
     COMPOSITE_SIGNALS,
     CONTROL_POSTURE_RULES,
-    CONTROL_POSTURE_TIER_MAP,
     HEALTH_THRESHOLDS,
     POLICY_SCORING_OPS,
     POLICY_SCORING_VERSION,
@@ -860,7 +859,6 @@ def test_the_tier_cascade_replays_the_two_pass_resolution():
 
 def test_the_cascade_reports_a_case_where_the_posture_adjustment_moves_the_tier():
     scores = compose_access_score(METRIC_SETS[2])
-    cascade = policy_tier_cascade(scores)
     # Raising the pre-adjustment access score to just under a tier boundary and
     # letting a trusted posture push it over is exactly what the second pass is
     # for. Both floors have to clear: system-premium needs 85 on *both*.

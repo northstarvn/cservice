@@ -170,14 +170,51 @@ def test_resolve_admin_select_wins_over_all() -> None:
 
 
 def test_resolve_policy_wins_over_culture_profile_mood() -> None:
+    # "pricing" rather than the "refund request" this test used to pass.
+    # The intent here is the precedence ladder -- policy beats culture, profile
+    # and mood -- and the fixture has to supply a value `build_summary` can
+    # actually produce, or the assertion is satisfied by a rule that could never
+    # fire. `sensitive_complaint` listed four unreachable strings for its whole
+    # life, so this test was passing against a dead branch and proving nothing
+    # about it. `validate_communication_tables` now checks the vocabulary, and
+    # `test_sensitive_complaint_vocabulary_is_reachable` pins the specific case.
     result = resolve_communication_strategy(
-        _context(top_issue_1="refund request", top_issue="refund request"),
+        _context(top_issue_1="pricing", top_issue="pricing"),
         locale="es_MX",
         mood={"label": "happy"},
     )
     assert result["resolved_layer"] == "policy"
     assert result["profile_id"] == "sensitive_complaint"
     assert result["params"]["tone"] == "empathic"
+
+
+def test_sensitive_complaint_vocabulary_is_reachable() -> None:
+    """Every value `sensitive_complaint` tests must be one build_summary emits.
+
+    The rule shipped testing four strings that no producer could generate, so it
+    never fired and the resolver failed soft on it. This pins both halves: the
+    declared vocabulary is a subset of the reachable set, and each value in it
+    actually resolves the policy layer.
+    """
+    from app.services.chat_analytics import PREDEFINED_POLICY_AREAS
+    from app.services.communication_strategy import (
+        COMMUNICATION_POLICY_RULES,
+        validate_communication_tables,
+    )
+
+    report = validate_communication_tables()
+    assert report["valid"] is True, report["errors"]
+
+    rule = next(r for r in COMMUNICATION_POLICY_RULES if r["policy_id"] == "sensitive_complaint")
+    values = rule["when"]["top_issue_1"]
+    reachable = {str(a).replace("_", " ") for a in PREDEFINED_POLICY_AREAS} | {"repeated concerns"}
+    assert values, "the rule should still declare a vocabulary"
+    assert set(values).issubset(reachable), sorted(set(values) - reachable)
+
+    for value in values:
+        result = resolve_communication_strategy(_context(top_issue_1=value, top_issue=value))
+        assert result["profile_id"] == "sensitive_complaint", value
+        assert result["resolved_layer"] == "policy", value
 
 
 def test_resolve_policy_numeric_when_syntax() -> None:

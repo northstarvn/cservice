@@ -22,7 +22,7 @@ from app import models
 from app.schemas import audit as audit_schemas
 from app import deps
 from app import enrichment
-from app.routers import audit, bookings, chat, topics, users, webhooks
+from app.routers import audit, bookings, chat, complaints, topics, users, webhooks
 from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
@@ -200,6 +200,7 @@ app.include_router(chat.router, tags=["chat"])
 app.include_router(topics.router, tags=["topics"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+app.include_router(complaints.router, tags=["complaints"])
 
 
 @app.get("/meta")

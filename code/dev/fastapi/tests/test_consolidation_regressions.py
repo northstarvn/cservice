@@ -18,7 +18,7 @@ These tests guard the consolidation contracts introduced across the backend:
 import inspect
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pytest
 from fastapi.testclient import TestClient

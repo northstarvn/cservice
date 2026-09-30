@@ -42,12 +42,6 @@ from sqlalchemy.orm import relationship
 import enum
 from app.db import Base  # Import Base from db.py instead of creating new one
 from app.model_bases import (  # isolated polymorphic base models
-    AccessSecurityEvent,
-    AuthenticationSecurityEvent,
-    PartitionedMixin,
-    RiskSecurityEvent,
-    SecurityEvent,
-    TenantScopedMixin,
     TimestampMixin,
 )
 
@@ -426,6 +420,21 @@ class User(Base, TimestampMixin):
         backref="user",
         cascade="all, delete-orphan",
     )
+    complaint_cases = relationship(
+        "ComplaintCase",
+        backref="user",
+        cascade="all, delete-orphan",
+    )
+    complaint_events = relationship(
+        "ComplaintEvent",
+        passive_deletes=True,
+        backref="user",
+    )
+    complaint_decisions = relationship(
+        "ComplaintDecision",
+        passive_deletes=True,
+        backref="user",
+    )
 
 class Booking(Base, TimestampMixin):
     __tablename__ = "bookings"
@@ -453,6 +462,158 @@ class Booking(Base, TimestampMixin):
         backref="booking",
         cascade="all, delete-orphan",
     )
+
+
+# --- Complaints ---------------------------------------------------------------
+#
+# Three tables, deliberately split, because they answer three different
+# questions and have three different lifetimes.
+#
+# `complaint_cases`
+#     The one row that *is* the complaint: who, what, how bad, whose hands, and
+#     which clock is running. Mutable, because a case is a live thing with a
+#     state machine. `reference` is durable and unique -- the old recovery
+#     path minted `ESC-{user}-{run_seq:03d}` from an in-process counter that
+#     reset on restart, so the first escalation for a user after a redeploy
+#     collided with every earlier one. The reference is now the row's identity.
+#
+# `complaint_events`
+#     Append-only timeline. A case row shows current state and overwrites it on
+#     every transition, so it can answer "where is it" but not "how did it get
+#     there" or "who touched it". ISO 10002 asks for a process the complainant
+#     can see, and an audit trail the organization can act on; both need the
+#     transitions, not just the destination.
+#
+# `complaint_decisions`
+#     Append-only record of what an operator decided, why, and what happened
+#     next. This is the institutional memory: a *closed* decision that was
+#     later reopened is evidence the precedent was wrong, and a decision that
+#     held is evidence it was right. Nothing else in the schema can express
+#     that, which is why it is a table and not a column on the case.
+#
+# Every vocabulary column here (category, severity, status, tier, event_type,
+# decision, outcome, resolution_code) is config-driven from
+# `app/services/complaints.py`, so it is declared in `ENUM_FIELD_SPECS` below
+# and deliberately *not* hard-constrained to today's list.
+
+
+class ComplaintCase(Base, TimestampMixin):
+    """A complaint under active handling: the SLA clock and the owner live here."""
+
+    __tablename__ = "complaint_cases"
+    __table_args__ = (
+        CheckConstraint("reopened_count >= 0", name="ck_complaint_cases_reopened_non_negative"),
+        CheckConstraint(
+            "satisfaction_score IS NULL OR (satisfaction_score >= 0 AND satisfaction_score <= 10)",
+            name="ck_complaint_cases_satisfaction_in_range",
+        ),
+        UniqueConstraint("reference", name="uq_complaint_cases_reference"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Durable and unique. This is what a customer quotes on the phone and what
+    # an agent searches; it must never depend on a process that can restart.
+    reference = Column(String(40), nullable=False, index=True)
+    category = Column(String(50), nullable=False, default="service_quality", index=True)
+    severity = Column(String(20), nullable=False, default="medium", index=True)
+    status = Column(String(30), nullable=False, default="open", index=True)
+    tier = Column(String(30), nullable=False, default="tier_1", index=True)
+    # Deliberately not a foreign key, for the reason given on
+    # `communication_overrides.set_by_admin_id`: an owner may be an external or
+    # already-deleted operator, and neither should make the row unwriteable.
+    owner_user_id = Column(Integer, nullable=True, index=True)
+    owner_team = Column(String(50), nullable=False, default="", index=True)
+
+    opened_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    first_response_at = Column(DateTime(timezone=True), nullable=True)
+    escalated_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    response_due_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    resolution_due_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    # Which configured trigger fired, and whether the engine acted by itself.
+    # The pair is the difference between "a human decided this" and "a clock
+    # decided this", which is exactly what a regulator or a reviewer asks first.
+    escalation_trigger_id = Column(String(60), nullable=False, default="", index=True)
+    auto_escalated = Column(Boolean, nullable=False, default=False, index=True)
+    regulatory = Column(Boolean, nullable=False, default=False, index=True)
+
+    resolution_code = Column(String(50), nullable=False, default="", index=True)
+    resolution_note = Column(Text, nullable=False, default="")
+    satisfaction_score = Column(Integer, nullable=True)
+    reopened_count = Column(Integer, nullable=False, default=0)
+    # The factors the engine saw when the case opened. Snapshotted because the
+    # live signals move; a later reviewer needs what was true then, not now.
+    factors_json = Column(Text, nullable=False, default="{}")
+    summary = Column(Text, nullable=False, default="")
+    source = Column(String(50), nullable=False, default="chat", index=True)
+
+
+class ComplaintEvent(Base, TimestampMixin):
+    """Append-only transition log for a complaint case."""
+
+    __tablename__ = "complaint_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    complaint_id = Column(Integer, ForeignKey("complaint_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Denormalised on purpose: every queue, SLA and workload query filters by
+    # user, and joining back to the case for it would be the join this table
+    # exists to avoid. It is kept consistent by the service, not by a trigger.
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(50), nullable=False, default="opened", index=True)
+    from_status = Column(String(30), nullable=False, default="")
+    to_status = Column(String(30), nullable=False, default="")
+    from_tier = Column(String(30), nullable=False, default="")
+    to_tier = Column(String(30), nullable=False, default="")
+    actor_user_id = Column(Integer, nullable=True, index=True)
+    actor_role = Column(String(30), nullable=False, default="")
+    detail_json = Column(Text, nullable=False, default="{}")
+    note = Column(Text, nullable=False, default="")
+
+
+class ComplaintDecision(Base, TimestampMixin):
+    """Append-only record of an escalation decision and its eventual outcome.
+
+    `factors_json` is the decision-support snapshot as the decider saw it, and
+    `precedent_refs_json` is the set of past cases that were cited. Both are
+    frozen at decision time on purpose: the live feeds keep moving, so a row
+    that re-read them later would report a reasoning that was never actually
+    given.
+    """
+
+    __tablename__ = "complaint_decisions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    complaint_id = Column(Integer, ForeignKey("complaint_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    decision = Column(String(60), nullable=False, default="escalate", index=True)
+    outcome = Column(String(30), nullable=False, default="proposed", index=True)
+    from_tier = Column(String(30), nullable=False, default="")
+    to_tier = Column(String(30), nullable=False, default="")
+    # A decision may name an operator who is not a user record; same reasoning
+    # as `complaint_cases.owner_user_id`.
+    decided_by_id = Column(Integer, nullable=True, index=True)
+    decided_by_role = Column(String(30), nullable=False, default="")
+    # Which assurance level the decision was taken under. Recorded so that
+    # "admin" and "admin who re-authenticated for this" stay distinguishable.
+    step_up_level = Column(String(10), nullable=False, default="")
+    rationale = Column(Text, nullable=False, default="")
+    factors_json = Column(Text, nullable=False, default="{}")
+    precedent_refs_json = Column(Text, nullable=False, default="[]")
+    auto_applied = Column(Boolean, nullable=False, default=False)
+    # A later decision that reverses this one. A real foreign key, unlike the
+    # actor columns, because it does point at a row in this same table.
+    superseded_by_id = Column(Integer, ForeignKey("complaint_decisions.id", ondelete="SET NULL"), nullable=True, index=True)
+    # What the case actually did afterwards. This is the column that turns a
+    # decision log into evidence: `reopened` and `escalated_further` are what
+    # mark a precedent as bad.
+    outcome_observed = Column(String(40), nullable=False, default="", index=True)
+    outcome_recorded_at = Column(DateTime(timezone=True), nullable=True)
+
+
 # =============================================================================
 # Metadata layer: what the schema above means, and what it does not protect
 # =============================================================================
@@ -468,8 +629,10 @@ class Booking(Base, TimestampMixin):
 # here imports `app.services.*` -- the services import the models, so a
 # reverse import would be a cycle.
 
-from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.orm import RelationshipProperty
+# noqa: E402 -- deliberate. The metadata layer begins below the expansion
+# marker and this import belongs to it; hoisting it above the DDL layer
+# would erase the separation the module docstring describes.
+from sqlalchemy.orm import RelationshipProperty  # noqa: E402
 
 # --- Sensitivity vocabulary ---------------------------------------------------
 #
@@ -569,6 +732,12 @@ FIELD_SENSITIVITY: dict[str, str] = {
     # because a consent state is exactly what an export needs and contains
     # nothing that identifies anybody.
     "consents_json": "behavioral",
+    # A complaint is the most sensitive thing a customer can write about us.
+    # The snapshot of the signals that opened it, the operator's written
+    # reasoning, and the precedent set cited all describe a person mid-dispute.
+    "factors_json": "content",
+    "precedent_refs_json": "content",
+    "resolution_note": "content",
     # money
     "principal": "financial",
     "annual_rate": "financial",
@@ -619,6 +788,26 @@ TABLE_FIELD_SENSITIVITY: dict[str, str] = {
     "security_events.summary": "behavioral",
     # a username is an identifier, not free text, but it is still a login name
     "users.username": "identifier",
+    # A case reference is an identifier, not content, even though it is a
+    # string: it is what support and the customer use to find the row, and
+    # redacting it would make the complaint undiscussable.
+    "complaint_cases.reference": "identifier",
+    # Who held a complaint, and at what tier, is operational routing detail.
+    # It is not the complainant's own data, so it stays in bulk exports.
+    "complaint_cases.owner_user_id": "internal",
+    "complaint_cases.owner_team": "internal",
+    "complaint_cases.tier": "internal",
+    "complaint_cases.status": "internal",
+    # The operator's own role and assurance level on a decision is
+    # authorisation metadata. It is what makes a decision auditable, so it must
+    # not be redacted away from an auditor reading the decision history.
+    "complaint_decisions.decided_by_role": "internal",
+    "complaint_decisions.step_up_level": "internal",
+    "complaint_events.actor_role": "internal",
+    # How a customer rated the outcome is behavioural, and it is the one number
+    # in this family that belongs in a bulk export.
+    "complaint_cases.satisfaction_score": "behavioral",
+    "complaint_cases.reopened_count": "behavioral",
 }
 
 # --- JSON payload columns ----------------------------------------------------
@@ -671,6 +860,54 @@ ENUM_VOCABULARY_ALIASES: dict[str, dict[str, str]] = {
         "consult": "consultation",
         "consulting": "consultation",
         "delivery_": "delivery",
+    },
+    # Complaint vocabularies. Each is declared here rather than inline so a
+    # second complaint column added later inherits the same accepted spellings
+    # for free -- which is the whole reason `vocabulary` exists.
+    "complaint_status": {
+        "new": "open",
+        "reopened": "open",
+        "done": "closed",
+        "resolved_closed": "closed",
+        "cancelled": "withdrawn",
+        "canceled": "withdrawn",
+    },
+    "complaint_severity": {
+        "med": "medium",
+        "minor": "low",
+        "major": "high",
+        "severe": "critical",
+        "sev1": "critical",
+        "sev2": "high",
+    },
+    "complaint_tier": {
+        "l1": "tier_1",
+        "l2": "tier_2",
+        "l3": "tier_3",
+        "level1": "tier_1",
+        "level2": "tier_2",
+        "level3": "tier_3",
+        "senior": "executive",
+    },
+    "complaint_category": {
+        "quality": "service_quality",
+        "billing_dispute": "billing",
+        "data_protection": "privacy",
+        "booking": "booking_failure",
+        "misc": "other",
+    },
+    "complaint_decision": {
+        "keep": "hold",
+        "accept": "escalate",
+        "reject": "decline",
+        "close": "resolve",
+        "assign_owner": "assign",
+    },
+    "complaint_decision_outcome": {
+        "auto": "auto_applied",
+        "rejected": "declined",
+        "reversed": "superseded",
+        "accepted": "applied",
     },
 }
 
@@ -826,6 +1063,162 @@ ENUM_FIELD_SPECS: dict[str, dict[str, Any]] = {
             "added to the config is writable before the DDL catches up"
         ),
     },
+    # --- Complaints ------------------------------------------------------------
+    # Every one of these is config-driven from `app/services/complaints.py`.
+    # They are declared here for the same reason `user_consent_events.purpose`
+    # is: a value that cannot be spelled correctly becomes a row no `filter()`
+    # ever finds again. None of them is DB-enforced, so adding a row to the
+    # config does not need a migration.
+    "complaint_cases.status": {
+        "enum": None,
+        "values": (
+            "open",
+            "acknowledged",
+            "in_progress",
+            "escalated",
+            "resolved",
+            "closed",
+            "withdrawn",
+        ),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"new": "open", "reopened": "open", "done": "closed", "cancelled": "withdrawn"},
+        "vocabulary": "complaint_status",
+        "note": (
+            "the vocabulary is COMPLAINT_STATUSES in services/complaints.py; "
+            "'open' is reachable again by way of reopened_count, so a case that "
+            "came back is open-with-a-history, not a distinct status"
+        ),
+    },
+    "complaint_cases.severity": {
+        "enum": None,
+        "values": ("low", "medium", "high", "critical"),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"med": "medium", "severe": "critical", "minor": "low", "major": "high"},
+        "vocabulary": "complaint_severity",
+        "note": (
+            "the same four bands as retention_snapshots.churn_risk and "
+            "model_bases.SEVERITY_BANDS, kept as its own vocabulary so a "
+            "complaint can be severe while a customer is low churn risk"
+        ),
+    },
+    "complaint_cases.tier": {
+        "enum": None,
+        "values": ("tier_1", "tier_2", "tier_3", "executive"),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"l1": "tier_1", "l2": "tier_2", "l3": "tier_3", "senior": "executive"},
+        "vocabulary": "complaint_tier",
+        "note": "the vocabulary is ESCALATION_TIERS in services/complaints.py, which is also the routing table",
+    },
+    "complaint_cases.category": {
+        "enum": None,
+        "values": (
+            "service_quality",
+            "billing",
+            "refund",
+            "privacy",
+            "booking_failure",
+            "communication",
+            "access_tier",
+            "other",
+        ),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"billing_dispute": "billing", "data_protection": "privacy", "quality": "service_quality"},
+        "vocabulary": "complaint_category",
+        "note": "the vocabulary is COMPLAINT_CATEGORIES in services/complaints.py",
+    },
+    "complaint_cases.resolution_code": {
+        "enum": None,
+        "values": (
+            "refunded",
+            "credited",
+            "corrected",
+            "explained",
+            "apology_offered",
+            "no_action_required",
+            "withdrawn_by_complainant",
+            "unresolved",
+        ),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"refund": "refunded", "goodwill": "credited"},
+        "note": (
+            "blank while a case is open, which is the point: it is the "
+            "categorical answer to 'what did we actually do', and it is the "
+            "field a precedent is weighted on"
+        ),
+    },
+    "complaint_events.event_type": {
+        "enum": None,
+        "values": (
+            "opened",
+            "acknowledged",
+            "assigned",
+            "escalated",
+            "de_escalated",
+            "note_added",
+            "status_changed",
+            "resolved",
+            "closed",
+            "reopened",
+            "withdrawn",
+            "sla_breached",
+            "auto_escalated",
+        ),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"comment": "note_added", "note": "note_added", "reopen": "reopened"},
+        "note": (
+            "note_added carries no status or tier change, which is what makes "
+            "this a timeline rather than a second, sparser state machine"
+        ),
+    },
+    "complaint_decisions.decision": {
+        "enum": None,
+        "values": (
+            "escalate",
+            "hold",
+            "decline",
+            "resolve",
+            "assign",
+            "reopen",
+            "waive_guard",
+            "offer_goodwill",
+        ),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"keep": "hold", "accept": "escalate", "reject": "decline", "close": "resolve"},
+        "vocabulary": "complaint_decision",
+        "note": "the vocabulary is COMPLAINT_DECISIONS in services/complaints.py",
+    },
+    "complaint_decisions.outcome": {
+        "enum": None,
+        "values": ("proposed", "applied", "auto_applied", "overridden", "declined", "superseded"),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"auto": "auto_applied", "rejected": "declined", "reversed": "superseded"},
+        "vocabulary": "complaint_decision_outcome",
+        "note": (
+            "'proposed' is a recommendation nobody acted on and it is a real "
+            "outcome, not a pending state -- the row is never updated to say so, "
+            "because the next decision supersedes it instead"
+        ),
+    },
+    "complaint_decisions.outcome_observed": {
+        "enum": None,
+        "values": ("", "held", "resolved", "reopened", "escalated_further", "complainant_left", "no_contact"),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"churned": "complainant_left", "left": "complainant_left"},
+        "note": (
+            "empty until the case reaches a terminal state; this is the column "
+            "that decides whether a precedent is treated as sound, so it is "
+            "indexed and never collapsed into the decision's own outcome"
+        ),
+    },
 }
 # `interaction_signals.source` is deliberately *absent* from the table above even
 # though it is a non-nullable String like every entry in it. All seven `source`
@@ -899,6 +1292,37 @@ TABLE_LIFECYCLE: dict[str, dict[str, Any]] = {
         "retention_days": 1095,
         "owner": "services/recovery_playbooks.py",
         "note": "one live outcome per user; the JSON columns carry the history within it",
+    },
+    "complaint_cases": {
+        "write_mode": MUTABLE,
+        "retention_days": 2555,
+        "owner": "services/complaints.py",
+        "note": (
+            "the only complaint table that is updated in place, because a case is a "
+            "live state machine. Its history is the two append-only tables below; "
+            "the row itself is the current state and nothing more. 2555 days "
+            "(seven years) is the retention a regulator may expect for a "
+            "complaint record, not a number anything here enforces"
+        ),
+    },
+    "complaint_events": {
+        "write_mode": APPEND_ONLY,
+        "retention_days": 2555,
+        "owner": "services/complaints.py",
+        "note": (
+            "the case timeline. A correction is a new row, never an edit, so the "
+            "sequence of what an operator did stays reconstructable"
+        ),
+    },
+    "complaint_decisions": {
+        "write_mode": APPEND_ONLY,
+        "retention_days": 2555,
+        "owner": "services/complaints.py",
+        "note": (
+            "the institutional memory. outcome_observed is the one column written "
+            "after the fact, once the case reaches a terminal state -- an append "
+            "only table can still learn something, it just cannot rewrite it"
+        ),
     },
     "topic_selections": {
         "write_mode": SNAPSHOT,
@@ -1068,7 +1492,19 @@ OPEN_VOCABULARY_COLUMNS: dict[str, dict[str, Any]] = {
 OPEN_TEXT_COLUMNS: dict[str, str] = {
     "source": "a subsystem or channel label, added to freely (chat, api, admin, import, booking-service, ...)",
     "currency": "an ISO 4217 code; a lookup table, not a fixed vocabulary",
-    "event_type": "booking lifecycle events, extended by the state machine",
+    # Two vocabularies share this column name. `booking_events.event_type` holds
+    # lifecycle events extended by the state machine; `complaint_events.event_type`
+    # comes from COMPLAINT_EVENT_TYPES, which is config-driven. Neither is a
+    # closed set, so neither is declared as an enum -- and because a dict has one
+    # value per key, both descriptions have to live here or one of them is
+    # silently lost. They used to be two separate entries, and the complaint one
+    # won.
+    "event_type": (
+        "two vocabularies share this column name: booking lifecycle events "
+        "(extended by the state machine) and complaint events, which come from "
+        "COMPLAINT_EVENT_TYPES in services/complaints.py. Both are open, so "
+        "neither is declared as an enum"
+    ),
     "action": "recovery playbook actions come from PLAYBOOKS, which is config-driven",
     "area": "policy areas come from the area catalog, which is config-driven",
     "snapshot_type": "retention snapshot kinds, extended by services/retention.py",
@@ -1077,6 +1513,9 @@ OPEN_TEXT_COLUMNS: dict[str, str] = {
     "playbook_id": "recovery playbooks are config-driven",
     "preference_key": "preference keys come from PREFERENCE_CATALOG, which is config-driven",
     "purpose": "consent purposes come from CONSENT_PURPOSES, which is config-driven",
+    "category": "complaint categories come from COMPLAINT_CATEGORIES, which is config-driven",
+    "tier": "escalation tiers come from ESCALATION_TIERS, which is config-driven",
+    "resolution_code": "complaint resolution codes come from COMPLAINT_RESOLUTION_CODES, which is config-driven",
     "reference": "an external identifier, arbitrary text by nature",
     "policy_id": "arrears interest policies are config-driven",
     "note": "unbounded TEXT prose written by a human or an operator; no set of values is conceivable",
@@ -1165,6 +1604,77 @@ UNCONSTRAINED_REFERENCE_COLUMNS: dict[str, dict[str, str]] = {
             "TenantScopedMixin is applied to a table that predates multi-tenancy, "
             "and no tenants table exists in this schema, so the column is an opaque "
             "scope label rather than a foreign key"
+        ),
+    },
+    "complaint_cases.owner_user_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "nullable, and the same reasoning as "
+            "communication_overrides.set_by_admin_id: a complaint may be owned by an "
+            "external or already-deleted operator, and a foreign key to users.id "
+            "would make the case unassignable to them. A queue query that assumes "
+            "every owner is a live user row is wrong"
+        ),
+    },
+    "complaint_events.actor_user_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "nullable because the background escalation sweep and the engine's own "
+            "auto-escalation write rows with no human actor; the pairing of "
+            "actor_user_id with actor_role is what makes 'the clock did it' "
+            "distinguishable from 'an admin did it'"
+        ),
+    },
+    "complaint_decisions.decided_by_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "nullable and deliberately not a foreign key, for the same reason as "
+            "complaint_cases.owner_user_id; decided_by_role and step_up_level carry "
+            "the authority the id alone cannot prove"
+        ),
+    },
+    "complaint_cases.category": {
+        "severity": "out_of_band",
+        "reason": "a reference into the COMPLAINT_CATEGORIES config table, not a row",
+    },
+    "complaint_cases.tier": {
+        "severity": "out_of_band",
+        "reason": (
+            "a reference into the ESCALATION_TIERS config table, which is also the "
+            "routing table; a tier retired from the config leaves a historical id "
+            "that is still the correct record of where a case was handled"
+        ),
+    },
+    "complaint_cases.escalation_trigger_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "a reference into the ESCALATION_TRIGGERS config table, not a row. The "
+            "column being indexed and non-empty is deliberate: 'which configured "
+            "rule fired' is the first question asked about any escalation"
+        ),
+    },
+    "complaint_cases.resolution_code": {
+        "severity": "out_of_band",
+        "reason": "a reference into the COMPLAINT_RESOLUTION_CODES config table, not a row",
+    },
+    "complaint_events.event_type": {
+        "severity": "out_of_band",
+        "reason": "a reference into the COMPLAINT_EVENT_TYPES config table, not a row",
+    },
+    "complaint_decisions.decision": {
+        "severity": "out_of_band",
+        "reason": "a reference into the COMPLAINT_DECISIONS config table, not a row",
+    },
+    "complaint_decisions.outcome": {
+        "severity": "out_of_band",
+        "reason": "a reference into the COMPLAINT_DECISION_OUTCOMES config table, not a row",
+    },
+    "complaint_decisions.outcome_observed": {
+        "severity": "out_of_band",
+        "reason": (
+            "a reference into the COMPLAINT_OUTCOMES_OBSERVED config table. It "
+            "carries the empty string as a first-class value meaning 'not known "
+            "yet', which is why it is not simply nullable"
         ),
     },
 }
@@ -1466,14 +1976,6 @@ def dumps_json(value: Any) -> str:
 # database refuses nothing and a reader can tell a typo from a real value.
 
 
-def enum_field_id(table_name: str, column_name: str) -> str | None:
-    """The ``ENUM_FIELD_SPECS`` key for a column, or ``None`` if it has no vocabulary."""
-    key = f"{table_name}.{column_name}"
-    if key in ENUM_FIELD_SPECS:
-        return key
-    if key in OPEN_VOCABULARY_COLUMNS:
-        return key
-    return None
 
 
 def enum_field_spec(table_name: str, column_name: str) -> dict[str, Any] | None:
@@ -1646,54 +2148,6 @@ def _column_nullable(table_name: str, column_name: str) -> bool:
     return bool(table.columns[column_name].nullable)
 
 
-def enum_field_report() -> dict[str, Any]:
-    """Every declared vocabulary, split by whether the database enforces it.
-
-    The split is the useful part: ``enforced`` fields can be trusted to reject a
-    bad value, ``declared`` fields are a promise the application keeps, and
-    ``declared`` is not a substitute for a constraint.
-    """
-    enforced: list[dict[str, Any]] = []
-    declared: list[dict[str, Any]] = []
-    keys = sorted(set(ENUM_FIELD_SPECS) | set(OPEN_VOCABULARY_COLUMNS))
-    for key in keys:
-        # Read through enum_field_spec so the reported aliases are the merged
-        # set a caller would actually get from normalize_enum_value().
-        spec = enum_field_spec(*key.split(".", 1)) or {}
-        row = {
-            "field": key,
-            "values": [str(value) for value in spec.get("values", ())],
-            "aliases": dict(spec.get("aliases", {}) or {}),
-            "vocabulary": spec.get("vocabulary"),
-            "enforced_by": spec.get("enforced_by"),
-            "native_enum": spec.get("enum") is not None,
-            "note": spec.get("note"),
-        }
-        (enforced if spec.get("enforced") else declared).append(row)
-    return {
-        "total": len(enforced) + len(declared),
-        "enforced_count": len(enforced),
-        "declared_count": len(declared),
-        "enforced": enforced,
-        "declared": declared,
-        "vocabularies": {
-            name: dict(aliases) for name, aliases in sorted(ENUM_VOCABULARY_ALIASES.items())
-        },
-        "alias_count": sum(
-            len((enum_field_spec(*key.split(".", 1)) or {}).get("aliases", {}) or {})
-            for key in keys
-        ),
-        "guard_helpers": [
-            "normalize_enum_value(table, column, value)",
-            "validate_enum_field(table, column, value)",
-            "coerce_booking_status(value)",
-            "coerce_service_type(value)",
-        ],
-        "note": (
-            "a declared field is only as good as its writer: ENUM_FIELD_SPECS "
-            "documents the vocabulary, it does not add a CHECK constraint"
-        ),
-    }
 
 
 # --- Serialisation ------------------------------------------------------------
@@ -1722,108 +2176,6 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def model_to_dict(
-    instance: Any,
-    *,
-    preset: str | None = None,
-    parse_json: bool = True,
-    include_relationships: bool = False,
-    relationship_depth: int = 0,
-    max_depth: int = 2,
-    include: Any = None,
-    omit: Any = None,
-    skip_unloaded: bool = True,
-    _seen: frozenset[int] = frozenset(),
-) -> dict[str, Any]:
-    """Serialise one ORM instance, applying a redaction preset to every column.
-
-    Driven entirely by :func:`projection_for`, so adding a column cannot
-    silently start leaking it: an unclassified column lands in ``internal``,
-    which the ``public`` preset redacts like anything else, and a new class
-    added to ``SENSITIVITY_CLASSES`` immediately has a defined behaviour in all
-    four presets.
-
-    Relationships are opt-in and depth-limited, because the default for a
-    *redacting* serialiser has to be "nothing extra". A cycle guard means a
-    bidirectional relationship produces one level of nesting and then a stop,
-    not a recursion error.
-
-    ``skip_unloaded`` only applies to persistent instances, where reading an
-    unloaded attribute would emit a query. On a transient instance nothing has
-    been written yet, so an "unset" column reads as ``None`` and *is* part of the
-    payload -- dropping it would make a freshly built object look like a partial
-    one.
-    """
-    if instance is None:
-        return {}
-    try:
-        mapper = sa_inspect(type(instance))
-    except Exception:
-        # Not an ORM class at all (an int, a dict, a dataclass from another
-        # layer). Report the value rather than raising: a serialiser that
-        # throws on an unexpected row shape gets wrapped in a try/except by its
-        # caller, and the row silently disappears instead.
-        if isinstance(instance, dict):
-            return {str(key): _json_safe(value) for key, value in instance.items()}
-        return {"value": _json_safe(instance)}
-    if not hasattr(mapper, "column_attrs"):
-        return {"value": _json_safe(instance)}
-    state = sa_inspect(instance)
-    unloaded = getattr(state, "unloaded", frozenset()) if getattr(state, "persistent", False) else frozenset()
-    included = {str(name) for name in include} if include else None
-    omitted = {str(name) for name in omit} if omit else set()
-    payload: dict[str, Any] = {}
-    for attr in mapper.column_attrs:
-        key = attr.key
-        if included is not None and key not in included:
-            continue
-        if key in omitted:
-            continue
-        if skip_unloaded and key in unloaded:
-            continue
-        sensitivity = sensitivity_of(mapper.local_table.name, key)
-        projection = projection_for(sensitivity, preset=preset)
-        if projection == "omit":
-            continue
-        value = getattr(instance, key, None)
-        if is_json_column(key) and parse_json:
-            value = loads_json(value, _json_default_container(attr.columns[0]))
-        if projection == "redact":
-            payload[key] = SENSITIVITY_PLACEHOLDER
-        else:
-            payload[key] = _json_safe(value)
-    if include_relationships and relationship_depth < max_depth:
-        for name, prop in _relationships_of(mapper):
-            if name in omitted or (included is not None and name not in included):
-                continue
-            if getattr(prop, "uselist", False):
-                related = getattr(instance, name, None) or []
-                payload[name] = [
-                    model_to_dict(
-                        item,
-                        preset=preset,
-                        parse_json=parse_json,
-                        include_relationships=True,
-                        relationship_depth=relationship_depth + 1,
-                        max_depth=max_depth,
-                        _seen=_seen | {id(instance)},
-                    )
-                    for item in related
-                    if id(item) not in _seen
-                ]
-            else:
-                related = getattr(instance, name, None)
-                if related is not None and id(related) not in _seen:
-                    payload[name] = model_to_dict(
-                        related,
-                        preset=preset,
-                        parse_json=parse_json,
-                        include_relationships=True,
-                        relationship_depth=relationship_depth + 1,
-                        max_depth=max_depth,
-                        _seen=_seen | {id(instance)},
-                    )
-    return payload
 
 
 def model_to_rows(instances: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -1949,120 +2301,8 @@ def unbacked_enum_like_columns() -> list[dict[str, Any]]:
     return findings
 
 
-def check_constraint_coverage() -> dict[str, Any]:
-    """Which numeric columns a CHECK constraint guards, and which it does not.
-
-    Every ``Float`` column is reported, not just the unguarded ones: a column
-    that is guarded is a claim the schema makes, and a reader wants to see the
-    claim. ``expectation`` separates the three cases the report can distinguish
-    -- guarded, deliberately signed, or unguarded.
-
-    The reported gap is *advisory only*. Adding a CHECK constraint is new DDL and
-    would need a migration, so this function describes the situation rather than
-    promising that nothing here is wrong.
-    """
-    checks_by_table: dict[str, list[str]] = {}
-    for table_name in all_table_names():
-        table = get_table(table_name)
-        if table is None:
-            continue
-        checks_by_table[table_name] = [
-            str(constraint.sqltext) for constraint in table.constraints if constraint.__class__.__name__ == "CheckConstraint"
-        ]
-    rows: list[dict[str, Any]] = []
-    unguarded: list[str] = []
-    for table_name in all_table_names():
-        table = get_table(table_name)
-        if table is None:
-            continue
-        checks = checks_by_table.get(table_name, [])
-        for column in table.columns:
-            if not isinstance(column.type, Float):
-                continue
-            key = f"{table_name}.{column.name}"
-            matched = [check for check in checks if column.name in check]
-            if matched:
-                expectation = "guarded"
-            elif key in SIGNED_QUANTITY_COLUMNS:
-                expectation = "signed_by_design"
-            else:
-                expectation = "unguarded"
-                unguarded.append(key)
-            rows.append(
-                {
-                    "field": key,
-                    "nullable": bool(column.nullable),
-                    "default": _python_default(column),
-                    "expectation": expectation,
-                    "checks": matched,
-                    "reason": SIGNED_QUANTITY_COLUMNS.get(key) if expectation != "guarded" else None,
-                }
-            )
-    return {
-        "float_columns": len(rows),
-        "guarded": [row["field"] for row in rows if row["expectation"] == "guarded"],
-        "signed_by_design": [row["field"] for row in rows if row["expectation"] == "signed_by_design"],
-        "unguarded": unguarded,
-        "columns": rows,
-        "all_checks": {name: checks_by_table[name] for name in sorted(checks_by_table) if checks_by_table[name]},
-        "severity": "advisory",
-        "note": (
-            "adding a CHECK constraint changes the emitted DDL and needs a migration; "
-            "this report is descriptive, and the unguarded list is a place to start "
-            "when one is warranted"
-        ),
-    }
 
 
-def referential_integrity_gaps() -> list[dict[str, Any]]:
-    """``*_id`` integer columns that carry no foreign key.
-
-    Three levels of severity, because they are not the same problem:
-
-    * ``dangling_likely`` -- NOT NULL with no foreign key and no declared reason
-      to be one. A row either points at a real parent or the database accepted a
-      lie.
-    * ``dangling_possible`` -- nullable, so "no parent" is representable and
-      legitimate, but "deleted parent" is indistinguishable from it. Also used
-      for a declared entry whose target table genuinely exists.
-    * ``out_of_band`` -- declared in :data:`UNCONSTRAINED_REFERENCE_COLUMNS` as
-      something that is deliberately not a foreign key (a room id with no rooms
-      table, an admin id that may not be a user at all).
-
-    Like :func:`check_constraint_coverage`, this is descriptive: adding a
-    foreign key is new DDL, so the gap is reported and left alone.
-    """
-    findings: list[dict[str, Any]] = []
-    for table_name in all_table_names():
-        table = get_table(table_name)
-        if table is None:
-            continue
-        for column in table.columns:
-            if not column.name.endswith("_id") or column.primary_key:
-                continue
-            if column.foreign_keys:
-                continue
-            key = f"{table_name}.{column.name}"
-            declared = UNCONSTRAINED_REFERENCE_COLUMNS.get(key)
-            if declared is not None:
-                severity = str(declared.get("severity", "dangling_possible"))
-            elif column.nullable:
-                severity = "dangling_possible"
-            else:
-                severity = "dangling_likely"
-            findings.append(
-                {
-                    "field": key,
-                    "type": str(column.type),
-                    "nullable": bool(column.nullable),
-                    "indexed": bool(column.index),
-                    "severity": severity,
-                    "declared": declared is not None,
-                    "reason": declared.get("reason") if declared else None,
-                }
-            )
-    order = {"dangling_likely": 0, "dangling_possible": 1, "out_of_band": 2}
-    return sorted(findings, key=lambda row: (order.get(row["severity"], 9), row["field"]))
 
 
 def build_relationship_catalog() -> dict[str, Any]:
@@ -2102,17 +2342,25 @@ def build_relationship_catalog() -> dict[str, Any]:
         for name, prop in _relationships_of(representative):
             target_table = prop.mapper.local_table.name
             cascade = _cascade_modes(prop)
-            pairs = []
-            try:
-                pairs = [
-                    {
-                        "local": f"{parent.name}.{local.name}",
-                        "remote": f"{remote_table.name}.{remote.name}",
-                    }
-                    for local, remote, remote_table in prop.synchronize_pairs
-                ]
-            except Exception:  # pragma: no cover - defensive: mapper introspection varies
-                pairs = []
+            # `synchronize_pairs` yields (remote_column, local_column) 2-tuples.
+            #
+            # This block has been broken in two independent ways, and both were
+            # hidden by a bare `except Exception`, so `join_columns` was an empty
+            # list for every relationship in the catalog:
+            #   1. it unpacked three names from a 2-tuple -> ValueError, always;
+            #   2. it then referenced `parent`, which is never assigned in this
+            #      function -> NameError.
+            # No try/except now, deliberately: this is deterministic mapper
+            # introspection, verified against all 27 relationships, so a future
+            # breakage should be loud rather than silently reporting an empty
+            # column list again.
+            pairs = [
+                {
+                    "local": f"{table_name}.{local.name}",
+                    "remote": f"{remote.table.name}.{remote.name}",
+                }
+                for remote, local in prop.synchronize_pairs
+            ]
             relationships.append(
                 {
                     "table": table_name,
@@ -2644,7 +2892,10 @@ def register_entity_spec(cls: type) -> type:
 
 # Apply the decorator to every model class defined above (import order means
 # they are already bound, so we just iterate the classes in this module).
-import sys as _sys
+# noqa: E402 -- the decorator sweep below has to run after every model class
+# in the module is bound, so it cannot live at the top.
+import sys as _sys  # noqa: E402
+
 _this_module = _sys.modules[__name__]
 for _name, _obj in list(vars(_this_module).items()):
     if isinstance(_obj, type) and hasattr(_obj, "__table__") and _obj is not _this_module.Base:

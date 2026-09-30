@@ -11,10 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -243,7 +242,7 @@ class TestEnrichmentCache:
         cache.invalidate("rule1")
         stats = cache.stats()
         assert stats["entries"] == 1
-        assert not cache.get("rule2", {"a": 1}) is None
+        assert cache.get("rule2", {"a": 1}) is not None
 
 
 # ---------------------------------------------------------------------------

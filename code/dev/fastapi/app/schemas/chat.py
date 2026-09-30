@@ -2212,3 +2212,380 @@ class PolicyPostureSummary(BaseModel):
     plain_language: str
     restrictions: List[str] = Field(default_factory=list)
     benefits: List[str] = Field(default_factory=list)
+
+# --- Complaints ---------------------------------------------------------------
+#
+# The shapes are mostly permissive `Dict[str, Any]` on purpose. A decision
+# dossier is a composition of ten feeds each with its own provenance, and
+# mirroring every one of them as a typed model would mean a new Pydantic class
+# per feed and a breaking schema change the first time a feed gains a field.
+# The *contract that matters* -- that the feed set, the guard set and the
+# vocabulary are published by the service catalog -- is enforced there instead.
+
+
+class ComplaintOpenIn(BaseModel):
+    category: str = "service_quality"
+    severity: Optional[str] = None
+    summary: str = ""
+    source: str = "chat"
+    regulatory: Optional[bool] = None
+
+
+class ComplaintEventOut(BaseModel):
+    id: Optional[int] = None
+    complaint_id: Optional[int] = None
+    event_type: str = ""
+    from_status: str = ""
+    to_status: str = ""
+    from_tier: str = ""
+    to_tier: str = ""
+    actor_user_id: Optional[int] = None
+    actor_role: str = ""
+    detail: Dict[str, Any] = Field(default_factory=dict)
+    note: str = ""
+    occurred_at: Optional[datetime] = None
+
+
+class ComplaintDecisionOut(BaseModel):
+    id: Optional[int] = None
+    complaint_id: Optional[int] = None
+    decision: str = ""
+    outcome: str = ""
+    from_tier: str = ""
+    to_tier: str = ""
+    decided_by_id: Optional[int] = None
+    decided_by_role: str = ""
+    step_up_level: str = ""
+    rationale: str = ""
+    factors: Dict[str, Any] = Field(default_factory=dict)
+    precedent_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    auto_applied: bool = False
+    superseded_by_id: Optional[int] = None
+    outcome_observed: str = ""
+    outcome_recorded_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+
+
+class ComplaintCaseOut(BaseModel):
+    id: Optional[int] = None
+    user_id: Optional[int] = None
+    reference: str = ""
+    category: str = ""
+    severity: str = ""
+    status: str = ""
+    tier: str = ""
+    owner_user_id: Optional[int] = None
+    owner_team: str = ""
+    opened_at: Optional[datetime] = None
+    acknowledged_at: Optional[datetime] = None
+    first_response_at: Optional[datetime] = None
+    escalated_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+    response_due_at: Optional[datetime] = None
+    resolution_due_at: Optional[datetime] = None
+    escalation_trigger_id: str = ""
+    auto_escalated: bool = False
+    regulatory: bool = False
+    resolution_code: str = ""
+    resolution_note: str = ""
+    satisfaction_score: Optional[int] = None
+    reopened_count: int = 0
+    factors: Dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+    source: str = ""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # Set on the open response when the customer already has a live case in this
+    # category. Reported rather than enforced: a repeat complaint is legitimate.
+    existing_open_case: Optional[Dict[str, Any]] = None
+    # Present on the list payload only; the single-case payload replaces them
+    # with the full rows.
+    age_hours: Optional[float] = None
+    sla_response_overdue_hours: Optional[float] = None
+    sla_resolution_overdue_hours: Optional[float] = None
+    timeline: List[ComplaintEventOut] = Field(default_factory=list)
+    decisions: List[ComplaintDecisionOut] = Field(default_factory=list)
+
+
+class ComplaintFeedOut(BaseModel):
+    feed_id: str
+    label: str = ""
+    kind: str = ""
+    source: str = ""
+    required: bool = False
+    async_only: bool = False
+    available: bool = False
+    observed: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.0
+    citation: str = ""
+    observed_at: Optional[datetime] = None
+    age_seconds: Optional[float] = None
+    stale: Optional[bool] = None
+    gap: str = ""
+    note: str = ""
+
+
+class ComplaintDossierOut(BaseModel):
+    generated_at: datetime
+    feeds: List[ComplaintFeedOut] = Field(default_factory=list)
+    declared_feeds: List[str] = Field(default_factory=list)
+    present_feeds: List[str] = Field(default_factory=list)
+    missing_required_feeds: List[str] = Field(default_factory=list)
+    unavailable_required_feeds: List[str] = Field(default_factory=list)
+    stale_feeds: List[str] = Field(default_factory=list)
+    complete: bool = False
+    confidence: float = 0.0
+    by_kind: Dict[str, List[str]] = Field(default_factory=dict)
+    note: str = ""
+
+
+class ComplaintPrecedentItem(BaseModel):
+    complaint_id: Optional[int] = None
+    reference: str = ""
+    category: str = ""
+    severity: str = ""
+    resolution_code: str = ""
+    resolution_note: str = ""
+    decided_by_role: str = ""
+    decided_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+    same_complainant: bool = False
+    # A candidate with no close date scores 0.0 on recency -- the same number a
+    # decades-old case gets -- so the two are reported differently rather than
+    # being indistinguishable in the score.
+    recency_available: bool = False
+    outcome_observed: str = ""
+    outcome_multiplier: float = 0.0
+    components: Dict[str, float] = Field(default_factory=dict)
+    similarity: float = 0.0
+    score: float = 0.0
+    vindicated: bool = False
+    contradicted: bool = False
+    rationale: str = ""
+
+
+class ComplaintPrecedentOut(BaseModel):
+    generated_at: datetime
+    subject_reference: str = ""
+    weights: Dict[str, float] = Field(default_factory=dict)
+    min_similarity: float = 0.0
+    recency_half_life_days: float = 0.0
+    candidates_considered: int = 0
+    returned: int = 0
+    precedents: List[ComplaintPrecedentItem] = Field(default_factory=list)
+    contradicted_count: int = 0
+    contradicted: List[Dict[str, Any]] = Field(default_factory=list)
+    note: str = ""
+
+
+class ComplaintGuardOut(BaseModel):
+    guard_id: Optional[str] = None
+    metric: str = ""
+    op: str = ""
+    op_meaning: str = ""
+    threshold: Any = None
+    actual: Any = None
+    observed: bool = False
+    severity: str = ""
+    holds: bool = False
+    reason: str = ""
+    rationale: str = ""
+    waivable: bool = False
+
+
+class ComplaintTriggerOut(BaseModel):
+    trigger_id: str = ""
+    label: str = ""
+    kind: str = ""
+    authority: str = ""
+    regulatory: bool = False
+    required_step_up: str = ""
+    priority: int = 0
+    reason: str = ""
+    to_tier: str = ""
+    owner_team: str = ""
+    explanation: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ComplaintDecisionEngineOut(BaseModel):
+    generated_at: datetime
+    escalated: bool = False
+    acted: bool = False
+    auto_applied: bool = False
+    requires_acceptance: bool = False
+    from_tier: str = ""
+    to_tier: str = ""
+    owner_team: str = ""
+    regulatory: bool = False
+    reason: str = ""
+    recommended_trigger_id: str = ""
+    auto_triggers: List[str] = Field(default_factory=list)
+    advisory_triggers: List[str] = Field(default_factory=list)
+    triggers_fired: List[ComplaintTriggerOut] = Field(default_factory=list)
+    triggers_considered: List[Dict[str, Any]] = Field(default_factory=list)
+    considered_count: int = 0
+    override_applied: bool = False
+    override_reason: str = ""
+    override_blocked_reason: str = ""
+    verdict: str = ""
+    guards: List[ComplaintGuardOut] = Field(default_factory=list)
+    non_waivable_failures: List[str] = Field(default_factory=list)
+    override_rules: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ComplaintDecisionSummaryOut(BaseModel):
+    text: str = ""
+    decision: str = ""
+    auto_applied: bool = False
+    requires_acceptance: bool = False
+    verdict: str = ""
+    evidence_complete: bool = False
+    precedent_count: int = 0
+    contradicted_precedents: int = 0
+
+
+class ComplaintDecisionSupportOut(BaseModel):
+    generated_at: datetime
+    catalog_version: str = ""
+    case: ComplaintCaseOut
+    dossier: ComplaintDossierOut
+    precedent: ComplaintPrecedentOut
+    decision: ComplaintDecisionEngineOut
+    context: Dict[str, Any] = Field(default_factory=dict)
+    gaps: List[str] = Field(default_factory=list)
+    summary: ComplaintDecisionSummaryOut
+
+
+class ComplaintQueueOut(BaseModel):
+    generated_at: datetime
+    open_cases: int = 0
+    by_status: Dict[str, int] = Field(default_factory=dict)
+    by_severity: Dict[str, int] = Field(default_factory=dict)
+    by_tier: Dict[str, int] = Field(default_factory=dict)
+    by_owner_team: Dict[str, int] = Field(default_factory=dict)
+    unowned: List[str] = Field(default_factory=list)
+    sla_breached: List[str] = Field(default_factory=list)
+    sla_breach_count: int = 0
+    decision_outcomes_observed: Dict[str, int] = Field(default_factory=dict)
+    decisions_judged: int = 0
+    contradicted_decisions: int = 0
+    contradiction_rate: Optional[float] = None
+    queue: List[ComplaintCaseOut] = Field(default_factory=list)
+    validation: Dict[str, Any] = Field(default_factory=dict)
+    note: str = ""
+
+
+class ComplaintSlaReportOut(BaseModel):
+    generated_at: datetime
+    catalog_version: str = ""
+    examined: int = 0
+    open_cases: int = 0
+    breached_response: List[str] = Field(default_factory=list)
+    breached_resolution: List[str] = Field(default_factory=list)
+    due_soon: List[str] = Field(default_factory=list)
+    due_soon_threshold_hours: float = 0.0
+    on_track: List[str] = Field(default_factory=list)
+    breach_count: int = 0
+    sla_matrix: List[Dict[str, Any]] = Field(default_factory=list)
+    regulatory_sla: Dict[str, Any] = Field(default_factory=dict)
+    note: str = ""
+
+
+class ComplaintAcknowledgeIn(BaseModel):
+    note: str = ""
+
+
+class ComplaintNoteIn(BaseModel):
+    note: str = ""
+
+
+class ComplaintResolveIn(BaseModel):
+    resolution_code: str
+    resolution_note: str = ""
+    satisfaction_score: Optional[int] = Field(default=None, ge=0, le=10)
+
+
+class ComplaintReopenIn(BaseModel):
+    reason: str = ""
+
+
+class ComplaintAssignIn(BaseModel):
+    owner_user_id: Optional[int] = None
+    owner_team: str = ""
+    # May raise a case's tier but never lower it; a downgrade has to go through
+    # the escalation path so the authority floor is actually evaluated.
+    tier: Optional[str] = None
+    note: str = ""
+
+
+class ComplaintOverrideIn(BaseModel):
+    """An admin's request to change where a case is handled.
+
+    The engine decides whether it may be honoured. This schema deliberately
+    does not encode that a downgrade is impossible: an impossible request is a
+    thing an operator can make, and the refusal is more useful recorded than a
+    422 the caller has to interpret.
+    """
+
+    to_tier: Optional[str] = None
+    severity: Optional[str] = None
+    owner_team: Optional[str] = None
+    reason: str = ""
+
+
+class ComplaintApplyOut(BaseModel):
+    case: ComplaintCaseOut
+    decision: ComplaintDecisionOut
+    applied: bool = False
+    blocked_reason: str = ""
+
+
+class ComplaintSweepOut(BaseModel):
+    generated_at: datetime
+    enabled: bool = False
+    examined: int = 0
+    escalated: int = 0
+    breaches_stamped: int = 0
+    advisory_pending: int = 0
+    authority_note: str = ""
+    results: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ComplaintCatalogOut(BaseModel):
+    version: str = ""
+    escalation_pack_version: str = ""
+    generated_at: datetime
+    statuses: List[str] = Field(default_factory=list)
+    terminal_statuses: List[str] = Field(default_factory=list)
+    resolved_statuses: List[str] = Field(default_factory=list)
+    severities: List[str] = Field(default_factory=list)
+    severity_rank: Dict[str, int] = Field(default_factory=dict)
+    categories: List[Dict[str, Any]] = Field(default_factory=list)
+    default_category: str = ""
+    resolution_codes: List[str] = Field(default_factory=list)
+    event_types: List[str] = Field(default_factory=list)
+    decisions: List[str] = Field(default_factory=list)
+    decision_outcomes: List[str] = Field(default_factory=list)
+    outcomes_observed: List[str] = Field(default_factory=list)
+    tiers: List[Dict[str, Any]] = Field(default_factory=list)
+    tier_order: List[str] = Field(default_factory=list)
+    authorities: Dict[str, Any] = Field(default_factory=dict)
+    override_rules: Dict[str, Any] = Field(default_factory=dict)
+    triggers: List[Dict[str, Any]] = Field(default_factory=list)
+    escalation_pack: Dict[str, Any] = Field(default_factory=dict)
+    routing_rules: List[Dict[str, Any]] = Field(default_factory=list)
+    default_route: Dict[str, Any] = Field(default_factory=dict)
+    sla_matrix: List[Dict[str, Any]] = Field(default_factory=list)
+    regulatory_sla: Dict[str, Any] = Field(default_factory=dict)
+    guards: List[Dict[str, Any]] = Field(default_factory=list)
+    guard_ops: Dict[str, str] = Field(default_factory=dict)
+    guard_severities: List[str] = Field(default_factory=list)
+    guard_severity_meaning: Dict[str, str] = Field(default_factory=dict)
+    feeds: List[Dict[str, Any]] = Field(default_factory=list)
+    feed_kinds: List[str] = Field(default_factory=list)
+    feed_stale_after_seconds: Dict[str, int] = Field(default_factory=dict)
+    precedent: Dict[str, Any] = Field(default_factory=dict)
+    auto_escalation_enabled: bool = False
+    validation: Dict[str, Any] = Field(default_factory=dict)
+    note: str = ""

@@ -20,7 +20,6 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from fastapi.testclient import TestClient
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

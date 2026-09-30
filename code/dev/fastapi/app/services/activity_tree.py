@@ -500,9 +500,15 @@ def build_activity_items(
 def rank_items(items: list[dict], rank_by: str, order: str) -> list[dict]:
     """Rank leaf items by recency (default) or by their influence score."""
     if rank_by == "recency":
-        key = lambda item: item.get("timestamp") or datetime.min.replace(tzinfo=timezone.utc)
+
+        def key(item: dict) -> Any:
+            return item.get("timestamp") or datetime.min.replace(tzinfo=timezone.utc)
+
     else:
-        key = lambda item: float(item.get("value", 0.0) or 0.0)
+
+        def key(item: dict) -> float:
+            return float(item.get("value", 0.0) or 0.0)
+
     return sorted(items, key=key, reverse=(order != "asc"))
 
 

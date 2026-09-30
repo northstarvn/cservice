@@ -360,7 +360,6 @@ async def _build_recovery(
 ) -> dict[str, Any]:
     """Recovery readiness plus what the automated program actually did."""
     from app.services.recovery_playbooks import (
-        _load_recovery_action_history,
         _load_recovery_context,
         evaluate_recovery_playbooks,
     )

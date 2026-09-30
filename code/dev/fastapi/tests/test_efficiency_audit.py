@@ -12,7 +12,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from app.main import app
 from app import deps
 from app.schemas.audit import (
-    ComponentMetrics,
     EnhancementListReport,
     SystemEfficiencyReport,
 )

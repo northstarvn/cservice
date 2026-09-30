@@ -43,7 +43,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models

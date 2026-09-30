@@ -118,6 +118,23 @@ CELL_MATRIX: dict[str, dict[str, dict[str, str]]] = {
         "arrears_terms": {"owner": "read", "agent": "read", "admin": "write", "auditor": "read"},
         "refund_eligibility": {"owner": "read", "agent": "read", "admin": "write", "auditor": "read"},
     },
+    # Complaints. The cells are the three things a role genuinely needs to
+    # differ on, rather than a mirror of the table's columns:
+    #
+    #   summary / resolution_note -- what the complainant said and what we did.
+    #     The complainant can read their own; an agent can read and write while
+    #     working the case; an auditor can read but must not be able to alter the
+    #     record, so `auditor` is `read` rather than `write` even though admin
+    #     gets write.
+    #   factors_json -- the frozen decision-support snapshot. Read for the case
+    #     owner and for agents, `none` for an auditor, because it is derived
+    #     scoring about a person in mid-dispute and is the most re-identifying
+    #     field in the family.
+    "complaint_case": {
+        "summary": {"owner": "read", "agent": "read", "admin": "write", "auditor": "read"},
+        "resolution_note": {"owner": "read", "agent": "write", "admin": "write", "auditor": "read"},
+        "factors_json": {"owner": "none", "agent": "read", "admin": "read", "auditor": "none"},
+    },
     "audit_trail": {
         "actor": {"owner": "none", "agent": "none", "admin": "read", "auditor": "read"},
         "action": {"owner": "none", "agent": "none", "admin": "read", "auditor": "read"},

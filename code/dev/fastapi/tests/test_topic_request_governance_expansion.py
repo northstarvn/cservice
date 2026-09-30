@@ -58,7 +58,6 @@ from app.routers.topics import (
     admit_topic_request,
     build_topic_capacity_report,
     build_topic_param_bounds_report,
-    build_topic_request_analytics,
     build_topic_request_governance_catalog,
     build_topic_request_plan,
     build_topic_response_limit_report,

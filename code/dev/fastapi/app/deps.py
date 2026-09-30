@@ -953,6 +953,43 @@ AUTHZ_RULES: list[dict[str, Any]] = [
          "separately means a future PUT route has to be classified on its own instead of "
          "being absorbed by a method wildcard."
      )},
+    {"rule_id": "complaints_root", "methods": ("POST",), "path": "/complaints",
+     "exposure": "authenticated", "enforced_by": ("get_current_user",),
+     "hardening": {"scopes": ("write",), "rate_tier": "sensitive"},
+     "note": (
+         "Lodging a complaint. Its own rule rather than relying on a '/complaints/*' "
+         "wildcard, because that pattern does not match the bare path -- so without "
+         "this the only write that *creates* a case would be the one route falling "
+         "through to the catch-all."
+     )},
+    {"rule_id": "complaints_admin", "methods": ("GET", "POST"), "path": "/complaints/admin*",
+     "exposure": "admin", "enforced_by": ("get_current_admin_user",),
+     "hardening": {"scopes": ("read:audit",), "step_up": "loa2", "cell": ("complaint_case", "factors_json", "read")},
+     "note": (
+         "The queue, the SLA report, the escalation sweep, the decision audit and the "
+         "policy catalog. Listed before /complaints/* so the wildcard below cannot claim "
+         "'admin' as a case reference. The cell is complaint_case/factors_json, which "
+         "exists in the cell matrix specifically because the decision-support snapshot "
+         "is the most re-identifying field in the family and an auditor has no business "
+         "reading it."
+     )},
+    {"rule_id": "complaints_transitions", "methods": ("POST",), "path": "/complaints/*",
+     "exposure": "authenticated", "enforced_by": ("get_current_user",),
+     "hardening": {"scopes": ("write",), "rate_tier": "sensitive"},
+     "note": (
+         "Case transitions (acknowledge, resolve, close, reopen, apply). Any authenticated "
+         "caller may reach these, and each writes a complaint_decisions row carrying the "
+         "actor, the role and the step-up level, so authority is answerable from the case "
+         "rather than assumed from who was allowed to call the endpoint."
+     )},
+    {"rule_id": "complaints_reads", "methods": ("GET",), "path": "/complaints/*",
+     "exposure": "authenticated", "enforced_by": ("get_current_user",), "hardening": {"scopes": ("read",)},
+     "note": (
+         "Case reads and the decision dossier, caller-scoped. A customer-facing GET is "
+         "deliberately not a way to read somebody else's dispute: the router returns 404 "
+         "rather than 403 for a case the caller does not own, so a reference is not an "
+         "enumeration oracle."
+     )},
     {"rule_id": "topic_policy_decisions", "methods": ("GET",), "path": "/topic-policy-decisions",
      "exposure": "authenticated", "enforced_by": ("get_current_user",), "hardening": {"scopes": ("read",)},
      "note": "Explains why a topic was selected for the caller."},
@@ -2852,10 +2889,13 @@ async def authz_denial_contract() -> dict[str, Any]:
             "error": row.get("error"),
             "keys": tuple(row.get("keys") or ()),
         }
-        for field in ("status", "detail_shape", "error", "keys"):
-            if actual[field] != expected[field]:
+        # Named `key` rather than `field`: `dataclasses.field` is imported and
+        # used earlier in this module, and shadowing it inside a function is the
+        # kind of thing that breaks the day someone reaches for it below.
+        for key in ("status", "detail_shape", "error", "keys"):
+            if actual[key] != expected[key]:
                 errors.append(
-                    f"{kind}: {field} is {actual[field]!r} in the factory but {expected[field]!r} "
+                    f"{kind}: {key} is {actual[key]!r} in the factory but {expected[key]!r} "
                     "in AUTHZ_DENIALS"
                 )
         if expected["detail_shape"] == "string" and actual.get("text") != row.get("text"):

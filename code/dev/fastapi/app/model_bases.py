@@ -52,7 +52,6 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import (
-    Boolean,
     Column,
     DateTime,
     Float,
@@ -1590,7 +1589,6 @@ def mixin_column_provenance(table_name: str | None = None) -> dict[str, Any]:
                 "type": str(column.type),
                 "sensitivity": classify_serialization_field(column.key),
             }
-        identity = (mapper.polymorphic_identity or "").strip()
         if table not in tables:
             tables[table] = {
                 "classes": [],

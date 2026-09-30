@@ -13,8 +13,7 @@ skeletons:
 All existing contracts (locale payload shape, token encoding, engine/session
 creation) are preserved.
 """
-import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 from jose import jwt

@@ -480,7 +480,6 @@ def test_require_tenant_returns_the_tenant_and_binds_it_to_the_request():
 
 
 def test_an_admin_may_cross_tenants():
-    from app.tenant_router import DEFAULT_TENANT
 
     async def _run():
         admin = _principal(roles=frozenset({"admin"}), tenant_id="tenant-a")

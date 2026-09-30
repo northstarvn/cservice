@@ -41,8 +41,6 @@ from app.schemas.audit import (
 )
 from app.services.audit_log import (
     AUDIT_ANOMALY_DEFAULTS,
-    AUDIT_INTEGRITY_GATES,
-    AUDIT_VIEW_PROFILES,
     DEFAULT_AUDIT_VIEW_PROFILE,
     audit_integrity_report,
     build_audit_log_catalog,

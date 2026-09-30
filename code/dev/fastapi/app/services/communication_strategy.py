@@ -157,12 +157,27 @@ COMMUNICATION_POLICY_RULES: list[dict[str, Any]] = [
         "policy_id": "sensitive_complaint",
         "label": "Sensitive complaint handling",
         "priority": "high",
+        # These are the *actual* `top_issue_1` values, not aspirational ones.
+        # The rule previously tested for "refund request", "complaints",
+        # "billing dispute" and "privacy concern" -- none of which
+        # `chat_analytics.build_summary` can emit, because it builds
+        # `top_issues` from PREDEFINED_POLICY_AREAS with underscores replaced
+        # by spaces (plus the synthetic "repeated concerns"). The rule was
+        # therefore dead: it could never fire, and because the resolver fails
+        # soft on an unmatched rule it failed silently. The vocabulary below is
+        # the reachable set, and `validate_communication_tables` cross-checks it
+        # against the area catalog so this cannot rot a second time.
         "when": {
             "top_issue_1": [
-                "refund request",
-                "complaints",
-                "billing dispute",
-                "privacy concern",
+                # money in question -- a customer disputing a charge or asking
+                # for it back needs a different tone from a speed complaint
+                "pricing",
+                "trust",
+                # the complaint *is* about support
+                "support",
+                "handoff",
+                "follow up",
+                "repeated concerns",
             ]
         },
         "params": {
@@ -173,7 +188,10 @@ COMMUNICATION_POLICY_RULES: list[dict[str, Any]] = [
             "greeting_style": "personal",
             "reply_urgency": "high",
         },
-        "when_hint": "A sensitive top issue (refund, complaint, billing, privacy) is present.",
+        "when_hint": (
+            "A sensitive top issue is present. The values are the ones "
+            "`chat_analytics.build_summary` can actually produce."
+        ),
     },
     {
         "policy_id": "critical_risk_outreach",
@@ -1191,10 +1209,106 @@ async def build_communication_strategy_admin_report(
     )
 
 
+def validate_communication_tables() -> dict[str, Any]:
+    """Cross-check the policy rules against what the context can actually hold.
+
+    This exists because of a rule that was dead for its whole life. The
+    `sensitive_complaint` policy tested `top_issue_1` against four strings
+    ("refund request", "complaints", "billing dispute", "privacy concern") that
+    `chat_analytics.build_summary` never produces -- it derives `top_issues`
+    from `PREDEFINED_POLICY_AREAS` with underscores replaced by spaces, plus the
+    synthetic "repeated concerns". A rule whose expected values are unreachable
+    is not a rule; it is a comment that costs a list lookup on every resolution,
+    and because the resolver fails soft on a non-match it never announced itself.
+
+    A dead rule is indistinguishable from an inert one in production, so it is
+    checked here instead: every literal a `when` clause lists must be in the
+    reachable set for that key. `errors` means a rule cannot fire; `warnings`
+    means a rule fires but is shadowed by an earlier one and so is not doing
+    what its author probably intended.
+    """
+    from app.services.chat_analytics import PREDEFINED_POLICY_AREAS
+
+    reachable_issues = {str(area).replace("_", " ") for area in PREDEFINED_POLICY_AREAS}
+    reachable_issues.add("repeated concerns")
+
+    errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    for index, rule in enumerate(COMMUNICATION_POLICY_RULES):
+        policy_id = str(rule.get("policy_id", f"#{index}"))
+        when = rule.get("when", {}) or {}
+        for field, expected in when.items():
+            if field == "top_issue_1" and isinstance(expected, (list, tuple)):
+                unreachable = [v for v in expected if str(v) not in reachable_issues]
+                if unreachable:
+                    errors.append(
+                        {
+                            "code": "unreachable_context_value",
+                            "policy_id": policy_id,
+                            "detail": (
+                                f"top_issue_1 can never be {unreachable}; the "
+                                f"reachable values are {sorted(reachable_issues)}"
+                            ),
+                        }
+                    )
+        # Order-dependence: a later rule that an earlier one always shadows is
+        # not wrong, but it is very likely not what the author meant, and it is
+        # worth a human looking.
+        for earlier in COMMUNICATION_POLICY_RULES[:index]:
+            if _when_subsumes(earlier.get("when", {}), when):
+                warnings.append(
+                    {
+                        "code": "shadowed_policy_rule",
+                        "policy_id": policy_id,
+                        "detail": (
+                            f"'{earlier.get('policy_id')}' is tested first and matches "
+                            f"everything this rule matches, so this one never runs"
+                        ),
+                    }
+                )
+                break
+
+    return {
+        "version": "communication_strategy_v1",
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "reachable_top_issues": sorted(reachable_issues),
+        "checked": [
+            "every literal a top_issue_1 rule tests is a value build_summary can emit",
+            "no policy rule is fully shadowed by an earlier one",
+        ],
+    }
+
+
+def _when_subsumes(outer: dict[str, Any], inner: dict[str, Any]) -> bool:
+    """True when `outer` matches everything `inner` would match.
+
+    Only sound for the literal-equality and list-membership shapes these policy
+    rules use; it returns False rather than guessing for anything else, because
+    a wrong "subsumes" would report a live rule as dead.
+    """
+    if not inner:
+        return True
+    for field, expected in inner.items():
+        if field not in outer:
+            return False
+        outer_expected = outer[field]
+        if isinstance(expected, (list, tuple)) and isinstance(outer_expected, (list, tuple)):
+            if not set(expected).issubset(set(outer_expected)):
+                return False
+        elif outer_expected != expected:
+            return False
+    return True
+
+
 def build_communication_strategy_catalog() -> dict[str, Any]:
     """Introspection payload for `/meta/scoring-catalog`."""
     return {
         "catalog_version": "communication_strategy_v1",
+        "validation": validate_communication_tables(),
         "precedence": [
             {"layer": entry["layer"], "precedence": entry["precedence"], "criterion": entry["criterion"]}
             for entry in _COMMUNICATION_LAYERS

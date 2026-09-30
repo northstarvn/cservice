@@ -35,20 +35,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import json
 import logging
 import os
 import time
-import uuid
 from collections import OrderedDict, deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
 
 import httpx
 
-from app.protobuf_transaction_spec import get_default_transaction_log
 
 logger = logging.getLogger(__name__)
 

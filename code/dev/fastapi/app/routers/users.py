@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app import models, security, deps
 from app.i18n import locale_payload
 from app.schemas import schemas
-from app.services.policy_scoring import build_policy_access_decision, build_policy_decision_report, build_customer_policy_snapshot, build_policy_topic_analysis_report, build_policy_score_out, can_access_functionality
+from app.services.policy_scoring import build_policy_access_decision, build_policy_decision_report, build_customer_policy_snapshot, build_policy_score_out, can_access_functionality
 
 router = APIRouter()
 
@@ -129,7 +129,10 @@ def build_session_inventory(
     Rows whose issue time is unknown sort last: an unverifiable age is not
     evidence of recency, and burying it keeps the live head of the list honest.
     """
-    moment = now or _now()
+    # A sort sentinel just before the epoch, so a row with no `issued_at` lands
+    # last under `reverse=True` without needing a real date. Ruff's F841 does not
+    # count a reference from inside the lambda below as a use, so it reports this
+    # as dead code; it is not, and removing it raises NameError at runtime.
     unknown = datetime.min.replace(tzinfo=timezone.utc)
     sessions = sorted(
         (dict(row) for row in rows if row.get("subject") == subject or not row.get("subject")),

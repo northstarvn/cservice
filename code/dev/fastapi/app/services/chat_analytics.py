@@ -2,7 +2,6 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import json
 import os
 
 import requests
@@ -13,9 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import models
 from app.schemas import chat as chat_schemas
 from app.services.topics import (
-    TOPIC_CATALOG,
-    TOPIC_SECTORS,
-    TOPIC_THEME_GROUPS,
     build_topic_portfolio_report,
     build_topic_theme_coverage,
 )
@@ -26,8 +22,6 @@ from app.schemas.chat import (
     InteractionSummary,
     InteractionTrendItem,
     InteractionTrendReport,
-    LifecycleStageItem,
-    LifecycleStageReport,
     MonetizationCohortItem,
     MonetizationCohortReport,
     RecoverySignal,
@@ -802,13 +796,6 @@ def build_sentiment_retention_bridge(summary: InteractionSummary, sentiment: Opt
     topic_signal_count = len(summary.insights)
     topic_theme_names = [item.theme for item in topic_theme_coverage if item.theme]
     topic_theme_overlap = sum(int(item.coverage * 100) for item in topic_theme_coverage if item.matched_count)
-    topic_focus = list(
-        dict.fromkeys(
-            [theme for theme in topic_theme_names[:4] if theme]
-            + list(topic_portfolio.get("topic_focus", []))[:4]
-            + list(topic_clusters.keys())[:3]
-        )
-    )[:8]
     topic_signal_depth = (
         f"signals={topic_signal_count}, themes={len(topic_theme_coverage)}, matched_themes={len(topic_theme_names)}, "
         f"coverage={topic_portfolio['coverage_ratio']:.2f}, clusters={len([items for items in topic_clusters.values() if items])}, overlap={topic_theme_overlap}"
@@ -1006,9 +993,6 @@ def build_signal_synthesis_report(user_id: int, chat_rows: list[models.ChatHisto
     if not topic_focus:
         topic_focus = [topic_breakdown.dominant_topic] if topic_breakdown.dominant_topic else []
     topic_focus.extend([topic["topic"] for topic in topic_breakdown.top_topics if topic.get("topic") and topic.get("count", 0) == 0])
-    summary_text = (
-        f"{summary.metadata.get('summary', 'Interaction summary')} Topic focus: {len(topic_focus)} entries; themes={len(topic_theme_coverage)}; portfolio_themes={len(portfolio_theme_coverage)}; matched_themes={len([theme for theme in topic_theme_coverage if theme.matched_count >= 0])}; retention_risk={bridge.retention_risk}."
-    )
     return chat_schemas.SignalSynthesisReport(
         generated_at=datetime.now(timezone.utc),
         user_id=user_id,
@@ -1506,7 +1490,7 @@ async def build_retention_snapshot_operations_report(db: AsyncSession, window_da
             status=readiness_status,
             count=total,
             details=[
-                f"Snapshot portfolio is ready when fresh coverage dominates stale records",
+                "Snapshot portfolio is ready when fresh coverage dominates stale records",
                 f"readiness uses a {stale_after_days}-day freshness threshold over the {window_days}-day window",
             ],
             recommended_owner="product operations",

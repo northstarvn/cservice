@@ -946,7 +946,6 @@ def _producible_labels(table: dict[str, str], producer: str) -> list[str]:
     if producer == "recovery_status":
         try:
             from app.services.recovery_playbooks import (
-                RECOVERY_GUARD_DRY_RUN_SKIP_STATUS,
                 RECOVERY_GUARD_REASON_STATUS,
                 RECOVERY_GUARD_SKIP_STATUS,
             )

@@ -23,9 +23,8 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 
-from app import deps, models
 from app.high_throughput_pipeline import get_default_pipeline
 
 logger = logging.getLogger(__name__)

@@ -25,7 +25,7 @@ a route wrapper that returns the original response object untouched.
 """
 from datetime import datetime, timezone
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 import hashlib
 import math
@@ -47,16 +47,11 @@ from app.services.topics import (
     build_topic_intelligence_overview,
     build_topic_lifecycle_report,
     build_topic_search_report,
-    build_topic_catalog_report,
     build_topic_portfolio_report,
-    build_topic_recommendation_report,
-    build_topic_selection_history_report,
-    build_topic_selection_report,
     build_topic_selection_validation,
     build_topic_suggestion_report,
     build_topic_taxonomy_integrity_report,
     build_topic_taxonomy_report,
-    build_topic_theme_report,
     build_topic_workspace_report,
     build_typed_topic_catalog_report,
     build_typed_topic_recommendation_report,

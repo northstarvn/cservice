@@ -5,7 +5,7 @@ tenant connection router (``app/tenant_router.py``), and the dynamic partition
 lifecycle workers (``app/partition_manager.py``), plus the metadata surfaces
 that document them.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -208,7 +208,10 @@ async def test_tenant_router_registers_and_disposes_dedicated_engine():
 @pytest.mark.asyncio
 async def test_tenant_router_falls_back_to_shared_default():
     router = tenant_router.TenantRouter()
-    engine = await router.engine_for("unknown-tenant")
+    # The call is the assertion: an unknown tenant must resolve to the shared
+    # engine rather than raise. The returned engine is not inspected, but the
+    # call is kept because it registers the tenant lazily.
+    await router.engine_for("unknown-tenant")
     assert router.snapshot()["unknown-tenant"]["mode"] == "shared_default"
     await router.dispose_all()
     assert router.snapshot() == {}

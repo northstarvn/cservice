@@ -283,7 +283,6 @@ def adapt_risk_weight(rule_id: str, outcome: str) -> dict[str, Any]:
         delta = -step
     else:
         delta = 0.0
-    previous = _WEIGHT_STATE[rule_id]
     _WEIGHT_STATE[rule_id] = min(
         ADAPTIVE_PARAMS["max_weight"],
         max(ADAPTIVE_PARAMS["min_weight"], _WEIGHT_STATE[rule_id] + delta),

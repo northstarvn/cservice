@@ -54,7 +54,7 @@ questions sit outside that, and both are policy rather than code:
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
 import hashlib

@@ -20,7 +20,27 @@ def upgrade() -> None:
         "users",
         sa.Column("is_admin", sa.Boolean(), nullable=False, server_default=sa.text("false")),
     )
-    op.alter_column("users", "is_admin", server_default=None)
+    # Backfilling an existing `users` table and then dropping the server default
+    # is a two-step dance, because a NOT NULL column has to be added with a
+    # default. The second step is `ALTER TABLE ... ALTER COLUMN ... DROP
+    # DEFAULT`, which is PostgreSQL syntax and is a syntax error on SQLite:
+    #
+    #   near "ALTER": syntax error
+    #   [SQL: ALTER TABLE users ALTER COLUMN is_admin DROP DEFAULT]
+    #
+    # `recreate="always"` is required, not decorative. Batch mode rebuilds a
+    # table when it is adding or dropping a column, but a bare `alter_column`
+    # that only changes a server default is not a rebuild trigger -- it emits
+    # the native statement and SQLite answers:
+    #
+    #   NotImplementedError: No support for ALTER of constraints in SQLite
+    #   dialect. Please refer to the batch mode feature...
+    #
+    # Forcing the rebuild makes SQLite take the copy-and-move path. PostgreSQL
+    # still gets a plain `ALTER TABLE ... DROP DEFAULT`, so this stays correct on
+    # both rather than correct on whichever one it was written against.
+    with op.batch_alter_table("users", schema=None, recreate="always") as batch_op:
+        batch_op.alter_column("is_admin", server_default=None)
 
     op.create_table(
         "booking_events",
@@ -37,10 +57,33 @@ def upgrade() -> None:
     op.create_index(op.f("ix_booking_events_user_id"), "booking_events", ["user_id"], unique=False)
     op.create_index(op.f("ix_booking_events_event_type"), "booking_events", ["event_type"], unique=False)
 
-    op.add_column(
-        "chat_history",
-        sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
-    )
+    # Adding a column that carries a REFERENCES clause needs batch mode on
+    # SQLite, which cannot attach a foreign key to an existing table:
+    #
+    #   NotImplementedError: No support for ALTER of constraints in SQLite
+    #   dialect
+    #
+    # `add_column` *is* a rebuild trigger for batch mode, so `recreate="auto"`
+    # is enough here -- the copy-and-move path emits the constraint on the new
+    # table. On PostgreSQL this stays a plain `ALTER TABLE ... ADD COLUMN`.
+    with op.batch_alter_table("chat_history", schema=None) as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "user_id",
+                sa.Integer(),
+                # Named, because batch mode's copy-and-move path requires it
+                # ("Constraint must have a name") and an auto-generated name is
+                # not reproducible. Naming it is also what makes the constraint
+                # addressable if this migration is ever amended. The matching
+                # downgrade drops the column, and the constraint goes with it.
+                sa.ForeignKey(
+                    "users.id",
+                    ondelete="SET NULL",
+                    name="fk_chat_history_user_id_users",
+                ),
+                nullable=True,
+            )
+        )
     op.create_index(op.f("ix_chat_history_user_id"), "chat_history", ["user_id"], unique=False)
 
     op.create_table(
@@ -66,10 +109,25 @@ def downgrade() -> None:
     op.drop_table("retention_snapshots")
 
     op.drop_index(op.f("ix_chat_history_user_id"), table_name="chat_history")
-    op.drop_column("chat_history", "user_id")
+    # `chat_history.user_id` is part of a foreign-key definition on the table, and
+    # SQLite refuses `ALTER TABLE ... DROP COLUMN` for a column that a
+    # constraint refers to:
+    #
+    #   error in table chat_history after drop column: unknown column "user_id"
+    #   in foreign key definition
+    #
+    # `batch_alter_table` is the dialect-aware fix. On SQLite it builds a
+    # replacement table, copies the surviving columns, drops the original and
+    # renames -- which removes the column together with the constraint that
+    # referenced it. On PostgreSQL it degrades to a plain `ALTER TABLE ... DROP
+    # COLUMN`, so this stays correct on both.
+    with op.batch_alter_table("chat_history", schema=None) as batch_op:
+        batch_op.drop_column("user_id")
 
     op.drop_index(op.f("ix_booking_events_event_type"), table_name="booking_events")
     op.drop_index(op.f("ix_booking_events_user_id"), table_name="booking_events")
     op.drop_index(op.f("ix_booking_events_booking_id"), table_name="booking_events")
     op.drop_table("booking_events")
-    op.drop_column("users", "is_admin")
+
+    with op.batch_alter_table("users", schema=None) as batch_op:
+        batch_op.drop_column("is_admin")

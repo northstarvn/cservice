@@ -38,7 +38,283 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   `CONSENT_PURPOSES`). A duplicate table can drift; a cycle cannot be repaired
   without breaking the import graph.
 
+### Complaints keep-as-is decisions (do not "fix")
+
+- **Guard polarity: `holds` means the guard is *satisfied*.** A guard holds when
+  the condition is fine and stops holding when the condition named in its
+  `rationale` is present — the same convention as
+  `evaluate_selection_guards` in `services/topics.py`. Six of the seven
+  complaint guards were first written holding on the *problem*, which inverted
+  the whole verdict: a healthy case reported `reject` because every guard had
+  "failed". A backwards guard is worse than no guard, because it makes every
+  decision look blocked and trains reviewers to ignore the list.
+  `test_each_guard_stops_holding_when_its_condition_is_present` pins one case per
+  guard so a single inversion cannot hide.
+- **A guard with an `applies_when` scope is *skipped*, not failed.** The
+  regulatory-deadline guard's metric is absent for an ordinary complaint, and a
+  missing metric fails closed — which would reject every non-regulatory case for
+  no stated reason. Same idea as `TOPIC_SELECTION_GUARDS`' `sources` narrowing.
+- **Only a statutory deadline or a breached clock may act without a human.**
+  `AUTO_ESCALATION_TRIGGER_KINDS` restricts `authority: "auto"` to the
+  `regulatory` and `sla_breach` trigger kinds, and `validate_complaints` raises
+  an **error** for any other. The set is data so it can be widened deliberately,
+  never by adding one row with a typo. The sweep keys its write on
+  `decision["auto_triggers"]` and **not** on `decision["acted"]` — keying on
+  `acted` lets it apply exactly the judgement calls the policy reserves for a
+  person, which is the bug `test_judgment_triggers_are_reported_but_not_applied`
+  exists to catch.
+- **An owner change is an application even when the tier does not move.** A
+  medium-severity case breaching its response SLA computes `to_tier_rank == 1`,
+  equal to the tier it is already on, so a tier-only test finds nothing to do and
+  the case keeps whoever owned it before — the exact situation
+  `regulatory_privacy_open` exists to prevent. `apply_escalation` therefore
+  derives `applied` from what would change, not from the engine's own `escalated`
+  flag.
+- **A downgrade is refused, not forbidden.** `apply_escalation` returns
+  `applied: false` with the rule that blocked it. An impossible request is
+  something an operator can make, and recording the refusal is more useful than
+  a 422 that vanishes.
+- **The SLA `basis` field reports which clock actually governed.** Our internal
+  targets are usually the stricter ones, so reporting
+  `basis: "regulatory_floor"` for every regulatory case would be a lie in the
+  common case. Three values: `internal_matrix`,
+  `internal_matrix_within_regulatory_limit`, `regulatory_floor_partial`,
+  `regulatory_floor`.
+- **A required decision feed that could not be built is *named*, not omitted.**
+  "No such feed" and "the feed says nothing" are different claims about the
+  world. `build_decision_dossier` reports `missing_required_feeds` and
+  `unavailable_required_feeds` separately, and the summary line says
+  "Incomplete evidence".
+- **Dossier confidence is the *weakest required* feed, not the average.**
+  Averaging lets a dozen confident internal feeds hide the one external feed
+  that failed, which is exactly the case where the decision is shakiest.
+- **The external feed is always reported as uncalled on a request path.**
+  `DECISION_FEED_BY_ID["external"]["async_only"]` is the rule, mirroring
+  `rule_engine.EXTERNAL_OPS`. It appears in the dossier as an explicit gap
+  rather than being dropped, so a reader can tell "not consulted" from "nothing
+  found".
+- **The consent gate is `advisory` on this surface and can never withhold a
+  fix.** Same reasoning as the existing decision for the recovery surface: a
+  customer who reported a problem is not refused a fix because of a marketing
+  preference. It is read from `CONSENT_GATED_PURPOSES` rather than hardcoded, so
+  a purpose added to that config shows up in the guard instead of silently
+  withholding outreach.
+- **A case reference is durable and derived from the primary key**
+  (`CMP-{id:06d}`). The `ESC-{user}-{run_seq:03d}` form survives only as a
+  documented fallback, and `build_escalation_result` reports
+  `reference_is_durable` so a reader is never left wondering whether a reference
+  can be looked up.
+- **The recovery orchestrator's single-commit unit of work is preserved.**
+  `_handle_escalate_ticket` calls `open_complaint(..., commit=False)`; a handler
+  that committed on its own would make a case durable while the
+  `RecoveryAction` row recording why it was opened was not.
+  `test_fulfills_credit_escalation_and_guardrail` pins `db.commits == 1`.
+- **Reads never write.** The old `GET /chat/recovery` inserted a
+  `RecoveryOutcome` on every hit, so "attempts" inflated with traffic. Every
+  complaint report endpoint is read-only; the SLA report is derived from the case
+  rows on each read so a breach cannot be made to disappear by not running the
+  sweep that would have noticed it.
+- **A customer's 404 is not a 403.** `_load_owned_case` returns 404 for a case
+  the caller does not own, so a reference is not an enumeration oracle for other
+  people's complaints.
+
+### Pre-existing bugs this expansion fixed
+
+- **`rule_engine.matches_field_extended` matched every numeric rule
+  unconditionally.** It computed `legacy` as the operators *not* in
+  `OPERATOR_FAMILIES`, but `OPERATOR_FAMILIES` contains the numeric operators
+  too — so for a rule containing only numeric operators `legacy` was empty,
+  nothing was delegated to `matches_field`, the inline loop matched none of the
+  remaining families, and the function returned `True`. `select_rules` and
+  `explain_when` both route through it, so `{"days_since_login": {"gte": 45}}`
+  fired on `0` and the trace reported `reason: "satisfied"` for the failure.
+  Fixed by partitioning on family: `string`/`collection`/`null` inline,
+  everything else delegated to `matches_field`, which also preserves both
+  fail-closed properties (an unknown operator is unknown to `matches_field`, and
+  an `external` operator likewise, so `evaluate_when_external` still sees the
+  `False` it relies on to hand off).
+- **`COMMUNICATION_POLICY_RULES["sensitive_complaint"]` had never fired.** It
+  tested `top_issue_1` against `"refund request"`, `"complaints"`,
+  `"billing dispute"` and `"privacy concern"`, none of which
+  `chat_analytics.build_summary` can emit — it derives `top_issues` from
+  `PREDEFINED_POLICY_AREAS` with underscores replaced by spaces, plus the
+  synthetic `"repeated concerns"`. Now it tests the reachable vocabulary, and
+  `validate_communication_tables` errors if a rule lists a value the context
+  cannot hold. The existing test that exercised the precedence ladder passed
+  `top_issue_1="refund request"` and so was asserting against a dead branch; it
+  now uses a reachable value and a new test pins the vocabulary.
+- **`models.build_relationship_catalog` reported an empty `join_columns` for all
+  27 relationships.** It unpacked three names from `synchronize_pairs`, which
+  yields 2-tuples, *and* then referenced a local `parent` that the function
+  never assigned. Both raised, and a bare `except Exception` swallowed both, so
+  the catalog has said "no foreign-key columns here" for every relationship
+  since it was written. The handler is gone rather than narrowed, because the
+  introspection is deterministic and verified against all 27 relationships -- a
+  future breakage should be loud instead of silently reporting an empty list.
+- **`retention.build_retention_recommendations` had a guaranteed `NameError`** in
+  its health-band block. Repaired, not left deleted; see the expansion log.
+- **`suppress_recent_complaint` is no longer dead twice over.** It needed
+  `complaints_last_30d`, which no producer emitted, *and* the
+  `communication_suppression` pack had no caller anywhere in the app. The
+  complaint ledger supplies the count (`_with_complaint_history`, which leaves
+  the key *absent* on a count failure so a transient DB problem cannot
+  masquerade as "no complaints" and switch the safeguard off), and
+  `resolve_recovery_outreach_strategy` now evaluates the pack and reports a
+  firing suppression rule *alongside* the resolved strategy rather than
+  overwriting it. That handler also became async so it can load the admin
+  override, which the recovery path previously ignored entirely — meaning a
+  playbook's `notify_customer` and `/chat/communication-strategy` could report
+  two different strategies for the same person.
+
+## Alembic: what was wrong, and what is still true
+
+### Fixed (2026-09-30)
+
+- **`0366de366666_backfill_and_enforce_booking_timestamps.py` moved to
+  `alembic/archived/`.** It shipped with
+  `down_revision = "<PUT_PREVIOUS_REVISION_ID_HERE>"`, a literal template
+  placeholder. Because alembic builds its revision map from *every* module under
+  `versions/`, that one file broke **every** command -- `upgrade`, `downgrade`,
+  `history`, `current`, `heads`, `stamp` -- not just the one being run. It was
+  moved rather than repaired because three facts ruled out wiring it back: nothing
+  referenced it and it referenced nothing; it never sat in the deployed chain
+  (the live chain starts at `20260905_01`, which declares `down_revision = None`);
+  and its `upgrade()` is PostgreSQL-only (`ALTER COLUMN ... SET NOT NULL`), so it
+  could not run against this project's SQLite even with a valid parent. It is
+  preserved, with the reasoning, in `alembic/archived/README.md`.
+- The chain is now a single linear head and `history` / `heads` / `current` all
+  work. The complaint migration's `downgrade` was exercised end to end: it drops
+  `complaint_decisions`, `complaint_events` and `complaint_cases`, and
+  re-upgrading recreates them.
+- Two genuine bugs surfaced on the way and were fixed: a missing `sqlalchemy.func`
+  import in `recovery_playbooks._with_complaint_history`, hidden by an
+  `except Exception`, which meant `complaints_last_30d` was never produced and
+  `suppress_recent_complaint` was still dead; and
+  `models.build_relationship_catalog`, which unpacked three names from a 2-tuple
+  *and* referenced an unassigned local, both swallowed by a bare
+  `except Exception`, so it had reported an empty `join_columns` for all 27
+  relationships since it was written.
+
+### Still true, and the thing to know before deploying
+
+- **`alembic upgrade head` does not work against an empty database, and is not
+  supposed to.** `app/main.py:116` runs `Base.metadata.create_all` on every
+  startup, so the schema is owned by the models, not by the chain. Every
+  migration in `versions/` creates a table `create_all` already creates, and the
+  chain's base `20260905_01` issues `ALTER TABLE users ADD COLUMN is_admin`
+  against a table that does not exist yet on a fresh database.
+- **The working workflow for an app-created database is `stamp head`.** Then
+  `upgrade head` is a no-op and subsequent migrations apply normally. Documented
+  in `alembic/README.md`, which also states the two-things rule for a new table
+  (the model *and* the migration) and why only the model is not enough.
+- **`20260905_01` also contained three PostgreSQL-only statements**, so the chain
+  had never been runnable on SQLite in *either* direction — not just the
+  `downgrade` reported earlier. All three now go through `batch_alter_table`:
+  adding a `chat_history.user_id` column that carries a `REFERENCES` clause,
+  dropping the `users.is_admin` server default, and dropping
+  `chat_history.user_id` when it is part of a foreign-key definition. Two details
+  are not optional and are commented at the call site: the `users` alter needs
+  `recreate="always"` (a bare `alter_column` is not a rebuild trigger, so it
+  re-emits the native statement and SQLite raises `NotImplementedError` again),
+  and the `chat_history` foreign key had to be given a name
+  (`fk_chat_history_user_id_users`) because the copy-and-move path rejects an
+  anonymous constraint. `tests/test_migration_chain.py` round-trips the whole
+  chain — pre-`20260905` schema up, head, back to base — and asserts the rows
+  survive. Verified by reverting each fix in turn and watching the test fail.
+- `alembic/README.md` now carries the same table, because "the chain has
+  Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
+
 ## Expansion log
+
+### Complaints: case spine, escalation engine, decision support (2026-09-30)
+- `app/models.py`: `ComplaintCase` / `ComplaintEvent` / `ComplaintDecision`,
+  with `ENUM_FIELD_SPECS`, `TABLE_LIFECYCLE`, `UNCONSTRAINED_REFERENCE_COLUMNS`,
+  `OPEN_TEXT_COLUMNS` and `TABLE_FIELD_SENSITIVITY` entries for every new column.
+- `alembic/versions/20260930_01_add_complaint_cases.py`, down_revision
+  `20260929_01_add_preference_consent_tables`. Verified column-for-column and
+  index-for-index against `Base.metadata` in `TestMigration`.
+- `app/services/complaints.py` — the engine. `validate_complaints()` returns
+  errors vs warnings over ten named checks; `build_complaints_catalog()`
+  publishes every table plus its operator and severity vocabulary.
+- `app/routers/complaints.py` + `schemas/chat.py` — 18 routes, 8 contract
+  families, all classified in `deps.AUTHZ_RULES` (four new rules, including one
+  for the bare `POST /complaints`, which `/complaints/*` does not match).
+- `recovery_playbooks`: `escalate_ticket` opens a real case; `notify_customer`
+  loads the admin override and runs the suppression pack;
+  `_with_complaint_history` supplies `complaints_last_30d`.
+- `communication_strategy`: `validate_communication_tables` added and
+  `sensitive_complaint` repointed at the reachable vocabulary.
+- `rule_engine`: `matches_field_extended` family partition fixed (see above).
+- Added `tests/test_complaints_expansion.py` (114 tests), most of them against a
+  **real in-memory SQLite** rather than a session double, because this surface
+  is a state machine with a unique constraint and a feedback loop and a double
+  would assert my own assumptions back at me.
+- `CODE_MAP` r5 → r6: `routers/complaints` (17 leaves for 18 routes, per
+  rule 3), `services/complaints` (19 leaves), 8 new `schemas_chat` leaves.
+  653 leaves / 60 internal nodes, up from 608 / 58.
+
+### Clear-all pass: alembic, lint baseline, complaints follow-ups (2026-09-30)
+- `alembic/archived/` + `alembic/README.md` (see the section above).
+- **Lint baseline cleared: 124 -> 0.** Not a blanket `--fix`, because two of the
+  categories produced *false* positives that a silent fix would have shipped as
+  bugs:
+  - `F841` does not count a reference from inside a lambda as a use.
+    `routers/users.py` had a `unknown = datetime.min...` sort sentinel used only
+    by a sort key lambda; removing it raised `NameError` and failed one test. The
+    sentinel is back, with a note at the site.
+  - 86 of the `F401`s included imports that were genuinely load-bearing while
+    looking unused. `policy_scoring._topic_catalog_size` resolved a
+    config-declared catalog name with `globals()[source]`, so the
+    `from app.services.topics import TOPIC_CATALOG` was a real dependency no
+    linter could see, and an unknown name raised a bare `KeyError`. Replaced with
+    an explicit `TOPIC_CATALOG_SOURCES` registry: the import is now a visible
+    reference and a typo names the valid options.
+- Dead code removed: 5 duplicate function definitions in `models.py` (270 lines;
+  the later binding always won, so the earlier copies were unreachable),
+  14 unused locals, and a `dataclasses.replace()` whose result was never read.
+- `app/cell_matrix.py`: added a `complaint_case` resource (`summary`,
+  `resolution_note`, `factors_json`) so the admin rule can name a cell that
+  exists. `factors_json` is `read` for admin/agent and `none` for auditor and
+  owner -- the decision snapshot is the most re-identifying field in the family.
+  `deps.AUTHZ_RULES["complaints_admin"].hardening.cell` now points at it and
+  `validate_authz` reports 0 warnings.
+- `tests/_doubles.py`: extracted the three async-session doubles that
+  `test_recovery_governance_expansion.py` and
+  `test_predictive_recovery_expansion.py` each carried a copy of. They had
+  drifted -- the complaints work had to be applied to both `_FakeDb` classes --
+  and 163 lines went with them.
+- `open_complaint` now reports `existing_open_case`: a repeat complaint in a
+  category that already has a live case is **linked, not blocked**. Refusing it
+  would be `suppress_recent_complaint` applied to the wrong place, since that
+  rule exists to stop outreach rather than the right to complain. Pinned by
+  `test_a_repeat_complaint_is_reported_not_blocked`, and
+  `test_lodging_is_never_gated_by_consent` asserts `open_complaint` reads no
+  consent state at all.
+### Repaired `build_retention_recommendations` (2026-09-30)
+- `app/services/retention.py`: the health-band block referenced a local `health`
+  the function never assigned, so it raised `NameError` on every call past the
+  empty-series early return. It went unnoticed because the function has no
+  callers — nothing routes to it — so the crash could not fire in production
+  either. Fixed rather than left deleted, by calling the existing
+  `build_retention_health_report(snapshots)["health"]` instead of assembling a
+  context locally: that helper already does
+  `snapshot_series_points` -> `build_retention_health_context` ->
+  `resolve_retention_health` and is what the async dashboard helpers use, so this
+  is what keeps the recommendation's band identical to the one shown everywhere
+  else. A local assembly would have been a second, free to drift.
+- 6 new tests in `tests/test_retention_policy_expansion.py`, against a real
+  in-memory SQLite rather than the file's scripted `_FakeDb` (the function makes
+  two reads and a single scripted result would hide a mistake in either). One
+  asserts the band agrees with `build_retention_health_report`; one is a static
+  scope check that the function reads no name it does not assign, because a
+  `NameError` in an uncalled function is invisible to every runtime check. Both
+  were verified to fail when the bug is reintroduced.
+- `tests/_doubles.py` grew a `SqliteHarness`, and `test_complaints_expansion.py`
+  now uses it instead of its own copy — the event-loop plumbing is the part that
+  is easy to get wrong, so it lives in one place.
+
+- 6 new tests for the swallowed-error class of bug, including an AST check that
+  every feed collector handles `SQLAlchemyError` and nothing broader.
 
 ### Consolidation (committed `fc1600a`)
 - `analyze_sentiment` + constants centralized in `services/chat_analytics.py`

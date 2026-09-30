@@ -28,7 +28,7 @@ those silently breaks callers that iterate them.
 """
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import pytest
 from sqlalchemy import Column, Integer, String

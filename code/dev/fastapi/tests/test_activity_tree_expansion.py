@@ -17,20 +17,17 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from fastapi.testclient import TestClient
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app import deps, models
+from app import deps
 from app.main import app
-from app.services import activity_tree
 from app.services.activity_tree import (
     ACTIVITY_TREE_ANOMALY_RULES,
     ACTIVITY_TREE_GROUP_AXES,
     ACTIVITY_TREE_RANK_OPTIONS,
     ACTIVITY_TREE_RELATIVE_ANOMALY_RULES,
-    TREE_NEGATIVE_KEYWORDS,
     apply_user_filters,
     attach_group_relative_anomalies,
     build_activity_items,

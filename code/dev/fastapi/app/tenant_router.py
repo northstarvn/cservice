@@ -52,9 +52,9 @@ import logging
 import os
 import re
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator, Optional
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request

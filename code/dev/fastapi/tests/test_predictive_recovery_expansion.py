@@ -20,6 +20,7 @@ DB-backed tests run outside the fake-DB harness.
 """
 import os
 import sys
+import json
 import asyncio
 from datetime import datetime, timezone
 
@@ -27,6 +28,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from _doubles import Empty, FakeDb, Rows  # noqa: F401
 
 from app import models  # noqa: E402
 from app.main import app  # noqa: E402
@@ -91,70 +94,10 @@ def _sentiment(label="negative", score=0.92):
     return Sentiment(label=label, score=score)
 
 
-class _Empty:
-    def scalars(self):
-        return self
-
-    def all(self):
-        return []
-
-    def first(self):
-        return None
-
-
-class _Rows:
-    def __init__(self, rows):
-        self.rows = list(rows)
-
-    def scalars(self):
-        return self
-
-    def all(self):
-        return self.rows
-
-    def first(self):
-        return self.rows[0] if self.rows else None
-
-
-class _FakeDb:
-    """Async session double: table-shaped execute routing + add/flush/commit."""
-
-    def __init__(self, wallets=(), chat_rows=(), bookings=(), users=()):
-        self.wallets = list(wallets)
-        self.chat_rows = list(chat_rows)
-        self.bookings = list(bookings)
-        self.users = list(users)
-        self.pending = []
-        self.next_id = 1
-        self.commits = 0
-
-    async def execute(self, statement, *_args, **_kwargs):
-        text = str(statement)
-        if "points_wallets" in text:
-            return _Rows(self.wallets)
-        if "chat_history" in text:
-            return _Rows(self.chat_rows)
-        if "bookings" in text:
-            return _Rows(self.bookings)
-        if "FROM users" in text:
-            return _Rows(self.users)
-        return _Empty()
-
-    def add(self, obj):
-        if getattr(obj, "id", None) is None:
-            obj.id = self.next_id
-            self.next_id += 1
-        self.pending.append(obj)
-
-    async def flush(self):
-        pass
-
-    async def commit(self):
-        self.commits += 1
 
 
 def _inject_db_fake():
-    return _FakeDb(
+    return FakeDb(
         wallets=[models.PointsWallet(id=5, user_id=1, point_type="loyalty_points", balance=100.0)]
     )
 
@@ -312,15 +255,31 @@ class TestOrchestrator:
         actions = [row for row in db.pending if isinstance(row, models.RecoveryAction)]
         assert len(actions) == 3
         by_action = {row.action: row for row in actions}
-        assert by_action["escalate_ticket"].reference == "ESC-1-001"
-        assert by_action["escalate_ticket"].status == "executed"
-        assert '"ticket_reference": "ESC-1-001"' in by_action["escalate_ticket"].result_json
+        # This used to assert the literal "ESC-1-001". That string came from a
+        # per-run in-process counter, so the first escalation for a user after a
+        # restart produced a reference identical to every earlier one -- a
+        # customer holding it would reach the wrong case, and nothing resolved
+        # it to a queue or an owner. `escalate_ticket` now opens a real
+        # complaint case and reports that case's durable reference, so the
+        # assertion is on the shape and on the cross-reference rather than on a
+        # counter value. `test_escalate_ticket_reference_is_stable_across_runs`
+        # in test_complaints_expansion.py pins the stability property itself.
+        escalated = by_action["escalate_ticket"]
+        assert escalated.status == "executed"
+        assert escalated.reference.startswith("CMP-"), escalated.reference
+        assert '"ticket_reference": "' + escalated.reference + '"' in escalated.result_json
+        result = json.loads(escalated.result_json)
+        assert result["reference_is_durable"] is True
+        assert result["opened"] is True
+        assert result["case_id"] is not None
         guardrail = by_action["adjust_policy_score"]
         assert guardrail.playbook_id == "recovery_policy_guardrail"
         assert guardrail.status == "executed"
 
-        # Report carries the escalation result + audit view.
-        assert report["executed_actions"][1]["reference"] == "ESC-1-001"
+        # Report carries the escalation result + audit view. The reference is the
+        # complaint case's, not a per-run counter's -- see the note above.
+        assert report["executed_actions"][1]["reference"] == escalated.reference
+        assert report["executed_actions"][1]["reference"].startswith("CMP-")
         assert report["summary"].startswith("3 playbook(s) matched")
 
     def test_dry_run_writes_nothing(self):
@@ -341,7 +300,7 @@ class TestOrchestrator:
         assert db.wallets[0].balance == 100.0
 
     def test_no_match_writes_nothing(self):
-        db = _FakeDb()
+        db = FakeDb()
         report = asyncio.run(
             recovery_playbooks.run_recovery_playbooks(
                 db,
@@ -423,7 +382,7 @@ class TestOrchestrator:
             response="understood",
             timestamp=NOW,
         )
-        db = _FakeDb(chat_rows=[row])
+        db = FakeDb(chat_rows=[row])
         report = asyncio.run(
             recovery_playbooks.run_recovery_playbooks(
                 db,
@@ -439,7 +398,7 @@ class TestOrchestrator:
         assert "recovery_readiness" in report["context"]
 
     def test_auto_recovery_pass_scans_users(self):
-        db = _FakeDb(users=[1, 2])
+        db = FakeDb(users=[1, 2])
         payload = asyncio.run(recovery_playbooks.run_auto_recovery_pass(db))
         assert payload["users_scanned"] == 2
         assert payload["users_recovered"] == 0
@@ -468,7 +427,7 @@ class TestActions:
         assert db.wallets[0].balance == 150.0
 
     def test_credit_creates_wallet_when_missing(self):
-        db = _FakeDb()
+        db = FakeDb()
         result = asyncio.run(
             recovery_playbooks.credit_recovery_points(db, 1, "loyalty_points", 25.0)
         )
@@ -478,12 +437,33 @@ class TestActions:
         assert wallets[0].user_id == 1
         assert wallets[0].point_type == "loyalty_points"
 
-    def test_escalation_reference_uses_sequence(self):
+    def test_escalation_reference_uses_sequence_only_as_a_fallback(self):
+        """The `ESC-` form survives, but only when there is no real case.
+
+        `build_escalation_result` used to always mint `ESC-{user}-{seq:03d}`
+        from an in-process counter. A restart reset that counter, so the first
+        escalation for a user afterwards reissued a reference that already
+        existed -- and nothing anywhere resolved it to a case, a queue or an
+        owner. The counter form is retained as a documented fallback and the
+        result says which of the two it used, so a reader is never left
+        wondering whether a reference can be looked up.
+        """
         first = recovery_playbooks.build_escalation_result(7, {"priority": "high"}, 1)
         assert first["ticket_reference"] == "ESC-7-001"
+        assert first["reference_is_durable"] is False
         assert first["priority"] == "high"
+
+        # Same inputs, different sequence -> the fallback still collides by
+        # design. That is precisely why it must not be the only form.
         second = recovery_playbooks.build_escalation_result(7, {"priority": "urgent"}, 12)
         assert second["ticket_reference"] == "ESC-7-012"
+
+        # A real case reference wins outright, regardless of the sequence.
+        with_case = recovery_playbooks.build_escalation_result(
+            7, {"priority": "high"}, 1, complaint_reference="CMP-000042"
+        )
+        assert with_case["ticket_reference"] == "CMP-000042"
+        assert with_case["reference_is_durable"] is True
 
     def test_apply_policy_adjustment_recomputes_tier(self):
         snapshot = policy_scoring.PolicyScoreSnapshot(

@@ -23,7 +23,7 @@ to the key itself.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 import itertools
 import re
@@ -2647,7 +2647,6 @@ def locale_registry_audit() -> dict[str, Any]:
                 )
 
     # Overrides: the one part of the message surface coverage cannot see.
-    override_scopes = OVERRIDES.scopes()
     override_keys: dict[str, list[str]] = {}
     shipped = MESSAGE_CATALOG if isinstance(MESSAGE_CATALOG, dict) else {}
     for scope, keys in OVERRIDES.keys_by_scope().items():

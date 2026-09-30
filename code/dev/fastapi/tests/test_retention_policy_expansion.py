@@ -28,7 +28,9 @@ from fastapi.testclient import TestClient
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app import deps
+from _doubles import SqliteHarness
+
+from app import deps, models
 from app.main import app
 from app.rule_engine import validate_when
 from app.services import retention
@@ -616,3 +618,164 @@ def test_scoring_catalog_exposes_the_retention_policy_tables():
 
     catalog = asyncio.run(scoring_catalog())
     assert catalog["retention"]["catalog_version"] == "retention_v2"
+
+
+# ===========================================================================
+# build_retention_recommendations: the health-band entry
+# ===========================================================================
+#
+# This function had a block that referenced a local named `health` which the
+# function never assigned, so it raised `NameError` on every call that got past
+# the `if not snapshots` early return. It went unnoticed because the function
+# has no callers -- nothing routes to it -- so the crash could not fire in
+# production either. Ruff's F821 is what finally named it.
+#
+# These tests run against a real in-memory SQLite rather than the scripted
+# `_FakeDb` above, because the function makes two reads (the snapshot window and
+# the per-type counts) and a single scripted result would have hidden a mistake
+# in either one.
+
+
+@pytest.fixture()
+def harness():
+    h = SqliteHarness()
+    h.run(h.setup())
+    try:
+        yield h
+    finally:
+        h.run(h.teardown())
+        h.close()
+
+
+def _seed_snapshots(harness, series, *, user_id=1):
+    for index, (loyalty, risk, days_ago) in enumerate(series, start=1):
+        harness.add(
+            models.RetentionSnapshot(
+                id=index,
+                user_id=user_id,
+                snapshot_type="daily",
+                window_days=30,
+                loyalty_score=loyalty,
+                churn_risk=risk,
+                lifecycle_stage="at_risk",
+                created_at=datetime.now(timezone.utc) - timedelta(days=days_ago),
+            )
+        )
+    harness.commit()
+
+
+COLLAPSING_SERIES = [(60.0, "low", 10), (40.0, "medium", 8), (20.0, "high", 5), (8.0, "critical", 2)]
+STABLE_SERIES = [(78.0, "low", 30), (79.0, "low", 24), (78.0, "low", 18), (79.0, "low", 12)]
+
+
+def test_recommendations_include_a_health_band_entry(harness):
+    harness.user(1)
+    _seed_snapshots(harness, COLLAPSING_SERIES)
+    recs = harness.run(retention.build_retention_recommendations(harness.session, 1, 30))
+    bands = [r for r in recs if r["area"].startswith("health-band:")]
+    assert bands, recs
+    assert bands[0]["area"] == "health-band:critical"
+    assert bands[0]["priority"] == "high"
+
+
+def test_a_health_recommendation_cites_the_rule_that_fired(harness):
+    harness.user(1)
+    _seed_snapshots(harness, COLLAPSING_SERIES)
+    recs = harness.run(retention.build_retention_recommendations(harness.session, 1, 30))
+    band = next(r for r in recs if r["area"].startswith("health-band:"))
+    # The evidence has to name the rule and its actions, or it is an assertion
+    # with nothing behind it.
+    assert "Rule health_" in band["evidence"]
+    assert "suggested actions:" in band["evidence"]
+
+
+def test_the_band_agrees_with_the_health_report(harness):
+    """The whole point of routing through `build_retention_health_report`.
+
+    If the recommendation bandued the customer independently, the queue and the
+    dashboard could disagree about the same customer -- which is the failure
+    mode a single shared composition exists to prevent.
+    """
+    harness.user(1)
+    _seed_snapshots(harness, COLLAPSING_SERIES)
+    recs = harness.run(retention.build_retention_recommendations(harness.session, 1, 30))
+    band = next(r for r in recs if r["area"].startswith("health-band:"))
+    snapshots = harness.run(retention._load_retention_snapshots(harness.session, 1, 30))
+    health = retention.build_retention_health_report(snapshots)["health"]
+    assert band["area"] == f"health-band:{health['band']}"
+    assert band["recommendation"] == health["rule_name"]
+
+
+def test_a_healthy_customer_gets_no_health_recommendation(harness):
+    """A rule with no actions produces no entry, so the list is not padded."""
+    harness.user(1)
+    _seed_snapshots(harness, STABLE_SERIES)
+    recs = harness.run(retention.build_retention_recommendations(harness.session, 1, 30))
+    health = retention.build_retention_health_report(
+        harness.run(retention._load_retention_snapshots(harness.session, 1, 30))
+    )["health"]
+    if not health["actions"]:
+        assert not [r for r in recs if r["area"].startswith("health-band:")]
+
+
+def test_the_empty_series_early_return_is_untouched(harness):
+    harness.user(1)
+    recs = harness.run(retention.build_retention_recommendations(harness.session, 1, 30))
+    assert [r["area"] for r in recs] == ["coverage"]
+    assert "No snapshots were found" in recs[0]["evidence"]
+
+
+def test_the_function_never_references_an_unassigned_local():
+    """Static guard on the exact class of bug, so it cannot come back.
+
+    A `NameError` in a function with no callers is invisible to every runtime
+    check -- nothing routes to `build_retention_recommendations`, so the crash
+    could not fire in production either. That is precisely why it survived, and
+    why the absence of the pattern is asserted here rather than exercised.
+
+    Resolution is done against the real scopes -- parameters, assignments,
+    module globals, builtins -- rather than a hand-maintained allow-list, which
+    would itself rot the first time the function used a new name.
+    """
+    import ast
+    import builtins
+    import inspect
+    import textwrap
+
+    func = retention.build_retention_recommendations
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+
+    assigned = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+    parameters = {
+        arg.arg
+        for arg in (
+            *tree.body[0].args.posonlyargs,
+            *tree.body[0].args.args,
+            *tree.body[0].args.kwonlyargs,
+        )
+    }
+    # Comprehension targets bind inside their own scope and read as locals.
+    comprehension_targets = {
+        sub.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.comprehension)
+        for sub in ast.walk(node.target)
+        if isinstance(sub, ast.Name)
+    }
+    resolved = (
+        assigned
+        | parameters
+        | comprehension_targets
+        | set(vars(retention))
+        | set(dir(builtins))
+    )
+    read = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    assert not (read - resolved), sorted(read - resolved)

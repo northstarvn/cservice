@@ -187,7 +187,16 @@ def test_evaluate_cell_matrix_returns_full_per_cell_map():
 
 def test_cell_matrix_catalog_shape():
     catalog = cell_matrix.build_cell_matrix_catalog()
-    assert set(catalog["resources"]) == {"customer_profile", "booking", "payments", "audit_trail"}
+    assert set(catalog["resources"]) == {
+        "customer_profile",
+        "booking",
+        "payments",
+        "audit_trail",
+        # Added with the complaints surface. Naming the resource explicitly is
+        # the point of this assertion: it is what catches a cell matrix growing
+        # a resource that nothing routes through.
+        "complaint_case",
+    }
     assert catalog["access_levels"] == ["none", "read", "write"]
     assert "full_name" in catalog["cells"]["customer_profile"]
 

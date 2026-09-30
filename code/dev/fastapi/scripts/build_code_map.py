@@ -214,6 +214,17 @@ TREE = _node(
               # pre-flight / advisory and never mutate a selection
               "taxonomy", "governance", "integrity", "match", "ranked",
               "validate", "drift", "lifecycle"),
+        # Complaints. Its own router rather than leaves under `chat`, because a
+        # case has an identity that outlives the session that produced it and is
+        # quoted over the phone days later -- treating it as a chat message is
+        # what made the previous surface untrackable. Grouped into business
+        # surfaces per maintenance rule 3, not one leaf per route.
+        _node("complaints",
+              "case", "case_list", "case_detail", "note", "withdraw", "reopen",
+              "acknowledge", "resolve", "close",
+              "decision_support", "apply", "customer_visibility",
+              "queue", "sla_report", "auto_escalation_sweep", "decision_audit",
+              "governance"),
         _node("audit",
               "efficiency", "enhancements", "audit_catalog", "trail_catalog", "log",
               "logs", "summary", "pipeline_stats", "pipeline_event", "transactions",
@@ -278,6 +289,15 @@ TREE = _node(
         _node("self_service",
               "recovery_status", "points_forecast", "policy_posture",
               "status_dashboard", "visible_actions"),
+        # Complaints. One leaf per decision-support surface rather than per
+        # config table, so the tree says what an operator can ask for.
+        _node("complaints",
+              "case_lifecycle", "case_timeline", "case_ownership",
+              "escalation_triggers", "escalation_guards", "escalation_decision",
+              "authority_floor", "routing", "sla_matrix", "regulatory_deadline",
+              "decision_feeds", "decision_dossier", "precedent_retrieval",
+              "decision_history", "auto_escalation_sweep", "sla_report",
+              "admin_rollup", "case_linkage", "validation", "catalog"),
         _node("audit_log",
               "record", "list", "summary", "action_catalog",
               "governed_record", "action_aliases", "action_specs",
@@ -298,7 +318,11 @@ TREE = _node(
               "insight", "recovery", "recovery_playbooks", "retention", "snapshot_ops", "topic_ranking", "topic_policy",
               # Stage A contract families, one leaf per payload family.
               "customer_360", "customer_explanations", "customer_recovery",
-              "preference_consent", "self_service"),
+              "preference_consent", "self_service",
+              # Complaints contract family.
+              "complaint_case", "complaint_event", "complaint_decision",
+              "complaint_dossier", "complaint_precedent",
+              "complaint_decision_support", "complaint_admin", "complaint_catalog"),
         _node("schemas_audit",
               "efficiency", "enhancements", "audit_trail",
               "governed_write", "integrity", "actors", "timeline",

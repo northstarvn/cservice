@@ -18,7 +18,6 @@ from app.services.bookings import (
     booking_to_event_out,
     build_typed_booking_assignment_history_summary,
     build_typed_booking_assignment_report,
-    build_typed_booking_assignment_report_from_existing_report,
     build_typed_booking_assignment_report_from_payload,
     build_typed_booking_assignment_report_from_record,
     build_typed_booking_assignment_reports_from_records,

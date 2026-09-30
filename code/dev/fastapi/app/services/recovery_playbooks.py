@@ -56,14 +56,14 @@ import inspect
 import json
 import logging
 import os
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import models
+from app import models, rule_engine
 from app.rule_engine import evaluate_when, resolve_params
 from app.schemas.chat import (
     DissatisfactionRecoveryReport,
@@ -560,10 +560,29 @@ async def credit_recovery_points(
     }
 
 
-def build_escalation_result(user_id: int, params: dict[str, Any], sequence: int) -> dict[str, Any]:
-    """Generate the escalation ticket reference for the logged action."""
+def build_escalation_result(
+    user_id: int,
+    params: dict[str, Any],
+    sequence: int,
+    *,
+    complaint_reference: str = "",
+) -> dict[str, Any]:
+    """Describe an escalation. Prefer a real case reference when there is one.
+
+    The ``ESC-{user}-{sequence:03d}`` form is kept only as a *fallback*, and it
+    is a worse reference in every way that matters: ``sequence`` is a per-run
+    in-process counter, so the first escalation for a user after a restart
+    produced a string identical to every earlier one, and nothing ever resolved
+    that string back to a queue or an owner. When a complaint case exists, its
+    reference is the durable identity and this function should be reporting that
+    one -- see ``_handle_escalate_ticket``, which opens the case.
+    """
+    reference = str(complaint_reference or "").strip()
+    if not reference:
+        reference = f"ESC-{int(user_id)}-{int(sequence):03d}"
     return {
-        "ticket_reference": f"ESC-{int(user_id)}-{int(sequence):03d}",
+        "ticket_reference": reference,
+        "reference_is_durable": bool(complaint_reference),
         "priority": str(params.get("priority", "medium")),
         "assignee": str(params.get("assignee", "support")),
         "status": "created",
@@ -594,12 +613,8 @@ def apply_policy_adjustment(
     adjusted_access = clamp(snapshot.access_score + applied["access_delta"])
     adjusted_customer = clamp(snapshot.customer_score + applied["customer_delta"])
     adjusted_system = clamp(snapshot.system_score + applied["system_delta"])
-    adjusted = replace(
-        snapshot,
-        access_score=adjusted_access,
-        customer_score=adjusted_customer,
-        system_score=adjusted_system,
-    )
+    # The preview reports the three clamped scores individually below, so a
+    # rebuilt snapshot was constructed and thrown away on every call.
     tier = resolve_policy_tier(adjusted_access, adjusted_system)
     posture = resolve_control_posture(tier, adjusted_access, adjusted_system)
     return {
@@ -1052,8 +1067,91 @@ async def _handle_credit_points(ctx: RecoveryActionContext) -> dict[str, Any]:
     )
 
 
-def _handle_escalate_ticket(ctx: RecoveryActionContext) -> dict[str, Any]:
-    return build_escalation_result(ctx.user_id, ctx.params, ctx.sequence)
+async def _handle_escalate_ticket(ctx: RecoveryActionContext) -> dict[str, Any]:
+    """Open (or reuse) a real complaint case for this escalation.
+
+    This is the fix for the surface's original hole. The action used to build
+    an ``ESC-`` string from a per-run counter and write nothing, so an
+    "escalation" was a log line nobody could act on and a reference that
+    collided with every earlier one after a restart.
+
+    Now a `dry_run` reports what *would* open and touches nothing, and a real
+    run opens a genuine case: durable reference, category, severity from the
+    configured category defaults, an SLA clock, a routing rule applied, and an
+    ``opened`` event. Re-running the same playbook for the same customer
+    reuses the live case rather than opening a second one, because two open
+    cases for the same unresolved problem is how a queue becomes unreadable.
+
+    The auto-escalation *sweep* (``services/complaints.py``) owns tier moves;
+    this owns case creation. Splitting them means the background playbook path
+    cannot escalate a case's tier on its own without the guard set having run.
+    """
+    from app.services import complaints as complaints_service
+
+    if ctx.dry_run or ctx.db is None:
+        route = complaints_service.resolve_route(
+            {
+                "category": str(ctx.params.get("category", complaints_service.DEFAULT_COMPLAINT_CATEGORY)),
+                "severity": str(ctx.params.get("severity", "medium")),
+            }
+        )
+        return {
+            **build_escalation_result(ctx.user_id, ctx.params, ctx.sequence),
+            "opened": False,
+            "dry_run": True,
+            "would_open_category": str(ctx.params.get("category", complaints_service.DEFAULT_COMPLAINT_CATEGORY)),
+            "would_route_to_tier": str(route.get("to_tier", "")),
+            "would_route_to_team": str(route.get("owner_team", "")),
+            "note": "a dry run writes nothing; a real run opens a durable case",
+        }
+
+    # `commit=False`: the orchestrator owns the transaction and commits once at
+    # the end, so a case must not become durable on its own here. See the note on
+    # `open_complaint`.
+    #
+    # `find_open_case` issues a real SELECT, so the session's autoflush makes a
+    # case opened earlier in this same transaction visible to it. That is what
+    # stops a second escalation in one run from opening a duplicate -- no
+    # separate bookkeeping of uncommitted rows is needed, and none is kept,
+    # because a helper that only inspected `session.new` would miss every case
+    # that had already been flushed and quietly claim to be a safety net.
+    existing = await complaints_service.find_open_case(
+        ctx.db, ctx.user_id, category=str(ctx.params.get("category", ""))
+    )
+    if existing is not None:
+        return {
+            **build_escalation_result(
+                ctx.user_id, ctx.params, ctx.sequence, complaint_reference=str(existing.reference)
+            ),
+            "opened": False,
+            "reused_existing_case": True,
+            "case_id": int(existing.id),
+            "status": str(existing.status),
+        }
+
+    opened = await complaints_service.open_complaint(
+        ctx.db,
+        ctx.user_id,
+        category=str(ctx.params.get("category", complaints_service.DEFAULT_COMPLAINT_CATEGORY)),
+        severity=str(ctx.params.get("severity", "") or ""),
+        summary=str(ctx.params.get("reason", "escalated by a recovery playbook")),
+        source="recovery_playbook",
+        now=ctx.now,
+        commit=False,
+    )
+    return {
+        **build_escalation_result(
+            ctx.user_id, ctx.params, ctx.sequence, complaint_reference=str(opened["reference"])
+        ),
+        "opened": True,
+        "case_id": opened["id"],
+        "category": opened["category"],
+        "severity": opened["severity"],
+        "tier": opened["tier"],
+        "owner_team": opened["owner_team"],
+        "response_due_at": opened["response_due_at"],
+        "resolution_due_at": opened["resolution_due_at"],
+    }
 
 
 def _handle_adjust_policy_score(ctx: RecoveryActionContext) -> dict[str, Any]:
@@ -1091,21 +1189,53 @@ def resolve_recovery_outreach_strategy(
     context: dict[str, Any],
     *,
     locale: str = "global",
+    admin_override: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Resolve the outreach strategy for a recovery context.
 
-    Thin wrapper over the communication ladder's own entry point so the recovery
-    module owns the *adaptation* and the communication module owns the decision.
+    Two things this now does that it did not before, both of which were silent
+    wrongness rather than missing features.
+
+    * **It runs the `communication_suppression` rule pack.** The pack was
+      authored, exported, validated and catalogued, and had no caller anywhere
+      in the app -- so `suppress_recent_complaint` and
+      `suppress_negative_sentiment` had never suppressed anything in the life of
+      the system. The pack is evaluated here on the same context, and a firing
+      rule is reported as `suppressed` with its reason, which is how
+      "this customer has complained twice in thirty days" finally has any
+      effect at all.
+    * **It accepts the admin override.** The recovery path never loaded it, so
+      `notify_customer` inside a playbook could not see an override that
+      `/chat/communication-strategy` reported for the very same customer. Two
+      surfaces answering differently about one person is worse than either
+      answer being absent.
+
+    A fired suppression rule is reported *alongside* the resolved strategy
+    rather than overwriting the channel. Silently replacing an operator-visible
+    decision is the failure mode this module is otherwise built to avoid, and a
+    conflict between "suppress this" and "this is a service recovery" is
+    exactly the sort of thing a human should see.
     """
     from app.services.communication_strategy import resolve_communication_strategy
 
+    comm_context = _communication_context_from_recovery(context)
     strategy = resolve_communication_strategy(
-        _communication_context_from_recovery(context),
+        comm_context,
         locale=locale or "global",
+        admin_override=admin_override,
     )
     params = dict(strategy.get("params") or {})
+
+    suppression = rule_engine.select_rules("communication_suppression", comm_context)
+    fired = [
+        item
+        for item in suppression["fired"]
+        if dict(item.get("params") or {}).get("suppress")
+    ]
+    channel = str(params.get("channel", "email_followup"))
+
     return {
-        "channel": str(params.get("channel", "email_followup")),
+        "channel": channel,
         "tone": str(params.get("tone", "professional")),
         "framing": str(params.get("framing", "resolution_first")),
         "reply_urgency": str(params.get("reply_urgency", "standard")),
@@ -1114,6 +1244,15 @@ def resolve_recovery_outreach_strategy(
         "layer_label": str(strategy.get("layer_label", "")),
         "precedence": int(strategy.get("precedence", 0) or 0),
         "guidance": strategy.get("guidance", ""),
+        "suppressed": bool(fired) and channel != "none",
+        "suppression_pack": suppression["pack"],
+        "suppression_rules": [str(item["id"]) for item in fired],
+        "suppression_reason": str(dict(fired[0].get("params") or {}).get("reason", "")) if fired else "",
+        "suppression_note": (
+            "a fired suppression rule is reported next to the resolved strategy, "
+            "not applied over it; a conflict between 'suppress this' and 'this is "
+            "a service recovery' is for a human to settle"
+        ),
     }
 
 
@@ -1187,17 +1326,41 @@ def resolve_recovery_review_priority(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _handle_notify_customer(ctx: RecoveryActionContext) -> dict[str, Any]:
+async def _handle_notify_customer(ctx: RecoveryActionContext) -> dict[str, Any]:
     """Resolve the outreach strategy for this customer and report the trail.
 
     Records the decision; sends nothing. The action is deliberately a plan, not a
     side effect, so a playbook can never surprise a customer from a background
     sweep.
+
+    Now async solely so it can load the customer's admin override. It could not
+    before, which is why a playbook's `notify_customer` and the standalone
+    `/chat/communication-strategy` route could report two different strategies
+    for one person. Loading it here makes the recovery path answer the same
+    question the same way. A failure to load is reported rather than swallowed,
+    so "we could not see the override" stays distinguishable from "there is
+    none" -- the first is a bug, the second is a fact.
     """
+    from app.services.communication_strategy import load_admin_override
+
+    override: Optional[dict[str, Any]] = None
+    override_error = ""
+    if ctx.db is not None:
+        try:
+            override = await load_admin_override(ctx.db, int(ctx.user_id))
+        except Exception as exc:  # pragma: no cover - defensive
+            override_error = str(exc)
     resolved = resolve_recovery_outreach_strategy(
-        ctx.context, locale=str(ctx.params.get("locale", "global"))
+        ctx.context,
+        locale=str(ctx.params.get("locale", "global")),
+        admin_override=override,
     )
-    return {**resolved, "dispatched": False}
+    return {
+        **resolved,
+        "dispatched": False,
+        "admin_override_applied": override is not None,
+        "admin_override_error": override_error,
+    }
 
 
 def _handle_schedule_callback(ctx: RecoveryActionContext) -> dict[str, Any]:
@@ -1868,8 +2031,50 @@ async def _load_recovery_context(
         "dissatisfaction": dissatisfaction,
         "chat_rows": list(chat_rows or []),
         "bookings": list(bookings or []),
-        "context": build_realtime_recovery_context(summary, sentiment, dissatisfaction),
+        "context": await _with_complaint_history(
+            db, int(user_id), build_realtime_recovery_context(summary, sentiment, dissatisfaction)
+        ),
     }
+
+
+async def _with_complaint_history(
+    db: AsyncSession, user_id: int, context: dict[str, Any]
+) -> dict[str, Any]:
+    """Add the complaint count the `communication_suppression` pack needs.
+
+    `suppress_recent_complaint` in `rule_engine.RULE_PACKS` has tested
+    `complaints_last_30d >= 2` since it was written, and no producer anywhere
+    emitted that key -- so the rule could not fire, and the pack had no caller
+    besides its own catalog entry. A dead suppression rule is the worst kind of
+    dead rule: it looks like a safeguard against pestering a customer who has
+    already complained twice, and it has never once done so.
+
+    The count is sourced from the complaint cases rather than inferred from
+    signals, because "complained twice" is a fact about the complaint ledger and
+    not a thing readable off a sentiment score. A failure to count leaves the
+    key *absent* rather than setting it to zero, because `evaluate_when` fails
+    closed on an absent field -- a transient database problem must not be able
+    to masquerade as "no complaints" and silently switch the safeguard off.
+    """
+    enriched = dict(context)
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        result = await db.execute(
+            select(func.count(models.ComplaintCase.id)).where(
+                models.ComplaintCase.user_id == int(user_id),
+                models.ComplaintCase.opened_at >= cutoff,
+            )
+        )
+        enriched["complaints_last_30d"] = int((result.first() or [0])[0] or 0)
+    except SQLAlchemyError as exc:
+        # Narrow on purpose. This was `except Exception`, and that is how a
+        # missing `func` import shipped: the NameError was caught, recorded as
+        # `complaints_last_30d_error`, and the key silently never appeared -- so
+        # `suppress_recent_complaint` stayed dead while the code looked like it
+        # was supplying the key. A database problem should degrade this feed; a
+        # programming error must be loud.
+        enriched["complaints_last_30d_error"] = str(exc)
+    return enriched
 
 
 async def run_recovery_playbooks(
@@ -1939,7 +2144,6 @@ async def run_recovery_playbooks(
         action_name = str(item.get("action", ""))
         params = item.get("params", {})
         decision = decisions.get(int(item.get("index", -1)), {})
-        spec = RECOVERY_ACTION_SPEC_BY_NAME.get(action_name, {})
         payload = {
             "playbook_id": playbook_id,
             "action": action_name,

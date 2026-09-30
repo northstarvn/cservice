@@ -68,7 +68,6 @@ from app.services.points_exchange import (  # noqa: E402
 from app.services.policy_scoring import PolicyScoreSnapshot  # noqa: E402
 from app.regional_policy import (  # noqa: E402
     assess_booking_dates,
-    build_regional_policy_catalog,
     compute_taxed_amount,
     evaluate_labor_compliance,
     is_working_day,

@@ -65,7 +65,6 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator, Optional
 
 DEFAULT_START_VERSION = 1
@@ -858,7 +857,8 @@ def update_serialized(
             return record.update(expected_version, mutator)
         except StaleVersionError:
             pass
-    with record.pessimistic() as data:
+    # The context manager is the point; its yielded value was never read.
+    with record.pessimistic():
         return record._apply(mutator)
 
 

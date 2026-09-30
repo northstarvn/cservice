@@ -489,14 +489,36 @@ def _topic_tokens(normalized: str, separators: Sequence[str]) -> list[str]:
     return [token for token in text.split() if token]
 
 
-def _topic_catalog_size(source: str) -> int:
-    """Length of a named catalog, resolved by name so the rule row is data.
+#: The catalog names a ``TOPIC_SCORE_RULES`` row may name, mapped to the objects
+#: they refer to.
+#:
+#: This replaces a ``globals()[source]`` lookup, which is what made the imports
+#: above look unused to every linter while being load-bearing: the rule rows
+#: store the catalog as a *string* ("TOPIC_CATALOG"), and the scoring path
+#: resolved it against this module's own globals. Two consequences, both bad:
+#: a linter cannot see the dependency, and an unknown name raises ``KeyError``
+#: with no indication of which names are valid.
+#:
+#: An explicit registry makes the dependency visible to readers *and* to
+#: tooling, and turns a typo into a named error. The value is read live, not
+#: snapshotted: ``TOPIC_CATALOG`` grows when topics are added, and the original
+#: expressions read it at call time, so snapshotting would make the two disagree
+#: for every topic added afterwards.
+TOPIC_CATALOG_SOURCES: dict[str, Any] = {
+    "TOPIC_CATALOG": TOPIC_CATALOG,
+    "TOPIC_THEME_GROUPS": TOPIC_THEME_GROUPS,
+    "TOPIC_SECTORS": TOPIC_SECTORS,
+}
 
-    The length is read live at every call: ``TOPIC_CATALOG`` grows when topics
-    are added, and the original expressions did the same, so snapshotting it at
-    import time would make the two disagree for every topic added afterwards.
-    """
-    return len(globals()[str(source)])
+
+def _topic_catalog_size(source: str) -> int:
+    """Length of a named catalog, resolved through :data:`TOPIC_CATALOG_SOURCES`."""
+    name = str(source)
+    if name not in TOPIC_CATALOG_SOURCES:
+        raise KeyError(
+            f"unknown topic catalog {name!r}; known: {sorted(TOPIC_CATALOG_SOURCES)}"
+        )
+    return len(TOPIC_CATALOG_SOURCES[name])
 
 
 def topic_metric_contributions(metric: str, topic_text: str) -> list[dict[str, Any]]:
@@ -1198,13 +1220,11 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
     breadth = _topic_breadth_score(current_topic)
     complexity = _topic_complexity_score(current_topic)
     topic_fallback = current_topic
-    enriched_fallback = build_policy_topic_fallback(current_topic)
     theme_coverage = build_topic_theme_coverage(type("PolicyTopicSelection", (), {"topic": current_topic})())
     theme_coverage_items = [item for item in theme_coverage if item["matched_count"]]
     matched_themes = [item["theme"] for item in theme_coverage_items]
     portfolio_report = build_topic_portfolio_report(type("PolicyTopicSelection", (), {"topic": current_topic})())
     intelligence_report = build_topic_intelligence_report(type("PolicyTopicSelection", (), {"topic": current_topic})())
-    coverage_report = build_topic_coverage_report(type("PolicyTopicSelection", (), {"topic": current_topic})())
     signals = _topic_signals(current_topic)
     matched_topics = list(dict.fromkeys(signals["matched_topics"]))
     topic_focus = signals["topic_focus"] or matched_topics[:5] or list(dict.fromkeys(intelligence_report.matched_keywords[:5]))
@@ -1223,11 +1243,11 @@ def build_policy_topic_analysis_report(snapshot: PolicyScoreSnapshot, user: mode
             confidence=round(min(1.0, breadth / 100.0 + complexity / 120.0), 2),
         )
     ]
-    summary = (
-        f"{snapshot.summary or summarize_policy_score(snapshot)}, "
-        f"topic={current_topic}, topic_context={topic_context}, topic_richness={topic_richness}, topic_depth={topic_depth}, "
-        f"fallback={enriched_fallback}, topic_focus={len(topic_focus)}, topic_signals={len(matched_topics)}, sectors={len(_topic_sector_matches(current_topic))}, themes={len(matched_themes)}, overlap={theme_overlap_score}"
-    )
+    # A `summary` local used to live here, computing a richer description than
+    # the inline `summary=` the report is actually built with below. It was never
+    # read, so two summary strings existed and the published one was the inline
+    # one. Removed rather than wired up: which of the two should be the published
+    # summary is a product decision, and changing that text is not a lint fix.
     return chat_schemas.PolicyTopicAnalysisReport(
         generated_at=datetime.now(timezone.utc),
         user_id=user.id,
@@ -2016,8 +2036,11 @@ def validate_policy_scoring() -> dict[str, Any]:
             errors.append(f"TOPIC_SCORE_RULES declares metric '{metric}' more than once")
         seen_metrics.add(metric)
         catalog = row.get("catalog")
-        if catalog and str(catalog["source"]) not in globals():
-            errors.append(f"metric '{metric}' derives from unknown catalog '{catalog['source']}'")
+        if catalog and str(catalog["source"]) not in TOPIC_CATALOG_SOURCES:
+            errors.append(
+                f"metric '{metric}' derives from unknown catalog "
+                f"'{catalog['source']}'; known: {sorted(TOPIC_CATALOG_SOURCES)}"
+            )
         base = row.get("base")
         if not base and not catalog and not row.get("word_count"):
             warnings.append(f"metric '{metric}' has no base term, no catalog term and no word bonus; it is always 0.0")

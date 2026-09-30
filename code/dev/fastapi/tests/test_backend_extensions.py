@@ -17,7 +17,6 @@ from app.services.bookings import create_booking_event, ensure_booking_transitio
 from app.services.bookings import build_booking_service_summary
 from app.routers.users import change_password
 from app.routers.users import read_users_access_decision
-from app.routers.users import read_users_policy_decision_report
 from app.routers.bookings import get_booking_analytics_summary
 from app.routers.bookings import create_booking
 from app.routers.bookings import get_bookings
@@ -25,7 +24,6 @@ from app.routers.bookings import get_booking
 from app.routers.bookings import get_booking_history
 from app.routers.bookings import delete_booking
 from app.routers.bookings import get_booking_assignment_history
-from app.routers.bookings import get_booking_assignment_report
 from app.routers.bookings import create_booking_assignment_report
 from app.routers.bookings import get_booking_audit_summary
 from app.routers.bookings import update_booking
@@ -37,21 +35,12 @@ from app.routers.chat import get_admin_retention_trend_report
 from app.routers.chat import get_ranked_users_report
 from app.routers.chat import retention_maintenance_report
 from app.routers.chat import get_retention_snapshot_admin_report
-from app.routers.chat import get_retention_coverage_report
-from app.routers.chat import get_retention_operational_report
-from app.routers.chat import get_retention_snapshot_operations_status
-from app.routers.chat import get_retention_snapshot_operations_automation
-from app.routers.chat import get_retention_snapshot_operations_launch_readiness
 from app.routers.topics import create_current_topic_selection
 from app.routers.topics import archive_current_topic_selection
 from app.routers.topics import read_current_topic_selection
 from app.routers.topics import replace_current_topic_selection
-from app.routers.topics import read_topic_workspace
-from app.routers.topics import read_topic_search
 from app.routers.topics import read_topic_suggestions
-from app.main import app_metadata
 from app.schemas import schemas
-from app.services.topics import build_topic_intelligence_overview
 from app.services.topics import build_topic_recommendation_report
 from app.services.topics import build_topic_suggestion_report
 from app.services.bookings import _booking_topic_details
@@ -62,12 +51,10 @@ from app.services.policy_scoring import _posture_adjusted_access_score
 from app.services.policy_scoring import _topic_signals
 from app.services.topics import build_topic_coverage_report, build_topic_portfolio_report, build_topic_taxonomy_report
 from app.services.retention import build_retention_topic_signal_report
-from app.services.topics import build_topic_theme_coverage
 from app.services.chat_analytics import build_retention_topic_signal_detail
 from app.services.chat_analytics import build_retention_dashboard_topic_signal_detail
 from app.services.chat_analytics import build_interaction_signal_synthesis
 from app.services.chat_analytics import build_signal_synthesis_report
-from app.schemas.chat import ChatMessageIn
 from app.schemas.chat import InteractionInsight
 from app.schemas.chat import SystemImprovementPack
 

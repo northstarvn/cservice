@@ -36,7 +36,6 @@ import inspect
 
 import pytest
 
-from app import schemas
 from app.schemas import audit as audit_schemas
 from app.services import audit_log
 from app.main import app

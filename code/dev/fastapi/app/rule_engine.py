@@ -829,15 +829,32 @@ def matches_field_extended(
 ) -> bool:
     """``matches_field`` plus the string/collection/null operator families.
 
-    Any operator dict is handled here: the v1 numeric/date operators keep their
-    exact semantics (this function delegates to ``matches_field`` for them), and
-    the new families are added alongside. A dict containing only unknown
-    operators still fails closed, because ``matches_field`` is still consulted.
+    Operators are partitioned by family, and the partition is the whole point:
+    the three families handled here are applied inline, while *every other*
+    family -- ``numeric``, ``date``, ``external``, and anything unrecognised --
+    is delegated to ``matches_field``.
+
+    The previous version computed ``legacy`` as "operators not in
+    ``OPERATOR_FAMILIES``", but ``OPERATOR_FAMILIES`` contains the numeric
+    operators too, so ``legacy`` was empty for exactly the rules that needed it
+    and the inline loop matched none of the remaining families. Every rule
+    containing only numeric operators therefore matched unconditionally --
+    ``{"days_since_login": {"gte": 45}}`` fired on ``days_since_login == 0``.
+    Because ``select_rules`` and ``explain_when`` both route through here, that
+    made every numeric rule in ``RULE_PACKS`` fire regardless of its threshold,
+    and the trace reported ``reason: "satisfied"`` for the failures.
+
+    Delegating the non-inline families also keeps the two fail-closed
+    properties intact: an unknown operator is unknown to ``matches_field`` and
+    returns False, and an ``external`` operator is likewise unknown to it, so
+    ``evaluate_when_external`` still sees the False it relies on to hand off to
+    the enrichment stage.
     """
     if not isinstance(rule_value, dict):
         return matches_field(rule_value, context_value, effective_date=effective_date, now=now)
-    legacy = {key: value for key, value in rule_value.items() if key not in OPERATOR_FAMILIES}
-    if legacy and not matches_field(legacy, context_value, effective_date=effective_date, now=now):
+    inline = {"string", "collection", "null"}
+    delegated = {key: value for key, value in rule_value.items() if OPERATOR_FAMILIES.get(key) not in inline}
+    if delegated and not matches_field(delegated, context_value, effective_date=effective_date, now=now):
         return False
     for op_name, threshold in rule_value.items():
         family = OPERATOR_FAMILIES.get(op_name)
