@@ -40,6 +40,7 @@ CHAIN = (
     "20260930_01_add_complaint_cases.py",
     "20260930_02_sync_remaining_schema.py",
     "20260930_03_add_complaint_learning.py",
+    "20261001_01_add_identity_and_storage.py",
 )
 
 #: The tables the *first* migration creates, before any delta runs. Used to

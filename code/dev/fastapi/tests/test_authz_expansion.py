@@ -117,6 +117,7 @@ from app.deps import (
     require_cell_access,
     require_rate_limit,
     require_rate_tier,
+    require_public_rate_tier,
     require_roles,
     require_scopes,
     require_step_up,
@@ -206,8 +207,24 @@ def test_the_derived_indexes_match_their_tables():
 
 
 def test_the_exposure_and_check_orders_are_ordered_not_alphabetical():
-    assert AUTHZ_EXPOSURES == ("public", "authenticated", "policy", "admin")
-    assert AUTHZ_EXPOSURE_RANK == {"public": 0, "authenticated": 1, "policy": 2, "admin": 3}
+    assert AUTHZ_EXPOSURES == (
+        "public",
+        "authenticated",
+        "self_service",
+        "policy",
+        "admin",
+    )
+    # `self_service` shares a rank with `authenticated` deliberately: it is a
+    # scope of effect (a customer acting on their own account), not a stricter
+    # gate. Giving it a higher rank would make a plain session look like it
+    # implies more than it does.
+    assert AUTHZ_EXPOSURE_RANK == {
+        "public": 0,
+        "authenticated": 1,
+        "self_service": 1,
+        "policy": 2,
+        "admin": 3,
+    }
     # Check order is the contract: it decides which denial a caller with several
     # problems receives, so it is fixed and not sorted.
     assert AUTHZ_CHECK_ORDER == (
@@ -255,9 +272,10 @@ def test_every_derived_tuple_is_frozen():
         assert isinstance(getattr(D, name), tuple), name
 
 
-def test_the_factory_prefix_map_covers_exactly_the_six_factories():
+def test_the_factory_prefix_map_covers_exactly_the_seven_factories():
     assert AUTHZ_FACTORY_NAMES == (
         "require_cell_access",
+        "require_public_rate_limit",
         "require_rate_limit",
         "require_roles",
         "require_scopes",
@@ -1247,13 +1265,37 @@ def test_all_six_factories_are_unbound_and_the_report_says_so():
     # The honest finding, not a bug to fix: the factories work, are tested, and
     # no route calls them, which is exactly why their requirements live in
     # `hardening` and nowhere else.
+    #
+    # `require_public_rate_limit` is the exception and is *bound* -- the four
+    # credential-in-the-body sign-in routes use it. It is asserted separately
+    # below rather than folded in here, because "unbound" was previously true of
+    # every factory and a seventh one that is actually used is exactly the sort
+    # of exception that gets quietly forgotten.
     report = authz_drift_report(main.app.routes)
-    assert report["unbound_factories"] == sorted(AUTHZ_FACTORY_NAMES)
+    unbound = [name for name in AUTHZ_FACTORY_NAMES if name != "require_public_rate_limit"]
+    assert report["unbound_factories"] == sorted(unbound)
     assert set(report["bound_factories"]) == set(AUTHZ_FACTORY_NAMES)
-    for name in AUTHZ_FACTORY_NAMES:
+    for name in unbound:
         assert report["bound_factories"][name]["routes"] == 0
         assert report["bound_factories"][name]["sample"] == []
     assert "unbound" in report["note"]
+
+
+def test_the_public_rate_limit_factory_is_reported_as_bound():
+    # A factory name that resolves but is never counted makes `unbound_factories`
+    # lie about the one factory that is in use, which is the same category of
+    # quiet miscount the exposure and drift sections exist to rule out.
+    report = authz_drift_report(main.app.routes)
+    entry = report["bound_factories"]["require_public_rate_limit"]
+    assert entry["routes"] > 0
+    assert entry["sample"], "a bound factory with no sample route recorded"
+    # The authenticated rate limiter is still unbound, and saying so is the
+    # honest reading: adding a seventh factory does not mean the sixth is used.
+    assert "require_rate_limit" in report["unbound_factories"]
+    # ...and the two must not be conflated. `require_public_rate_limit` does not
+    # share a prefix with `require_rate_limit`, so prefix matching keeps them
+    # apart -- which is what lets the report say one is bound and one is not.
+    assert report["bound_factories"]["require_rate_limit"]["routes"] == 0
 
 
 # ===========================================================================
@@ -1351,6 +1393,7 @@ def test_a_generated_factory_name_is_recognised_by_prefix():
         require_cell_access("booking", "status").__name__,
         require_rate_limit().__name__,
         require_rate_tier("machine").__name__,
+        require_public_rate_tier("sensitive").__name__,
         require_tenant.__name__,
     ]
     resolved = set()
@@ -2333,7 +2376,11 @@ def test_the_catalog_is_json_serializable():
 def test_the_catalog_carries_the_drift_and_the_backlog():
     catalog = build_authz_catalog(main.app.routes)
     assert catalog["drift"]["in_sync"] is True
-    assert catalog["drift"]["unbound_factories"] == sorted(AUTHZ_FACTORY_NAMES)
+    # Same exception as the drift test: the public rate limiter is bound (four
+    # credential routes), the authenticated one is not.
+    assert catalog["drift"]["unbound_factories"] == sorted(
+        name for name in AUTHZ_FACTORY_NAMES if name != "require_public_rate_limit"
+    )
     assert catalog["coverage"]["method_path_pairs"] == catalog["drift"]["method_path_pairs"]
     assert catalog["backlog"]["requirements"][0]["requirement"] == "scopes"
     # The backlog is a separate key from the rules, never folded into them.

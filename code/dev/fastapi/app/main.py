@@ -27,13 +27,14 @@ from app.routers import (
     bookings,
     chat,
     complaints,
+    identity,
     kaizen,
     topics,
     users,
     webhooks,
 )
 from app import kaizen_runner
-from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service
+from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
 from app import (
@@ -236,6 +237,13 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 app.include_router(users.router, prefix="/users", tags=["users"])
+# Sign-in methods, device recognition, trusted devices, linked identities and
+# connected storage. Mounted under the same /users prefix as the router above
+# rather than given its own top-level one: these are all operations *on the
+# signed-in account*, so a client holding a session should not have to know that
+# the sign-in surface lives somewhere else. Two routers on one prefix is fine --
+# every path here is a distinct literal, so nothing shadows anything above.
+app.include_router(identity.router, prefix="/users", tags=["identity"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
 app.include_router(chat.router, tags=["chat"])
 app.include_router(topics.router, tags=["topics"])
@@ -285,6 +293,13 @@ async def app_metadata():
             "self_service_status",
             "kaizen_release_surface",
             "complaint_learning",
+            # The sign-in surface is listed as three features rather than one
+            # "auth" because they fail independently and are governed
+            # separately: the methods available, how much proof a login is asked
+            # for, and what storage a customer may connect.
+            "auth_methods",
+            "device_recognition",
+            "storage_providers",
         ],
     }
 
@@ -311,9 +326,54 @@ async def app_ecosystem():
                     "/users/me/sessions",
                     "/users/me/step-up",
                     "/users/me/api-keys",
+                    "/users/auth/methods",
+                    "/users/auth/email-otp/request",
+                    "/users/auth/email-otp/verify",
+                    "/users/auth/login",
+                    "/users/auth/device",
                 ],
                 "purpose": "authentication, account management, and session lifecycle",
                 "status": "ready",
+            },
+            # Split from `identity` because the useful question about these is
+            # different: not "is sign-in working" but "which credentials are on
+            # offer, and how much proof does this login get asked for".
+            "device_recognition": {
+                "routes": [
+                    "/users/me/devices",
+                    "/users/me/recognition",
+                    "/users/me/identities",
+                ],
+                "purpose": (
+                    "how much proof a login is asked for. Scored from device, network "
+                    "and habit signals; decides which credential to demand, never "
+                    "whether to admit"
+                ),
+                "status": "ready",
+                "mode": device_recognition.recognition_mode(),
+                "modes": list(device_recognition.RECOGNITION_MODES),
+                "grants_access": False,
+            },
+            "storage_providers": {
+                "routes": [
+                    "/users/me/storage",
+                    "/users/me/storage/providers",
+                    "/users/me/storage/connect",
+                    "/users/me/storage/callback",
+                ],
+                "purpose": "connecting a customer's own cloud storage under their own authority",
+                "status": "ready",
+                "configured": [
+                    name
+                    for name in storage_providers.STORAGE_PROVIDER_BY_NAME
+                    if storage_providers.is_configured(name)
+                ],
+                "token_exchange_implemented": False,
+                "note": (
+                    "no provider ships with credentials, and the token exchange is not "
+                    "implemented in this deployment -- a connection stays 'pending' with "
+                    "its tokens unset rather than being reported as live"
+                ),
             },
             "booking_core": {
                 "routes": ["/bookings", "/bookings/analytics/summary", "/bookings/analytics/events"],
@@ -1296,6 +1356,16 @@ async def scoring_catalog():
         "policy_scoring_governance": policy_scoring.build_policy_scoring_catalog(),
         "authz_governance": deps.build_authz_catalog(app.routes),
         "identity": users.build_users_catalog(),
+        # The sign-in surface publishes its tables rather than hard-coding them
+        # at the call site, for two reasons. An operator can see which methods
+        # exist, what each one establishes, and what is deliberately absent --
+        # which is the only way "why can I not log in with X" gets an answer
+        # from the running service rather than from whoever wrote it. And the
+        # refusal lists are data, so shipping a method nobody decided on is not
+        # something that can happen by omission.
+        "auth_methods": auth_methods.build_auth_methods_catalog(),
+        "device_recognition": device_recognition.build_recognition_catalog(),
+        "storage_providers": storage_providers.build_storage_catalog(),
         "database_ops": db_infra.build_db_ops_catalog(),
         "customer_360": {
             "sections": list(customer_360.CUSTOMER_360_SECTIONS),

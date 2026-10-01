@@ -228,6 +228,24 @@ class SqliteHarness:
     def commit(self) -> Any:
         return self.run(self.session.commit())
 
+    def rollback(self) -> Any:
+        """Undo a failed commit.
+
+        Needed after asserting an ``IntegrityError``: the session is left in a
+        failed state and every later statement raises until it is rolled back.
+        Calling the coroutine directly is the trap -- it produces a
+        "coroutine was never awaited" warning and no rollback at all, so the next
+        query fails with a confusing error instead of the expected one.
+        """
+        return self.run(self.session.rollback())
+
+    def refresh(self, obj: Any) -> Any:
+        """Re-read a row, after a flush expired its columns.
+
+        Same coroutine trap as :meth:`rollback`.
+        """
+        return self.run(self.session.refresh(obj))
+
     # Two thin conveniences for the complaints suite, which is the only caller
     # that opens and re-reads cases. They are here rather than in that file so a
     # second suite needing a real database does not grow its own copy of the

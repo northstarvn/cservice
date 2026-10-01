@@ -16,6 +16,26 @@ async with engine.begin() as conn:
 So a database is always brought to whatever the models declare, regardless of
 what the `alembic_version` table says. Alembic is not in the running path.
 
+## `downgrade base` leaves the database neither up nor down
+
+`20260904_00_initial_schema.py` created two native enums — `servicetype` and
+`bookingstatus` — and its `downgrade()` dropped the tables that used them but not
+the *types*. `DROP TABLE` takes the columns; it does not take the type.
+
+So the sequence `alembic downgrade base && alembic upgrade head` failed on the
+second command with `type "servicetype" already exists`, while reporting success
+on the first. Worse than a broken round trip, because it left a database that was
+neither up nor down — tables gone, types not — and surfaced the cause one command
+later than the mistake that caused it.
+
+Both types are now dropped in `0001`'s downgrade, with `checkfirst=True` because
+SQLite has no standalone enum type to drop (the values live inline in the column
+definition) and asking it to drop one raises rather than no-ops.
+
+Verified: `upgrade head` → 29 tables, drift in sync → `downgrade base` → **0
+tables and 0 enum types** → `upgrade head` → drift in sync. On an empty database,
+and on one that has been through it.
+
 ## The chain is now SQLite-clean end to end
 
 `20260905_01_add_booking_events_and_admin_flag.py` contained **three**

@@ -1050,3 +1050,294 @@ class TopicPolicyValidationReport(BaseModel):
     params: int = 0
     limits: int = 0
     note: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Sign-in methods, device recognition and connected storage
+# ---------------------------------------------------------------------------
+#
+# Three response families below. Two conventions run through all of them:
+#
+# * A recognition verdict reports *contributions*, never the raw signals behind
+#   them. `signal` and `contribution` are safe to log; a device id is not.
+# * Nothing in these schemas can carry a credential. Tokens appear exactly
+#   once, in a request to create them, and are never echoed by a list endpoint.
+
+class RecognitionContributionOut(BaseModel):
+    """One signal's share of a recognition score, without its value."""
+
+    signal: str
+    weight: float
+    contribution: float = 0.0
+    agrees: bool = False
+    present: bool = False
+    mismatch_penalty: float = 0.0
+
+
+class RecognitionVerdictOut(BaseModel):
+    """How much proof a login attempt is required to present.
+
+    ``required_credential`` is what the caller must supply next;
+    ``refresh_without_challenge`` says whether a live session may extend itself.
+    Neither field means the request has been authenticated -- by construction
+    this verdict never authorises anything on its own.
+    """
+
+    score: float = 0.0
+    policy_id: str = "unfamiliar"
+    label: str = ""
+    required_credential: str = "password"
+    required_assurance: str = "loa2"
+    challenge: bool = True
+    refresh_without_challenge: bool = False
+    reason: str = ""
+    version: str = ""
+    contributions: List[RecognitionContributionOut] = Field(default_factory=list)
+    known_signals: int = 0
+    total_signals: int = 0
+    trusted_blocked_reason: str = ""
+    note: str = (
+        "recognition decides how much proof to demand, never whether to accept. "
+        "Every policy still requires a credential."
+    )
+
+
+class AuthMethodOut(BaseModel):
+    """One login method, as this user can actually use it right now."""
+
+    method: str
+    label: str
+    assurance: str
+    amr: List[str] = Field(default_factory=list)
+    enrollment_required: bool = False
+    enabled_by_default: bool = True
+    revocable: bool = True
+    channel: str = ""
+    rate_tier: str = "interactive"
+    description: str = ""
+    caveat: Optional[str] = None
+    usable: bool = False
+    enrolled: bool = False
+    setup_needed: Optional[str] = None
+    bootstrap: bool = False
+    assurance_rank: int = 0
+
+
+class RefusedMethodOut(BaseModel):
+    """A method pattern deliberately not offered, and why."""
+
+    pattern: str
+    label: str
+    why_not: str
+
+
+class AuthMethodListOut(BaseModel):
+    generated_at: datetime
+    version: str = ""
+    methods: List[AuthMethodOut] = Field(default_factory=list)
+    usable_now: List[str] = Field(default_factory=list)
+    enrolled: List[str] = Field(default_factory=list)
+    weakest_first: bool = True
+    refusal_policy: str = ""
+    refused: List[RefusedMethodOut] = Field(default_factory=list)
+    summary: str = ""
+
+
+class OtpRequestIn(BaseModel):
+    """Ask for a one-time code.
+
+    The channel is fixed by which endpoint is called rather than chosen here:
+    a client that can pick its own channel would be able to route an email OTP
+    to itself and skip the inbox.
+    """
+
+    username: str = ""
+    device_id: Optional[str] = None
+    reason: str = "login"
+
+
+class OtpRequestOut(BaseModel):
+    """Sent, deliberately without the code.
+
+    `user_id` and `email` are omitted unconditionally -- including when the
+    account does not exist -- because a response that differs between a known
+    and an unknown username is a free account-enumeration oracle.
+    """
+
+    sent: bool = False
+    expires_in_seconds: int = 0
+    max_attempts: int = 0
+    reason: str = ""
+
+
+class OtpVerifyIn(BaseModel):
+    username: str = ""
+    code: str = ""
+    device_id: Optional[str] = None
+    method: str = "email_otp"
+
+
+class LoginWithDeviceIn(BaseModel):
+    """Sign in with a trusted-device token.
+
+    ``device_id`` is not optional here and that is the security property rather
+    than an oversight: a token is only ever valid for the device digest it was
+    minted against, so a caller who omits this is describing a login that could
+    not succeed. Leaving the field off the schema would have made that a runtime
+    surprise instead of a request the API refuses to describe.
+    """
+
+    username: str = ""
+    device_token: str = ""
+    device_id: str
+
+
+class TrustedDeviceCreated(BaseModel):
+    """The one response that carries a device token. Never returned twice."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = 0
+    device_id: int = 0
+    label: str = ""
+    device_token: str = ""
+    expires_at: datetime
+    recognition: Optional[RecognitionVerdictOut] = None
+    note: str = (
+        "The device token is shown once and stored only as a hash. Trusting a "
+        "device never lowers the bar for the login that creates it."
+    )
+
+
+class TrustedDeviceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    label: str = ""
+    created_at: datetime
+    last_seen_at: datetime
+    trusted_at: Optional[datetime] = None
+    trust_expires_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    use_count: int = 0
+    trusted: bool = False
+    label_hint: str = ""
+
+
+class DeviceListOut(BaseModel):
+    generated_at: datetime
+    devices: List[TrustedDeviceOut] = Field(default_factory=list)
+    trusted_count: int = 0
+    revoked_count: int = 0
+    note: str = ""
+
+
+class IdentityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    provider: str
+    identifier_hint: str = ""
+    is_primary: bool = False
+    is_verified: bool = False
+    verified_at: Optional[datetime] = None
+    verification_method: str = ""
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    contact_consent: bool = False
+    source: str = ""
+
+
+class IdentityListOut(BaseModel):
+    generated_at: datetime
+    identities: List[IdentityOut] = Field(default_factory=list)
+    verified_count: int = 0
+    primary_hint: str = ""
+    note: str = ""
+
+
+class IdentityLinkIn(BaseModel):
+    provider: str = "email"
+    identifier: str = ""
+    make_primary: bool = False
+    contact_consent: bool = False
+
+
+class IdentityLinkOut(BaseModel):
+    identity: IdentityOut
+    verification_required: bool = True
+    reason: str = ""
+
+
+class StorageProviderOut(BaseModel):
+    provider: str
+    label: str
+    configured: bool = False
+    supports_pkce: bool = False
+    default_scope: str = ""
+    scopes: List[Dict[str, Any]] = Field(default_factory=list)
+    docs: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class StorageProviderListOut(BaseModel):
+    generated_at: datetime
+    providers: List[StorageProviderOut] = Field(default_factory=list)
+    configured_count: int = 0
+    env_prefix: str = "STORAGE_"
+    token_cipher: str = ""
+    note: str = ""
+
+
+class StorageConnectIn(BaseModel):
+    provider: str
+    scope: Optional[str] = None
+    # Full access is a real capability a user can grant. It is not the default
+    # and it is not reachable without this flag, which is what stops the broad
+    # scope being granted by a client that did not mean to.
+    confirm_broad_scope: bool = False
+    label: str = ""
+
+
+class StorageAuthorizeOut(BaseModel):
+    provider: str
+    authorize_url: str
+    scope: str = ""
+    broad_scope: bool = False
+    requires_confirmation: bool = False
+    grants: str = ""
+    state: str = ""
+    note: str = ""
+
+
+class StorageCallbackIn(BaseModel):
+    provider: str
+    code: str = ""
+    state: str = ""
+    error: Optional[str] = None
+
+
+class StorageConnectionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    provider: str
+    label: str = ""
+    status: str = "active"
+    scopes: List[str] = Field(default_factory=list)
+    requested_scopes: List[str] = Field(default_factory=list)
+    broad_scope_confirmed: bool = False
+    healthy: bool = False
+    problems: List[str] = Field(default_factory=list)
+    connected_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    revoked_reason: str = ""
+
+
+class StorageConnectionListOut(BaseModel):
+    generated_at: datetime
+    connections: List[StorageConnectionOut] = Field(default_factory=list)
+    healthy_count: int = 0
+    unhealthy_count: int = 0
+    note: str = ""

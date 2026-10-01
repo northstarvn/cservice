@@ -555,9 +555,22 @@ RATE_TIER_NAMES: tuple[str, ...] = tuple(sorted(RATE_TIER_BY_NAME))
 # Exposure classes, ordered. A rule names one; ``evaluate_authz`` uses the rank
 # only for reporting, never to reorder checks -- check order is
 # AUTHZ_CHECK_ORDER and is fixed.
+#
+# ``self_service`` is added for the identity/storage surface. It is *not* a new
+# privilege level: it binds the same `get_current_user` as ``authenticated`` and
+# requires nothing more, so it shares rank 1 deliberately rather than being
+# inserted between levels. It exists as a separate name because the useful
+# question about these routes is different -- "is this route a place where a
+# customer acts on their own account?" -- and answering that from a route table
+# that only says "authenticated" means reading every handler. Classifying them
+# together is what lets the answer be one filter.
 AUTHZ_EXPOSURE_RANK: dict[str, int] = {
     "public": 0,
     "authenticated": 1,
+    # Same rank as `authenticated`: self_service is a *scope of effect*, not a
+    # stricter gate. Giving it a higher rank would make it look like it implies
+    # more than a plain session, which is exactly the misreading to avoid.
+    "self_service": 1,
     "policy": 2,
     "admin": 3,
 }
@@ -748,6 +761,176 @@ AUTHZ_RULES: list[dict[str, Any]] = [
     {"rule_id": "login", "methods": ("POST",), "path": "/users/login", "exposure": "public",
      "enforced_by": (), "hardening": {"rate_tier": "interactive"},
      "note": "The only brute-forceable surface in the module. Rate limiting is the mitigation and is not wired."},
+    # --- Sign-in methods, recognition and connected storage -----------------
+    #
+    # Declared before `meta_surface` because these live under /users and are
+    # unaffected by it, but the credential ones are placed here so the public
+    # write audit has a rule to reason about. Every rule below documents a
+    # control that is *in the handler*, not a dependency: that distinction is
+    # recorded in `enforced_by: ()` rather than left to look like an oversight.
+    {"rule_id": "auth_methods_catalog", "methods": ("GET",), "path": "/users/auth/methods",
+     "exposure": "public", "enforced_by": (), "hardening": {},
+     "note": (
+         "Describes this build's capabilities, not any account, so it does not vary by "
+         "caller and leaks nothing. Unauthenticated because a client cannot render a "
+         "sign-in screen without it."
+     )},
+    # Declared separately from the row above rather than as `/users/auth/methods*`
+    # because that glob would swallow the four credential routes below it, and
+    # first-match-wins would then hand them all this rule's `enforced_by: ()`. An
+    # authenticated route inheriting a public rule's gate is precisely the kind of
+    # misdescription this table exists to catch, so the cost of the extra row is
+    # paid deliberately.
+    {"rule_id": "auth_methods_enabled", "methods": ("GET",),
+     "path": "/users/auth/methods/enabled", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Same catalogue annotated with what *this account* has enrolled. Distinct from "
+         "the row above because 'can I use a passkey' and 'does this build offer "
+         "passkeys' are different questions, and answering the second for the first is "
+         "how a settings screen ends up offering something the account cannot do."
+     )},
+    {"rule_id": "auth_otp_request", "methods": ("POST",), "path": "/users/auth/email-otp/request",
+     "exposure": "public", "enforced_by": (), "hardening": {"rate_tier": "sensitive"},
+     "note": (
+         "Unauthenticated by necessity: the username *is* the input. Two controls live "
+         "in the handler rather than in a dependency, and are the reason this is not "
+         "an account-enumeration oracle -- the response body is identical for an unknown "
+         "username and a known one, and the `sensitive` rate tier (10 capacity, 0.2/s) is "
+         "what bounds code generation. A uniform response without a rate limit is just "
+         "uniform enumeration."
+     )},
+    {"rule_id": "auth_otp_verify", "methods": ("POST",), "path": "/users/auth/email-otp/verify",
+     "exposure": "public", "enforced_by": (), "hardening": {"rate_tier": "sensitive"},
+     "note": (
+         "The code is the credential. Bounded three ways in the handler: the per-challenge "
+         "attempt counter (5, then spent), the `sensitive` tier, and the 10-minute TTL. "
+         "Uniform 401 on every failure so wrong / expired / replayed are indistinguishable."
+     )},
+    {"rule_id": "auth_login_method", "methods": ("POST",), "path": "/users/auth/login",
+     "exposure": "public", "enforced_by": (), "hardening": {"rate_tier": "interactive"},
+     "note": (
+         "Password or one-time code on one route. One route rather than two because the "
+         "recognition and audit paths are identical, and splitting them would give an "
+         "attacker a second endpoint to hammer at the same rate limit's subject. "
+         "Recognition runs here and its verdict is returned -- it decides which credential "
+         "was demanded, never whether this login succeeded."
+     )},
+    {"rule_id": "auth_device_login", "methods": ("POST",), "path": "/users/auth/device",
+     "exposure": "public", "enforced_by": (), "hardening": {"rate_tier": "sensitive"},
+     "note": (
+         "A trusted-device token is a real bearer credential, so this is as brute-forceable "
+         "as a password and carries the tighter tier. Four checks must pass: token hash, "
+         "device-digest binding, trust expiry, revocation. The digest binding is what makes "
+         "it more than a session cookie, and it only exists because trust was granted "
+         "behind a second factor."
+     )},
+    {"rule_id": "identity_devices_read", "methods": ("GET",),
+     "path": "/users/me/devices", "exposure": "self_service", "enforced_by": ("get_current_user",),
+     "hardening": {},
+     "note": "Own devices only; the query filters on user_id rather than trusting the id in the path."},
+    {"rule_id": "identity_devices_trust", "methods": ("POST",), "path": "/users/me/devices",
+     "exposure": "self_service", "enforced_by": ("get_current_user",),
+     "hardening": {"step_up": "loa2"},
+     "note": (
+         "The one route that mints a trusted-device token, so it is the one that must not "
+         "be reachable from a stolen session alone. Requires an unspent one-time code "
+         "verified in the handler, which is why the declared step_up and the actual "
+         "control agree: without the code, `POST /me/devices` would hand an attacker a "
+         "month-long credential on any device they could open a session on."
+     )},
+    {"rule_id": "identity_devices_revoke", "methods": ("DELETE",),
+     "path": "/users/me/devices/{device_id}", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Clears the token hash rather than flagging the row, and keeps the device row so "
+         "the customer can see the revocation. Self-service revocation is deliberately "
+         "un-gated by step-up: a user trying to cut off a lost device should not be told "
+         "to re-prove who they are first."
+     )},
+    {"rule_id": "identity_recognition_read", "methods": ("GET",),
+     "path": "/users/me/recognition", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Post-authentication only, and that placement is the control. Answering the same "
+         "question before login, for a supplied username, is an enumeration oracle -- a "
+         "known user's device scores above zero and an unknown user's does not."
+     )},
+    {"rule_id": "identity_links_read", "methods": ("GET",), "path": "/users/me/identities",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": "Returns masked identifier fragments, never the identifiers."},
+    {"rule_id": "identity_links_write", "methods": ("POST",), "path": "/users/me/identities",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Adds an identity *unverified*, which is what makes it safe: unverified identities "
+         "can neither be made primary nor used to sign in, both constrained in the schema "
+         "and re-checked in the handler. A conflict returns 409 with no detail about the "
+         "other account -- who owns an address is not this caller's business."
+     )},
+    {"rule_id": "identity_links_verify", "methods": ("POST",),
+     "path": "/users/me/identities/{identity_id}/verify", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {"rate_tier": "sensitive"},
+     "note": (
+         "Reuses the login-purpose challenge rather than minting a second code type, so "
+         "there is one attempt-bounded code path in the service instead of two."
+     )},
+    {"rule_id": "identity_links_primary", "methods": ("POST",),
+     "path": "/users/me/identities/{identity_id}/primary", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Demotes any previous primary in the same transaction. The schema's "
+         "`is_primary <= is_verified` check does not stop two *verified* rows both "
+         "claiming primary, so the invariant is enforced here where the intent is known."
+     )},
+    {"rule_id": "identity_links_revoke", "methods": ("DELETE",),
+     "path": "/users/me/identities/{identity_id}", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Refuses to remove the last verified identity (409). An account with no way to be "
+         "reached has no recovery route, and the failure is silent."
+     )},
+    {"rule_id": "storage_read", "methods": ("GET",), "path": "/users/me/storage",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Never returns a token. Health is checked per connection rather than read from "
+         "`status`, because a provider-side revocation leaves this row saying 'active'."
+     )},
+    {"rule_id": "storage_providers", "methods": ("GET",), "path": "/users/me/storage/providers",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "`configured` is real: a provider ships with no credentials and reports false until "
+         "the environment supplies them, so the UI does not offer a button that leads to a "
+         "broken consent screen."
+     )},
+    {"rule_id": "storage_connect", "methods": ("POST",), "path": "/users/me/storage/connect",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Mints PKCE + state and stores the state as a digest, so the callback can prove "
+         "it belongs to a flow this server started. The redirect URI comes from the "
+         "environment, never from the request -- a redirect built from a client-supplied "
+         "Host is a redirect the client chooses. The broad scope needs an explicit "
+         "`confirm_broad_scope` and states what it grants."
+     )},
+    {"rule_id": "storage_callback", "methods": ("GET",), "path": "/users/me/storage/callback",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "OAuth providers redirect with GET, so this is a GET that mutates -- the standard "
+         "shape, and the reason the state digest is the control rather than method-based "
+         "CSRF defence. The state and PKCE verifier are cleared whether or not the exchange "
+         "succeeds, so a second callback cannot replay the first."
+     )},
+    {"rule_id": "storage_revoke_one", "methods": ("DELETE",),
+     "path": "/users/me/storage/{connection_id}", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Overwrites the ciphertext rather than deleting the row, so the record of what was "
+         "once granted survives for an investigation while the credential does not. The "
+         "response says plainly that the provider-side grant is unaffected -- a user who "
+         "believes they cut off access and has not is the case this must not leave ambiguous."
+     )},
+    {"rule_id": "storage_revoke_all", "methods": ("DELETE",), "path": "/users/me/storage",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": "Same overwrite semantics as the per-connection revoke, across every provider."},
     {"rule_id": "token_refresh", "methods": ("POST",), "path": "/users/refresh", "exposure": "public",
      "enforced_by": (), "hardening": {"rate_tier": "interactive"},
      "note": "Unauthenticated because the refresh token is the credential. Rotation is the control."},
@@ -1069,6 +1252,13 @@ AUTHZ_FACTORY_PREFIXES: dict[str, str] = {
     "require_cell_": "require_cell_access",
     "require_rate_limit": "require_rate_limit",
     "require_tenant": "require_tenant",
+    # Checked before `require_rate_limit` in the sense that it must not match
+    # it: a public rate limit is a different control (it accepts an anonymous
+    # caller, and keys by address rather than subject), and listing it
+    # separately is what lets the catalog say so. It does not share a prefix, so
+    # order does not actually decide -- but see `require_public_rate_limit` for
+    # why the distinction is load-bearing rather than cosmetic.
+    "require_public_rate_limit": "require_public_rate_limit",
 }
 
 AUTHZ_FACTORY_NAMES: tuple[str, ...] = tuple(sorted(set(AUTHZ_FACTORY_PREFIXES.values())))
@@ -1151,6 +1341,67 @@ AUTHZ_PUBLIC_WRITE_EXCEPTIONS: list[dict[str, Any]] = [
             "what-if simulation: live config, weight state and partitions are never mutated. "
             "Asserted in the handler's docstring and nowhere else -- which is why it is written "
             "down here, where adding a route to it is a visible act."
+        ),
+    },
+    # --- The four credential-in-the-body sign-in routes -------------------------
+    #
+    # Each of these is public for the same structural reason as `/users/login`
+    # above: the thing being presented *is* the credential, so there is no
+    # principal to authenticate before the check happens. Listed individually
+    # rather than as one wildcard because the blast radius differs a lot:
+    # `/users/login` mutates nothing durable, while the OTP routes and the device
+    # login write rows. A wildcard would let the mildest claim cover the ones
+    # that do.
+    {
+        "method": "POST",
+        "path": "/users/auth/email-otp/request",
+        "rule_id": "auth_otp_request",
+        "claim": (
+            "creates an auth_challenges row and sends mail. Unauthenticated because the "
+            "username is the input. The write is bounded by the `sensitive` rate tier and "
+            "re-requesting supersedes the previous code rather than adding a second valid "
+            "one, so the endpoint cannot be used to widen the code space -- it can only "
+            "invalidate codes the caller already had. Does not reveal whether the account "
+            "exists: the response body is identical either way."
+        ),
+    },
+    {
+        "method": "POST",
+        "path": "/users/auth/email-otp/verify",
+        "rule_id": "auth_otp_verify",
+        "claim": (
+            "grants a session, and consumes the challenge. The code is the credential. "
+            "Bounded three ways in the handler: 5 attempts then spent, a 10-minute TTL, and "
+            "the `sensitive` tier. Every failure returns the same 401 and increments the "
+            "counter, so wrong / expired / replayed are indistinguishable and none is "
+            "retryable. Also records the device observation -- but only after the code "
+            "verified, so this write is downstream of authentication rather than instead of it."
+        ),
+    },
+    {
+        "method": "POST",
+        "path": "/users/auth/login",
+        "rule_id": "auth_login_method",
+        "claim": (
+            "grants a session and updates device observations. Same structural exception as "
+            "/users/login, on one route for both the password and one-time-code paths so "
+            "there is a single rate-limited surface to harden. Recognition computes a verdict "
+            "on this route and may demand a stronger credential, but it cannot admit anyone: "
+            "the verdict is derived only *after* the presented credential verified, so a "
+            "recognition score is never in the path to a token."
+        ),
+    },
+    {
+        "method": "POST",
+        "path": "/users/auth/device",
+        "rule_id": "auth_device_login",
+        "claim": (
+            "grants a session on a trusted-device token -- a real bearer credential, which "
+            "is why it carries the tighter `sensitive` tier. Four independent checks must "
+            "pass: the token hash, the device-digest binding, the trust expiry, and the "
+            "revocation flag. The digest binding is what makes this more than a session "
+            "cookie, and it exists only because trust was granted behind a second factor "
+            "(POST /users/me/devices). Writes device observations after verification."
         ),
     },
 ]
@@ -1595,6 +1846,75 @@ def require_rate_tier(tier: str = "interactive"):
         return principal
 
     _dependency.__name__ = "require_rate_limit"
+    _dependency.authz_rate_tier = tier_name
+    _dependency.authz_rate_tier_known = resolved is not None
+    return _dependency
+
+
+def require_public_rate_tier(tier: str = "sensitive"):
+    """Rate limit a route that is public *because the credential is in the body*.
+
+    :func:`require_rate_tier` resolves ``get_principal`` because it exists to
+    limit an authenticated caller's own budget, and that is correct for every
+    route it was written for. It is wrong for a credential-in-the-body route:
+    the credential is the *input*, so there is no principal yet, and binding
+    ``get_principal`` there turns the route from public into unreachable. It
+    fails quietly too -- the route is classified ``public`` in
+    :data:`AUTHZ_RULES` with ``enforced_by: ()``, and the inventory reads
+    ``require_rate_limit`` as a rate-limit *factory* rather than an
+    authorization gate, so ``actual_by`` is empty on both sides and the drift
+    report reports a clean match for a route nobody can reach.
+
+    That is worth being explicit about, because the failure mode is a login form
+    that always returns 401 and a governance report that says the tree is in
+    sync.
+
+    So this factory takes the *optional* principal and falls back to the client
+    address for anonymous callers. Pre-authentication the client address is the
+    only thing there is to key on, which makes a NAT shared by many customers a
+    shared bucket -- a real limitation, stated here rather than papered over, and
+    the reason the buckets are per-tier and shared rather than per-route.
+
+    Once a principal does resolve, the bucket is keyed by subject as usual, so a
+    caller who signs in gets a budget of their own rather than continuing to
+    draw on their address's.
+    """
+    resolved = RATE_TIER_BY_NAME.get(str(tier))
+    limiter = rate_tier_limiter(str(tier))
+    tier_name = str((resolved or {}).get("tier") or AUTHZ_OPS["default_rate_tier"])
+
+    async def _dependency(
+        request: Request,
+        principal: Principal | None = Depends(get_optional_principal),
+    ) -> Principal | None:
+        if principal is not None:
+            key = f"subject:{principal.subject}"
+        else:
+            address = request.client.host if request.client else "unknown"
+            key = f"addr:{address}"
+        decision = limiter.check(key)
+        if not decision["allowed"]:
+            declared = AUTHZ_DENIAL_BY_KIND["rate_limited"]
+            raise HTTPException(
+                status_code=int(declared["status"]),
+                detail={
+                    "error": "rate_limited",
+                    "keyed_by": "subject" if principal is not None else "client_address",
+                    **decision,
+                },
+                headers={
+                    "Retry-After": str(
+                        int(1 / limiter.refill_per_second) if limiter.refill_per_second else 1
+                    )
+                },
+            )
+        return principal
+
+    # Named distinctly from `require_rate_limit` so `route_authz_facts` records
+    # it as a *different* factory. If it kept the shared name, the catalog could
+    # not tell an authenticated rate limit from a public one -- which is exactly
+    # the confusion this factory exists to remove.
+    _dependency.__name__ = "require_public_rate_limit"
     _dependency.authz_rate_tier = tier_name
     _dependency.authz_rate_tier_known = resolved is not None
     return _dependency

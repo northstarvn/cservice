@@ -172,3 +172,18 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_users_username"), table_name="users")
     op.drop_index(op.f("ix_users_id"), table_name="users")
     op.drop_table("users")
+
+    # Drop the two native enums this revision created.
+    #
+    # `DROP TABLE` takes the *columns* with it but leaves the type behind, so
+    # without these the downgrade reports success and the next `upgrade head`
+    # fails with `type "servicetype" already exists`. That made the round trip
+    # look broken while leaving the database in a state where it was neither up
+    # nor down: tables gone, types not, and the failure surfacing one command
+    # later than the cause.
+    #
+    # `checkfirst=True` because SQLite has no standalone enum type to drop -- the
+    # values live inline in the column definition -- so asking it to drop one
+    # raises rather than no-ops.
+    for type_name in ("bookingstatus", "servicetype"):
+        sa.Enum(name=type_name).drop(op.get_bind(), checkfirst=True)

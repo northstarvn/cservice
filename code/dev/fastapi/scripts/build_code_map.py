@@ -69,7 +69,7 @@ TREE = _node(
             "principal", "optional_principal", "require_principal",
             "correlation_id", "require_scopes", "require_roles",
             "require_step_up", "require_cell_access", "require_tenant",
-            "rate_limit", "catalog",
+            "rate_limit", "public_rate_limit", "catalog",
             # Config-table driven authorization governance. The request path
             # is unchanged; these are the readers, the engine and the reports.
             "scope_catalog", "role_scope_grants", "denial_contract",
@@ -226,6 +226,11 @@ TREE = _node(
         # singleton and the consent trail beside it in append-only rows, so a
         # revocation stays provable after the profile row is overwritten.
         "user_preference_profile", "user_consent_event",
+        # Sign-in: a device is recognised from digests rather than values, a
+        # challenge is a rate-limited one-time code, an identity is an opt-in
+        # identifier added unverified, and a storage connection holds encrypted
+        # tokens. Grouped as four because each is a distinct durability story.
+        "auth_device", "auth_challenge", "user_identity", "storage_connection",
     ),
     _node(  # routers ----------------------------------------------------------
         "routers",
@@ -235,6 +240,15 @@ TREE = _node(
               "session_refresh", "logout", "session_inventory",
               "step_up", "api_keys", "password_policy",
               "password_feedback", "security_posture", "catalog"),
+        # The sign-in surface is its own router even though every path is
+        # mounted under /users: methods, recognition, trusted devices, linked
+        # identities and storage are separately governed (four of its routes are
+        # public writes in the authz audit), and folding them into the `users`
+        # node would hide that. Grouped as four business surfaces rather than
+        # fourteen routes, per maintenance rule 3.
+        _node("identity",
+              "sign_in_methods", "device_recognition_report",
+              "trusted_devices", "linked_identities", "storage_connections"),
         _node("bookings",
               "lifecycle_crud", "analytics", "assignment_report", "audit_history", "export"),
         _node("chat",
@@ -389,13 +403,43 @@ TREE = _node(
               "entity_timeline", "anomaly_detection", "seal_chain",
               "chain_verification", "trail_export",
               "view_profiles", "integrity_gates", "entry_seal_chain", "catalog"),
+        # Sign-in. Three service nodes because they fail independently and are
+        # governed separately: which credentials exist, how much proof a login
+        # is asked for, and what a customer may connect.
+        #
+        # `refused_patterns` is a leaf rather than an omission on purpose. The
+        # methods this service declines to offer are a decision, and a decision
+        # that exists only as an absence cannot be reviewed, published, or
+        # argued with.
+        _node("auth_methods",
+              "method_table", "refused_patterns", "one_time_codes",
+              "trusted_device_credentials", "validation", "catalog"),
+        # `credential_vocabulary` and `demand_resolution` are the two leaves
+        # that keep recognition from becoming authentication: the first is
+        # closed and validated, the second refuses to demand a credential an
+        # account cannot produce.
+        _node("device_recognition",
+              "signal_scoring", "policy_bands", "credential_vocabulary",
+              "demand_resolution", "enforcement_modes", "digesting",
+              "validation", "catalog"),
+        # `scope_ladders` carries the consequence of each scope, including that
+        # the broadest one grants deletion -- the reason the broad end needs an
+        # explicit confirmation rather than being the default.
+        _node("storage_providers",
+              "provider_registry", "scope_ladders", "pkce", "token_encryption",
+              "connection_health", "revocation", "validation", "catalog"),
     ),
     _node(  # schemas ----------------------------------------------------------
         "schemas",
         _node("schemas_core",
               "user", "token", "booking", "policy_score", "topic_selection",
               "session_lifecycle", "machine_credentials", "password_feedback",
-              "security_posture", "step_up"),
+              "security_posture", "step_up",
+              # Sign-in contract families. `recognition_verdict` is its own leaf
+              # because of what it must not carry: contributions, never the raw
+              # signals behind them, and nothing that reads as a grant.
+              "auth_method", "recognition_verdict", "otp",
+              "trusted_device", "identity", "storage"),
         _node("schemas_chat",
               "insight", "recovery", "recovery_playbooks", "retention", "snapshot_ops", "topic_ranking", "topic_policy",
               # Stage A contract families, one leaf per payload family.

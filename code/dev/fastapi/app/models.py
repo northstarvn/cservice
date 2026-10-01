@@ -742,6 +742,258 @@ class ComplaintImprovementProposal(Base, TimestampMixin):
     candidate_id = Column(String(80), nullable=False, default="", index=True)
 
 
+# --- Identity, sign-in methods and connected storage ------------------------
+#
+# These four tables exist because of two questions the ``users`` row cannot
+# answer on its own: *which device is asking*, and *which other accounts does
+# this person have*. Both are one-to-many off ``users``, so both are here.
+#
+# The design rule running through all four: **no row in this section stores a
+# credential, a raw signal, or a plaintext token.** Device signals are stored
+# as peppered digests, the trusted-device token is stored as a password hash,
+# one-time codes are stored as digests, and OAuth refresh tokens are stored
+# encrypted with the scheme recorded alongside them. A dump of this section
+# should not be enough to impersonate anybody or to read anybody's files.
+
+class AuthDevice(Base, TimestampMixin):
+    """A device observed for a user, and whether it has been trusted.
+
+    Every column is a digest or a flag. The recognition engine in
+    ``app/services/device_recognition.py`` reads these to score a later login
+    and writes ``last_seen_at`` / ``use_count`` as it goes, which is what makes
+    "usual hour of activity" an observation about this person rather than an
+    assumption about the population.
+
+    ``trusted_at`` is set only after a second factor has been presented *on
+    this device*. That ordering is the whole security property: recognition may
+    skip a re-challenge for an already-trusted device, but it can never
+    *create* the trust, so there is no path from "looks familiar" to "is
+    trusted".
+    """
+
+    __tablename__ = "auth_devices"
+    __table_args__ = (
+        # A user's digests are unique per signal *pair*, so the same user cannot
+        # accumulate two rows claiming the same device id -- which would let a
+        # single device score twice and inflate its own recognition.
+        UniqueConstraint(
+            "user_id", "device_digest", name="uq_auth_devices_user_device"
+        ),
+        # A trusted device always has a token hash, and a token hash is always
+        # on a trusted device. Enforced in the schema rather than in the router
+        # because "trusted" without a credential is precisely the row that would
+        # make recognition authoritative.
+        CheckConstraint(
+            "(trusted_at IS NULL) = (token_hash IS NULL)",
+            name="ck_auth_devices_trusted_requires_token",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Human label the user gave this device ("Work laptop"), so the trust
+    # decision is revocable by someone who recognises it in a list.
+    label = Column(String(80), nullable=False, default="", index=True)
+
+    # --- Recognition digests (never the raw signal) -------------------------
+    device_digest = Column(String(64), nullable=False, index=True)
+    network_digest = Column(String(64), nullable=False, default="", index=True)
+    agent_digest = Column(String(64), nullable=False, default="")
+    language_digest = Column(String(64), nullable=False, default="")
+    timezone_digest = Column(String(64), nullable=False, default="")
+
+    # The hours this user has signed in at, as a JSON array of ints 0..23.
+    # A *set* of hours rather than a histogram on purpose: "how often" is a
+    # signal an attacker can manufacture by logging in repeatedly, so it is
+    # not recorded. See ``device_recognition.fold_hour``.
+    usual_hours = Column(Text, nullable=False, default="[]")
+
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    use_count = Column(Integer, nullable=False, default=0)
+
+    # --- Trust --------------------------------------------------------------
+    trusted_at = Column(DateTime(timezone=True), nullable=True)
+    trust_expires_at = Column(DateTime(timezone=True), nullable=True)
+    # Password hash of the opaque device token. The token itself is returned
+    # once at creation and never stored.
+    token_hash = Column(String(255), nullable=True)
+    # Bounded so a leaked token stops being useful on its own.
+    rotated_at = Column(DateTime(timezone=True), nullable=True)
+
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_reason = Column(String(40), nullable=False, default="", index=True)
+
+
+class AuthChallenge(Base):
+    """One outstanding one-time-code challenge.
+
+    A separate table rather than a column on ``users`` because these are
+    short-lived, high-volume, and the interesting state is the *attempt
+    counter*: a code is only as safe as the number of guesses it tolerates, and
+    that has to survive a process restart, which a cache entry would not.
+    """
+
+    __tablename__ = "auth_challenges"
+    __table_args__ = (
+        # One live challenge per (user, purpose). A second request replaces the
+        # first rather than accumulating, so requesting a code repeatedly
+        # cannot widen the attacker's guesses -- it only invalidates codes they
+        # already had.
+        UniqueConstraint("user_id", "purpose", "consumed_at", name="uq_auth_challenges_live"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # What the code is for ("login", "step_up", "email_change"), so a code
+    # minted for one purpose cannot be replayed at another.
+    purpose = Column(String(40), nullable=False, default="login", index=True)
+    # Digest of the code. Not the code.
+    code_hash = Column(String(255), nullable=False)
+    # Which channel it went out by, for the audit trail.
+    channel = Column(String(20), nullable=False, default="email")
+    # Digest of the device that asked, so a code minted on a recognised device
+    # is not accepted from an unrecognised one.
+    device_digest = Column(String(64), nullable=False, default="")
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    issued_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    # Set when this challenge was replaced by a newer one, so "superseded" and
+    # "never used" stay distinguishable.
+    superseded_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class UserIdentity(Base):
+    """Another account this person may sign in with, linked to a ``users`` row.
+
+    This is the "opt to login" surface: a person can add an address, a phone
+    number, or an external identity provider to the account they already have.
+    Adding one is what makes an account *recoverable*; it is not a second
+    account and it carries no separate credential.
+
+    ``is_primary`` is what a login resolves to when several identifiers match.
+    At most one row per user is primary, enforced below rather than trusted to
+    application code, because two primaries means "which account did I just log
+    into" has two answers.
+    """
+
+    __tablename__ = "user_identities"
+    __table_args__ = (
+        # One account per (provider, identifier). This is the constraint that
+        # actually matters: without it, the same address could be linked to two
+        # different users, and a login by that address would then have to pick
+        # one -- which is the shape of an account-takeover bug. The per-user
+        # variant below only stops one account listing the same identifier
+        # twice.
+        UniqueConstraint(
+            "provider", "identifier_hash", name="uq_user_identities_provider_identifier"
+        ),
+        # For an external provider the subject is the provider's own stable id,
+        # so this is what binds "the Google account that says who it is" to a
+        # row here. Null for email/phone, where NULLs do not collide and so
+        # correctly place no constraint at all.
+        UniqueConstraint(
+            "provider", "external_id", name="uq_user_identities_provider_subject"
+        ),
+        UniqueConstraint("user_id", "identifier_hash", name="uq_user_identities_user_identifier"),
+        # A primary identifier is one the user has proven they control.
+        CheckConstraint(
+            "(is_primary) <= (is_verified)",
+            name="ck_user_identities_primary_requires_verification",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Which kind of identifier this is: "email", "phone", or a named external
+    # provider ("google", "okta").
+    provider = Column(String(40), nullable=False, default="email", index=True)
+    # Digest of the identifier. Stored hashed so a database read cannot be used
+    # to enumerate who has an account here; ``identifier_hint`` below keeps it
+    # displayable without keeping it retrievable.
+    identifier_hash = Column(String(64), nullable=False)
+    # A masked fragment ("a***@example.com") so a user can recognise an
+    # identifier in a list without the list being a credential dump.
+    identifier_hint = Column(String(120), nullable=False, default="")
+    # Only meaningful for an external provider; null for email/phone.
+    external_id = Column(String(255), nullable=True, index=True)
+    is_primary = Column(Boolean, nullable=False, default=False, index=True)
+    is_verified = Column(Boolean, nullable=False, default=False, index=True)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    verification_method = Column(String(30), nullable=False, default="")
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    # Consent to be contacted at this identifier, recorded per identifier
+    # rather than per user, because people use different addresses.
+    contact_consent = Column(Boolean, nullable=False, default=False)
+    # Free-form provenance ("added during migration", "self-service"). Kept as
+    # a column rather than an enum because this vocabulary is operational and
+    # grows without a migration being worth it.
+    source = Column(String(40), nullable=False, default="self_service", index=True)
+
+
+class StorageConnection(Base, TimestampMixin):
+    """A user's own cloud storage, connected under their own authority.
+
+    ``access_token_encrypted`` and ``refresh_token_encrypted`` hold ciphertext
+    whose ``enc:<scheme>:`` prefix records how it was encrypted, so a change of
+    available libraries cannot make stored rows undecryptable. Plaintext tokens
+    are never written.
+
+    ``scopes_json`` records what the user actually consented to, which is not
+    necessarily what the provider would grant: a user can approve a narrower
+    grant than the scope requested, and the connection must describe the grant
+    rather than the request.
+
+    Carries ``TimestampMixin`` even though the OAuth flow updates the same row
+    several times over (pending -> active, or -> revoked) and one might think
+    ``connected_at`` alone would do. The mixin is here because ``updated_at`` is
+    what distinguishes "this connection was re-authorised yesterday" from "it has
+    been sitting there since 2024 with a dead refresh token", and that is the
+    question ``connection_health`` is asked. Migration ``0009`` created the
+    columns, so this costs nothing at deploy time.
+    """
+
+    __tablename__ = "storage_connections"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_storage_connections_user_provider"),
+        # 'pending' is the value an OAuth attempt is inserted with, before the
+        # customer has reached the provider's consent screen. Without it in the
+        # vocabulary the constraint rejects the very first write the connect
+        # flow performs -- a check that is not merely wrong but makes the
+        # feature unreachable.
+        CheckConstraint(
+            "status IN ('pending', 'active', 'revoked', 'expired', 'error')",
+            name="ck_storage_connections_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(40), nullable=False, index=True)
+    label = Column(String(80), nullable=False, default="")
+    status = Column(String(20), nullable=False, default="active", index=True)
+    # What was asked for, what was granted, and whether the user had to confirm
+    # the broad end of the ladder. All three, because "we requested full access"
+    # and "the user granted full access" are different claims.
+    requested_scopes_json = Column(Text, nullable=False, default="[]")
+    scopes_json = Column(Text, nullable=False, default="[]")
+    broad_scope_confirmed = Column(Boolean, nullable=False, default=False)
+    access_token_encrypted = Column(Text, nullable=False, default="")
+    refresh_token_encrypted = Column(Text, nullable=False, default="")
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    # Opaque, single-use, bound to one connect attempt. Present only between
+    # the redirect being issued and the callback landing.
+    state_hash = Column(String(64), nullable=False, default="", index=True)
+    code_verifier_encrypted = Column(Text, nullable=False, default="")
+    connected_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_reason = Column(String(40), nullable=False, default="", index=True)
+    last_error = Column(String(255), nullable=False, default="")
+
+
 # =============================================================================
 # Metadata layer: what the schema above means, and what it does not protect
 # =============================================================================
@@ -825,6 +1077,21 @@ SENSITIVITY_PLACEHOLDER = "***redacted***"
 FIELD_SENSITIVITY: dict[str, str] = {
     # credentials
     "hashed_password": "credential",
+    # --- Identity and sign-in material ------------------------------------
+    # Every one of these is either a credential or the encrypted form of one.
+    # They are grouped together because they share one failure mode: a value in
+    # any of them is enough to act as the user, so none of them is ever
+    # serialised, projected, or included in a bulk export.
+    #
+    # `*_encrypted` is classified as a credential even though it is ciphertext.
+    # The ciphertext is itself the thing an attacker needs -- it can be replayed
+    # verbatim if the endpoint decrypts it on their behalf -- so it is auth
+    # material by any reasonable reading.
+    "token_hash": "credential",
+    "code_hash": "credential",
+    "code_verifier_encrypted": "credential",
+    "access_token_encrypted": "credential",
+    "refresh_token_encrypted": "credential",
     # free text a person wrote or a model produced for them
     "message": "content",
     "response": "content",
@@ -882,6 +1149,23 @@ FIELD_SENSITIVITY: dict[str, str] = {
     "currency_amount": "financial",
     "rate": "financial",
     "fee": "financial",
+    # Recognition digests. These are HMACs of signals, so they are not
+    # reversible, but they *are* a behavioural profile: a set of them taken
+    # together identifies a device and its usual hours, and correlating them
+    # across tables is exactly what domain separation in
+    # `device_recognition._DIGEST_DOMAINS` is meant to prevent. `behavioral`
+    # rather than `identifier` because they describe a device rather than a
+    # person -- except `identifier_hash`, which is a digest of *how the person
+    # is named*, and stays content-adjacent.
+    "device_digest": "behavioral",
+    "network_digest": "behavioral",
+    "agent_digest": "behavioral",
+    "language_digest": "behavioral",
+    "timezone_digest": "behavioral",
+    "usual_hours": "behavioral",
+    "state_hash": "credential",
+    "identifier_hash": "content",
+    "identifier_hint": "content",
     # derived from activity
     "system_score": "behavioral",
     "customer_score": "behavioral",
@@ -1605,6 +1889,56 @@ TABLE_LIFECYCLE: dict[str, dict[str, Any]] = {
             "so a grant and a later revocation are two rows rather than one current "
             "value. purpose is checked non-empty but its vocabulary is config-driven, "
             "so it is deliberately not in ENUM_FIELD_SPECS"
+        ),
+    },
+    "auth_challenges": {
+        "write_mode": MUTABLE,
+        "retention_days": 30,
+        "owner": "routers/users.py",
+        "note": (
+            "mutable because the attempt counter and consumed_at are the state that "
+            "makes a one-time code safe: they have to survive a restart, so they "
+            "cannot live in a cache. 30 days is well past the 10-minute TTL, so every "
+            "row here is already expired when it is swept -- the retention window "
+            "exists for incident review, not for the code to still work. purged by "
+            "expires_at rather than by age"
+        ),
+    },
+    "auth_devices": {
+        "write_mode": MUTABLE,
+        "retention_days": 400,
+        "owner": "services/device_recognition.py",
+        "note": (
+            "mutable because last_seen_at/use_count/usual_hours are observations that "
+            "accumulate, and trust is withdrawn by setting revoked_at rather than by "
+            "deleting the row -- a revoked device that can still be counted is how a "
+            "recogniser learns that it was right. 400 days is chosen so a dormant "
+            "device falls out of the recognition set entirely rather than being "
+            "remembered indefinitely"
+        ),
+    },
+    "user_identities": {
+        "write_mode": MUTABLE,
+        "retention_days": None,
+        "owner": "routers/users.py",
+        "note": (
+            "no retention: an identifier is the means of recovery, so sweeping it on "
+            "a timer would remove the only way back into an account. Revocation is a "
+            "revoked_at, and that row is kept for the same reason. The unique "
+            "constraint on (provider, identifier_hash) is the actual guarantee that "
+            "one address cannot answer for two accounts -- not the lifecycle rule"
+        ),
+    },
+    "storage_connections": {
+        "write_mode": MUTABLE,
+        "retention_days": None,
+        "owner": "services/storage_providers.py",
+        "note": (
+            "no retention, and no sweep of revoked rows: a revoked connection still "
+            "records that the user once granted this provider this scope, and that "
+            "record is what an operator needs when a leak is investigated. The "
+            "ciphertext columns are overwritten with '' on revocation so the row is "
+            "kept and the credential is not"
         ),
     },
 }

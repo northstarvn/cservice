@@ -431,6 +431,36 @@ def decode_token_full(
 STEP_UP_LEVELS = ("none", "loa1", "loa2", "loa3")
 STEP_UP_RANK = {level: rank for rank, level in enumerate(STEP_UP_LEVELS)}
 
+#: level -> the ``amr`` evidence values that establish it.
+#:
+#: This is the single declaration of the evidence-to-assurance mapping.
+#: ``app.deps.STEP_UP_RANKS`` documents the same rows for the admin surface;
+#: :func:`step_up_level_of` reads *this* table so the verifier cannot disagree
+#: with the documentation. They used to be two independent lists, and had
+#: drifted: ``deps.STEP_UP_RANKS`` listed ``hwk`` as loa2 evidence while the
+#: verifier's own hard-coded set omitted it, so a hardware-held key token
+#: derived ``loa1`` -- the verifier quietly downgrading the behaviour its own
+#: documentation promised.
+STEP_UP_SPEC: dict[str, dict[str, object]] = {
+    "none": {
+        "evidence": (),
+        "description": "No assurance claim at all. Never satisfies a step-up requirement.",
+    },
+    "loa1": {
+        "evidence": ("pwd",),
+        "description": "Ordinary password login. The floor for a token with no amr.",
+    },
+    "loa2": {
+        "evidence": ("pwd", "mfa", "otp", "hwk"),
+        "description": "Second factor: authenticator code, one-time code, or a hardware-held key.",
+    },
+    "loa3": {
+        "evidence": ("mfa", "hwk", "webauthn", "biometric", "cosign",
+                     "webauthn_l3", "hardware_key", "recovery_code"),
+        "description": "Passkey / hardware key / biometric / co-signature.",
+    },
+}
+
 
 def step_up_level_of(claims: dict | TokenValidation | None) -> str:
     """Assurance level carried by a token/claims mapping."""
@@ -442,15 +472,24 @@ def step_up_level_of(claims: dict | TokenValidation | None) -> str:
     if acr in STEP_UP_RANK:
         return acr
     # Derive a floor from the authentication methods actually used.
+    #
+    # The evidence sets are read from STEP_UP_RANK so this function cannot
+    # disagree with the table that documents it. They used to be hard-coded
+    # here, and had drifted: STEP_UP_RANKS declares `hwk` as loa2 evidence
+    # while the local set omitted it, so a token whose only evidence was a
+    # hardware-held key derived loa1 -- a *downgrade* of the documented
+    # behaviour, on a credential the table had already said was worth more
+    # than a password.
     methods = claims.get("amr") or []
     if isinstance(methods, str):
         methods = [methods]
     floor = "loa1"
     for method in methods:
-        if method in {"mfa", "otp", "webauthn", "biometric"}:
-            floor = "loa2"
-        if method in {"webauthn_l3", "hardware_key", "recovery_code"}:
-            floor = "loa3"
+        for level in sorted(STEP_UP_RANK, key=STEP_UP_RANK.get):
+            if method in (STEP_UP_SPEC.get(level) or {}).get("evidence", ()):
+                if STEP_UP_RANK[level] > STEP_UP_RANK.get(floor, 0):
+                    floor = level
+                break
     return floor
 
 

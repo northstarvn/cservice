@@ -2190,3 +2190,117 @@ The backend is already strong on decision quality, automated recovery, rule flex
 - Self-service “my recovery status / points forecast / policy posture”
 
 All recommendations prefer **extending existing leaves** (`recovery_playbooks`, `explainability`, `points_exchange`, `communication_strategy`, `users`, `chat`) rather than inventing new top-level domains, in line with CODE_MAP maintenance rules.
+
+---
+
+## Sign-in, device recognition and connected storage (2026-10-01)
+
+Added: login by several means, recognition of a returning device, opt-in linked
+identities, and opt-in connection to a customer's own cloud storage. Suite green
+at **2612 passing**.
+
+### What was refused, and what replaced it
+
+The request behind this work asked for "log in by any available means, **secure
+or not**", and to recognise users "via other info, including any guesses to be
+tuned over time". Both were built, with one part of each deliberately changed.
+
+**No method logs anyone in without proof of something they hold.** Every method
+is revocable, and the patterns that were not offered are recorded as *data* in
+`auth_methods.REFUSED_METHOD_PATTERNS` rather than left as an absence — so
+"why can I not sign in from my network" has an answer in the repository, and
+adding one is a deliberate act someone has to argue for:
+
+| Not offered | Why |
+|---|---|
+| PIN with no second factor | still a secret; 10⁴ possibilities, all tryable |
+| Trusted IP or network | shared by an office, a hotel, a CGNAT range; the most attacker-controlled part of a request |
+| Security questions | answers are on old public profiles |
+| Automatic cookie sign-in | a stolen cookie is a standing account; `trusted_device` is the safe version |
+| Recognised-from-context sign-in | the whole substance of the request — answered below |
+
+**Recognition decides how much proof to demand, never whether to accept.**
+`app/services/device_recognition.py` scores a login `0..1` from device digest,
+network /24, user-agent, language, declared UTC offset and usual hours, and the
+score only selects which credential to ask for. Its weakest reachable band is
+`loa2` via a real second factor; there is no "recognised enough" tier, and
+`PERMITTED_CREDENTIALS` is closed — a policy naming anything outside it is a
+*validation error*, and `recognize` refuses rather than honours it.
+
+The reasoning is in the module docstring, and it is worth restating: the signals
+are not secret, a false accept does not announce itself the way a false reject
+does, and "tune the guesses over time" with a threshold that drifts toward
+convenience produces a system that gets steadily more permissive as it
+accumulates normal-looking traffic — including an attacker's, once they are
+inside often enough.
+
+### Three guards that turned out to be load-bearing
+
+Each of these was written because the alternative is a failure that is silent.
+
+**Recognition cannot lock anyone out.** `demand_for_presented` downgrades a
+challenge the account has not enrolled. `unfamiliar` (threshold 0.00, where
+every first login lands) is *required* by `validate_recognition` to demand a
+bootstrap credential — if it demanded `webauthn`, enrolling one would require
+being logged in, and new accounts would be permanently locked out.
+
+**Enforcement is off by default.** `CSERVICE_RECOGNITION_MODE` is `advisory`
+unless set, because enabling an unconfigured feature that changes who can sign
+in is not a default worth shipping. An unrecognised value falls back to
+`advisory`, not `off` — a typo'd `enforced` that silently ran `off` would look
+configured and be inert.
+
+**Uniform responses on the credential routes.** Unknown username, wrong code,
+expired code and replayed code all raise the same 401 with the same body. The
+OTP *response* is identical for an account that exists and one that does not.
+`OtpRequestOut` carries no user id, address, or delivery hint by construction.
+`/users/me/recognition` is post-authentication only, for the same reason.
+
+### Storage: full access is offered, and labelled
+
+Each provider declares a scope ladder ending in `full`, and `full` genuinely
+includes deletion. It is never the default, and it requires
+`confirm_broad_scope: true` plus a message stating what it grants. Tokens are
+encrypted with the scheme recorded in the stored value (`enc:fernet:` /
+`enc:stream:`) so changing installed libraries cannot make stored rows
+undecryptable. Revocation **overwrites the ciphertext and keeps the row** — the
+record of what was once granted is what an investigation needs, and the response
+says plainly that the provider-side grant is unaffected.
+
+Two things are not implemented and say so: no provider ships with credentials
+(`configured: false` until the environment supplies them, so the UI never offers
+a button that leads to a broken consent screen), and the token exchange is
+absent, so a connection stays `pending` rather than being reported live.
+
+### Defects found and fixed while building this
+
+| Where | Defect |
+|---|---|
+| `security.step_up_level_of` | `deps.STEP_UP_RANKS` declared `hwk` as loa2 evidence; the derivation had its own hard-coded set omitting it, so a hardware-key token derived **loa1** — the verifier downgrading its own documented behaviour. Both now read one `STEP_UP_SPEC` table. |
+| `auth_methods.KNOWN_AMR` | a second hand-written list of the same evidence values, which is how `hwk` ended up in one place and not the other. Now derived. |
+| `device_recognition._resolve_policy` | iterated the table in declaration order and returned the first match. The table is ascending and `unfamiliar` is `0.00`, so **every** score including 1.0 landed on `unfamiliar` — every recognised device asked for a password. |
+| `deps.require_rate_tier` | resolves `get_principal`, which 401s an anonymous caller. Bound to the four credential-in-the-body routes it made them **unreachable**, and the drift report called it clean because a rate-limit factory is not counted as an authorization gate. Added `require_public_rate_tier`, which takes the *optional* principal and falls back to the client address. |
+| `_enrolled_methods` | consulted only verified identities, so `trusted_device` was never "enrolled". Enforced mode then downgraded the `trusted` band on every recognised login — silently behaving as advisory in the one place it was meant to bite. Found by a live probe, not by a unit test. |
+| `_context_from` | never read a timezone, so `timezone_digest` was stored on every device and could then never agree, capping every score below `trusted`. Read the honest way: a declared offset, not a derived one. |
+| `storage_connections` | `CHECK status IN ('active', ...)` omitted `pending`, the value the connect flow's very first insert uses — the check made the feature unreachable. |
+| `alembic/versions/20260904_00` | `downgrade()` dropped the `servicetype` / `bookingstatus` tables but not the *types*, so `downgrade base` then `upgrade head` failed with `type already exists` — the round trip looked broken and left the database neither up nor down. |
+| `SqliteHarness` | had no `rollback`/`refresh`, so calling the coroutine produced a "never awaited" warning and no rollback, and the *next* assertion failed with an unrelated error. |
+
+### Governance
+
+19 new `AUTHZ_RULES` rows and 4 `AUTHZ_PUBLIC_WRITE_EXCEPTIONS`. A new
+`self_service` exposure class, deliberately sharing rank 1 with
+`authenticated`: it is a scope of effect, not a stricter gate, and a higher rank
+would make a plain session look like it implies more than it does.
+
+`/meta` gains `auth_methods`, `device_recognition`, `storage_providers`;
+`/meta/ecosystem` gains the latter two as subservices reporting
+`grants_access: false`; `/meta/scoring-catalog` publishes all three tables.
+
+Verified: `alembic upgrade head` from empty → 29 tables, drift in sync, full
+`downgrade base` and re-upgrade clean. Live probe against PostgreSQL — OTP issue
+→ verify (loa2) → replay refused → cross-device replay refused → trust device →
+device login (loa2, `recognised`) → token from another device refused → revoke →
+token refused → OTP limiter firing 429 on the third request. Enforced mode
+challenges a password-only login on a trusted device and leaves an account with
+nothing enrolled working.

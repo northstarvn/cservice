@@ -279,6 +279,80 @@ Every one of these passed the full suite before it was found:
   read the placeholder URL from `alembic.ini` and used a synchronous engine
   with an async driver.
 
+## Signing in, and recognising a device
+
+```bash
+# what can be used to sign in, and what this build deliberately does not offer
+curl -s localhost:8000/users/auth/methods | python3 -m json.tool
+
+# the bootstrap second factor: needs no enrolment, which is why it is the
+# fallback a locked-out account can still use
+curl -s -X POST localhost:8000/users/auth/email-otp/request \
+  -H 'Content-Type: application/json' -d '{"username":"ana","device_id":"my-laptop"}'
+```
+
+There is **no mail sender in this deployment**. The code is generated, hashed
+and stored; nothing delivers it. That is the honest failure mode — an
+integration has to send it, and a deployment that has not wired a sender will
+see a correct-shaped response and no inbox.
+
+**Device recognition does not sign anyone in.** It scores a login from the
+device digest, a network /24, user-agent, language, a declared UTC offset and
+your usual hours, and the score only decides *which credential is asked for* —
+never whether the request is admitted. The lowest band it can select is `loa2`,
+reached through a real second factor.
+
+Set `CSERVICE_RECOGNITION_MODE=enforced` to have the verdict actually choose the
+credential. Two things about that mode are load-bearing:
+
+- It is **off by default**, because a feature that changes who can sign in
+  should not become stricter the moment it is deployed.
+- A challenge the account has **not enrolled is downgraded, not applied**. A
+  password-only customer on a new device is the most legitimate `unfamiliar`
+  login there is, and telling them to produce a second factor they never
+  enrolled means the only way forward is to be logged in — which they are not.
+
+To see the whole decision, `GET /users/me/recognition?device_id=…` reports the
+score, the band, and every signal's contribution. It shows contributions and
+never the values behind them, so the endpoint that makes the weights arguable is
+not also an endpoint that locates you. It is post-authentication only: the same
+question before login, for a supplied username, would answer "does this account
+exist and have it seen this device before".
+
+Trusted devices are revocable at `DELETE /users/me/devices/{id}`, which clears
+the token hash rather than flagging the row — a revoked device stays visible so
+you can see the revocation, but holds nothing that works.
+
+### The pieces of the request that were refused
+
+`GET /users/auth/methods` returns a `refused` list beside the catalogue, and
+each entry says why: PIN-only, trusted-network, security questions, automatic
+cookie sign-in, and sign-in-by-recognition. Those are data in
+`auth_methods.REFUSED_METHOD_PATTERNS` rather than omissions, so "why can I not
+sign in from my network" is answerable from the running service, and adding one
+is a deliberate act somebody has to argue for.
+
+The reasoning is worth reading in full before changing any of it:
+`app/services/device_recognition.py`, module docstring.
+
+### Connecting your own storage
+
+`GET /users/me/storage/providers` lists each provider with the consequence of
+every scope, and `configured: false` unless the environment supplies
+credentials. `POST /users/me/storage/connect` returns an authorisation URL;
+the broadest scope grants read/write/delete over the whole account, is never the
+default, and needs `confirm_broad_scope: true` plus a message stating so.
+
+**The token exchange is not implemented here.** A connection stays `pending`
+with no tokens stored and says so, rather than being reported live. Setting
+`CSERVICE_STORAGE_REDIRECT_URI` is required — without it the connect endpoint
+answers 503 instead of sending someone to a URL that cannot match what the
+provider has registered.
+
+Revoking overwrites the stored ciphertext and keeps the row, so the record of
+what was once granted survives for an investigation while the credential does
+not. The response says plainly that the provider-side grant is unaffected.
+
 ## Workers are off by default
 
 `CSERVICE_PARTITION_WORKER`, `CSERVICE_AUTO_RECOVERY`,
