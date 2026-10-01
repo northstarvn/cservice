@@ -43,6 +43,22 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   alike cannot distinguish a working engine from a constant one. Both are limits
   of the *simulation*, and stating them is how a reader knows which rows are
   resting on a question that cannot fail.
+- **`communication_frequency: only_reactive` must not suppress an offer.** It is
+  a preference about how often to *interrupt*, not about whether to be *told*.
+  The offer is issued and visible; the gate withholds the notification and defers
+  it with a time. Any future change that makes `only_reactive` skip issuance
+  breaks the promise the preference makes, and hides a fix from precisely the
+  people who asked for less interruption.
+- **A recovery or service offer is never consent-gated**, and the three kinds'
+  purposes are asserted to be `service`/`recovery` by
+  `test_the_three_kinds_are_all_service_or_recovery`. `validate_offers` warns on
+  any kind that is not, so adding a campaign-flavoured kind is a visible act.
+- **`customer_offers.generosity_scale` is stored, never recomputed at fulfilment.**
+  A scale re-read from the live investment signal can move an amount the customer
+  has already accepted.
+- **`OFFER_STATUSES` keeps `accepted` and `fulfilled` apart.** "You accepted and
+  we have not done it yet" is a real state and collapsing it removes the only
+  signal that there is a backlog.
 - **A deferred subflow is not a pass.** `FlowRun.passed` is true when every
   deferred subflow was skipped, which is why `flow_gate_measurements` publishes
   `subflows_deferred` and `subflows_exercised` beside `flows_failed`. `0`
@@ -289,6 +305,187 @@ healthier and is measurably worse.
   Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
 
 ## Expansion log
+
+### Stage B: customer-facing recovery offers (2026-10-01)
+
+Five of the five items, in the order they depend on each other. Composing an
+offer already existed; issuing one did not.
+
+#### 1–2. Offers and their outcomes: `services/customer_offers.py`
+
+`services/recovery_playbooks.py` has always known what to offer —
+`RECOVERY_SAVE_INCENTIVES` holds three tiers and `resolve_recovery_incentive`
+composes the right one. It says so itself: the preview carries
+`"issued": False` and the registered action is described as *issues nothing*.
+That boundary was correct, and it is also the gap: composing an offer and
+handing it to a customer are different acts, and the second one had nowhere to
+live.
+
+**Three kinds, and no fourth catalogue.** Each names the upstream table it reads,
+so an offer records *which policy fired* rather than merely that one was made:
+
+| kind | reads |
+|---|---|
+| `goodwill` | `RECOVERY_SAVE_INCENTIVES` → `resolve_recovery_incentive` |
+| `waiver` | `ARREARS_WAIVER_POLICY` → `evaluate_waiver_approval` |
+| `priority` | `RECOVERY_REVIEW_RULES` → `resolve_recovery_review_priority` |
+
+The third is the one that needed saying out loud. `points_exchange` and
+`arrears_payments` each declare their own `PRIORITY_RANK` — both
+`high/medium/low`, both meaning *rule evaluation order* — and neither means queue
+urgency. Adding a third notion named `priority` would have made three things
+called priority mean three different things, so this module reads
+`urgent/high/normal` from the review rules and adds no fourth copy.
+`validate_offers` asserts the two existing copies still agree.
+
+**Four outcomes, and `accepted` is not `fulfilled`.** `offered → accepted →
+fulfilled`, plus `declined` and `expired`. "You accepted and we have not done it
+yet" is a real and embarrassing state, and collapsing it into `fulfilled` would
+erase the only signal that there is a backlog — which is why
+`fulfilment_rate_of_accepted` is reported next to `acceptance_rate` in the admin
+rollup.
+
+**The state machine is asymmetric on purpose.** `fulfil` is refused from
+`offered`: nobody accepted it, so there is nothing to have fulfilled, and a sweep
+that marked it so would record a fulfilment that never happened — while the
+customer is mid-tap. `expire` is *allowed* from `offered`, twice over: an
+offer's own clock running out is what `expire_offers_due` does, and an operator
+withdrawing a mis-sent offer needs the same verb. Restricting *fulfilment* rather
+than expiry generally is the distinction that lets both exist.
+
+**The reference is the primary key rendered**, not a counter. This schema has
+had that exact bug once: the complaint escalation id was
+`ESC-{user_id}-{sequence:03d}` from a module-level counter, so it reissued its own
+values after every redeploy and two customers ended up holding the same one.
+
+#### 3. Preference gates — on contact, not on existence
+
+The requirement is *preference gates on all proactive outreach and recovery
+contact*. Read carefully that is a statement about **contact**, and the
+implementation treats it that way:
+
+- **The offer is issued and visible even when the customer asked for reactive
+  contact only.** `communication_frequency: only_reactive` means *do not
+  interrupt me*; it does not mean *do not tell me things*. Such a customer still
+  finds the offer in their inbox and can accept it in one tap. Reading the
+  requirement as "withhold the offer" hides a fix from exactly the people who
+  asked not to be bothered.
+- **The notification is what the preference governs**, and it is deferred with a
+  `deferred_until` the scheduler can act on rather than dropped — "we did not tell
+  them" is not actionable.
+- Quiet hours and the stated frequency cap defer the same way, and the reason
+  string carries the numbers (`3.0h` elapsed against a `24h` cap).
+- **Every gate question is asked of `services/preferences.py`.**
+  `effective_contact_plan` already answers permitted / reactive-only / quiet hours
+  / cooldown / channel, and a second implementation of that logic is a second
+  thing to keep correct.
+
+#### Consent never withholds a fix
+
+All three kinds are deliberately `service` or `recovery` purposes, and
+`validate_offers` **warns** when a kind is not — so a campaign-flavoured fourth
+kind produces a warning at review time rather than a silently suppressible fix.
+
+The check is asked of `preferences.is_outreach_permitted(purpose,
+service_critical=...)`, which is purpose-aware and is the same primitive the
+contact plan uses. That detail is not incidental: the first version read the
+plan's top-level `permitted`, which is the **service** gate with
+`marketing_permitted` published beside it — so a marketing offer was being
+created with the consent explicitly withdrawn. Caught by
+`test_a_marketing_purpose_is_still_gated`.
+
+#### 4. Consent-aware explanations
+
+`explain_offer` changes the **framing**, never the substance. A recovery offer
+exists because something happened to this customer, which is a
+legitimate-interest communication, so the reason is given either way. What
+consent changes is the wrapper: with no marketing consent the wording avoids
+campaign language, because "we miss you, here's something special" around a
+recovery credit is a retention email that happens to contain an apology.
+`plain_language_explanations` keeps its meaning everywhere else.
+
+**The internal tier name never reaches the customer.** `RECOVERY_SAVE_INCENTIVES`
+calls its top tier *"Critical save offer"*, and showing a customer that string
+tells them our churn model graded them critical — unsettling, and a small
+disclosure of the scoring. `OFFER_HEADLINES` is customer-safe copy; the internal
+name lives in `internal_name` and in the issued event payload, where an operator
+can find it and a customer cannot.
+
+#### 5. Self-service offer inbox
+
+`GET /chat/me/offers`. Expired and declined offers are **included and labelled**,
+not filtered out: an offer that quietly vanishes reads as *we never offered that*,
+which is a different and worse message than *that one expired*. `actionable` is
+computed against the offer's own clock rather than its stored status, so a card
+never looks live and then fail on tap.
+
+One-tap accept is **idempotent in the sense that matters**: pressing twice, or
+pressing an offer that expired while the page was open, returns 200 with the
+current status and an explanation. The customer asked "did that work?" and the
+answer must never be a stack trace.
+
+#### The router, and three defects on the way
+
+`app/routers/offers.py` — its own router, because an offer has an identity a
+customer quotes, a state machine, and a compliance trail. Included with **no
+prefix**: the paths already carry `/chat`, and a prefix produced
+`/chat/chat/me/offers` on the first attempt.
+
+- **Three `rule_expects_more` mismatches from the drift report.** The operator
+  routes were first written with a manual `if not current_user.is_admin` check.
+  The drift report flagged all three, correctly: `chat_admin` declares
+  `get_current_admin_user` and the route bound `get_current_user`. A dependency
+  is the real gate and an attribute check is not, so the manual checks are gone.
+- **`preview_waiver_offer` read the wrong key.** The natural guess from the other
+  two previews is `approval["approved"]`, which does not exist —
+  `evaluate_waiver_approval` spells it `allowed`. Every policy that *granted* a
+  waiver came back refused, silently and pointing the wrong way. Now
+  `allowed is True` for `customer-premium` and `False` for `standard`, both
+  asserted.
+- **`policy_score` typed as `dict` could never satisfy the policy.** The engine
+  reads `getattr(policy_score, "policy_tier")`; a dict has no such attribute, so
+  both reads returned `''` and `0.0` and every waiver was denied for a *missing
+  tier* whatever the caller sent. `PolicyScoreIn` makes it unrepresentable.
+
+**No new `AUTHZ_RULES` rows**, deliberately. `chat_reads` / `chat_writes` /
+`chat_admin` already classify every path correctly *by prefix*, so a route added
+under either prefix inherits its gate rather than having to remember it —
+including `chat_admin`'s loa2 step-up, which is correct for a human committing a
+credit.
+
+#### Two tables, one migration
+
+- `customer_offers` — mutable, because the customer reads current state. The
+  three kinds deliberately do not share a value column: a waiver is worth
+  nothing in points and a goodwill credit nothing as a waiver, so one `value`
+  field would make `points > 0` mean "this offer has value" on rows where it means
+  nothing. `generosity_scale` is recorded **on the row** because a scale
+  recomputed at fulfilment time can move an amount the customer already accepted.
+- `customer_offer_events` — append-only. `kind` is the verb, not the resulting
+  status, because `accepted` and `fulfilled` are two events a status-only
+  vocabulary would call the same thing.
+- `20261001_02_add_customer_offers.py`, down_revision `0009_identity_storage`,
+  single head. Verified column-for-column by `TestMigration`.
+
+Two deliberate non-constraints, in `UNCONSTRAINED_REFERENCE_COLUMNS`:
+`issued_by_id` (most offers come from the sweep, not a person) and
+`arrears_entry_id` (a waiver can be offered for a charge not yet written).
+
+#### Verification
+
+- `python3 -m pytest tests/ -q` → **2712 passed** (76 new in
+  `tests/test_customer_offers_stage_b.py`).
+- `validate_offers()` → valid, 3 kinds, 5 statuses, 0 errors, 0 warnings.
+- `authz_drift_report(app.routes)` → 305 pairs, **0 unclassified, 0 mismatched**;
+  `validate_authz()` valid.
+- `scripts/build_code_map.py` → `leaves=840 internal_nodes=75`; revision stays
+  **`r6`** (leaf-level additions only, maintenance rule 6) with a third r6
+  addendum; `scripts/sync_code_map_md.py --check` in sync.
+
+Code map: `/meta/` `recovery_offers` subservice (+7 endpoint keys), and
+`CODE_MAP.md` r6 third addendum · `/meta/features`, `/meta/ecosystem`,
+`/meta/scoring-catalog` · Tests: `tests/test_customer_offers_stage_b.py`,
+`tests/test_migration_chain.py`
 
 ### Completeness grading, one command, and the self-check timer (2026-09-30)
 

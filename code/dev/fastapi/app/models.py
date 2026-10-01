@@ -307,6 +307,105 @@ class UserConsentEvent(Base, TimestampMixin):
     note = Column(Text, nullable=False, default="")
 
 
+class CustomerOffer(Base, TimestampMixin):
+    """One offer made to one customer, and where it currently stands (Stage B).
+
+    Mutable, and deliberately separate from the append-only trail beside it, for
+    the same reason ``UserPreferenceProfile`` and ``UserConsentEvent`` are: an
+    offer has a current state a customer reads ("this is still open for you"),
+    while *how it got there and who did what* is a compliance question that has
+    to stay answerable after the fact. Collapsing them would mean overwriting the
+    record that a goodwill credit was offered, declined, and re-offered.
+
+    One row per offer, keyed by a rendered ``reference`` rather than by a
+    per-process counter -- the complaints spine already had that bug and fixed it
+    this way, because a counter reissues its own values after every redeploy and
+    two customers then hold the same reference.
+
+    The three kinds do not share a vocabulary with each other, and that is the
+    point of the separate columns rather than one ``value`` column: a waiver is
+    worth nothing in points and a goodwill credit is worth nothing as a waiver,
+    so forcing both through one numeric field would make ``points > 0`` mean
+    "this offer has value" on a row where it means nothing.
+    """
+
+    __tablename__ = "customer_offers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Rendered from `id` on first flush, so it is stable across restarts and
+    # unique by construction rather than by a counter.
+    reference = Column(String(32), nullable=False, default="", index=True)
+    # goodwill | waiver | priority. Config-driven from
+    # CUSTOMER_OFFER_KINDS in services/customer_offers.py, so it is not an enum.
+    offer_kind = Column(String(30), nullable=False, index=True)
+    # Which row of the upstream catalogue this came from -- a
+    # RECOVERY_SAVE_INCENTIVES offer_id, or an ARREARS_WAIVER_POLICY waiver_type.
+    # Kept so the offer says which policy produced it, which is the difference
+    # between "we offered you this" and "the critical-save rule offered you this".
+    source_offer_id = Column(String(50), nullable=False, default="", index=True)
+    status = Column(String(20), nullable=False, default="offered", index=True)
+    headline = Column(String(200), nullable=False, default="")
+    # --- goodwill
+    points = Column(Float, nullable=False, default=0.0)
+    discount_percent = Column(Float, nullable=False, default=0.0)
+    # --- waiver
+    waiver_type = Column(String(40), nullable=False, default="", index=True)
+    arrears_entry_id = Column(Integer, nullable=True, index=True)
+    # --- priority
+    priority = Column(String(20), nullable=False, default="", index=True)
+    # How much the LTV/investment signal scaled this offer, 1.0 being unscaled.
+    # Recorded per row because the same rule must apply the same scaling to the
+    # same customer for as long as the offer is open -- re-deriving it at
+    # fulfilment time would let the amount move under an accepted offer.
+    generosity_scale = Column(Float, nullable=False, default=1.0)
+    currency = Column(String(8), nullable=False, default="USD")
+    expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    issued_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    declined_at = Column(DateTime(timezone=True), nullable=True)
+    fulfilled_at = Column(DateTime(timezone=True), nullable=True)
+    decline_reason = Column(Text, nullable=False, default="")
+    justification = Column(Text, nullable=False, default="")
+    issued_by_id = Column(Integer, nullable=True, index=True)
+    # When the system should check in about an accepted-but-unfulfilled offer.
+    # Nullable rather than defaulted: an offer with no fulfilment step (priority)
+    # has no follow-up, and a timestamp of "never" written as a date would be a
+    # lie the scheduler would eventually act on.
+    follow_up_due_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "discount_percent >= 0 AND discount_percent <= 100",
+            name="ck_customer_offers_discount_percent_range",
+        ),
+        CheckConstraint("generosity_scale > 0", name="ck_customer_offers_generosity_positive"),
+    )
+
+
+class CustomerOfferEvent(Base, TimestampMixin):
+    """Append-only trail of every state change to an offer.
+
+    ``kind`` is the verb, not the resulting status, so "issued", "accepted",
+    "declined", "expired", "fulfilled" and "suppressed" are one vocabulary even
+    though two of them (accepted and fulfilled) share a status. A record of what
+    happened *and* the status it produced is what lets an operator answer "why
+    was this offered twice" -- which a mutable status alone cannot answer.
+    """
+
+    __tablename__ = "customer_offer_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    offer_id = Column(Integer, ForeignKey("customer_offers.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind = Column(String(30), nullable=False, index=True)
+    from_status = Column(String(20), nullable=False, default="")
+    to_status = Column(String(20), nullable=False, default="")
+    actor = Column(String(120), nullable=False, default="", index=True)
+    note = Column(Text, nullable=False, default="")
+    payload_json = Column(Text, nullable=False, default="{}")
+
+
 class ArrearsEntry(Base, TimestampMixin):
     """A deferred payment (pay-in-arrears) with policy-selected interest terms.
 
@@ -1192,6 +1291,16 @@ TABLE_FIELD_SENSITIVITY: dict[str, str] = {
     # A consent row is a legal record *about a person*, and its free-text note
     # is written by whoever recorded the change. Both override the name-based
     # classification above.
+    # A stated reason for declining an offer is the most sensitive thing this
+    # subsystem records: it is the customer telling us why they did not want what
+    # we offered, which frequently means the underlying problem we failed to fix.
+    "customer_offers.decline_reason": "content",
+    "customer_offers.justification": "internal",
+    "customer_offers.points": "financial",
+    "customer_offers.discount_percent": "financial",
+    "customer_offers.generosity_scale": "internal",
+    "customer_offer_events.note": "content",
+    "customer_offer_events.actor": "internal",
     "user_consent_events.purpose": "behavioral",
     "user_consent_events.lawful_basis": "internal",
     # the audit trail's own summary is written about an entity, not by a user
@@ -1714,6 +1823,30 @@ TABLE_LIFECYCLE: dict[str, dict[str, Any]] = {
         "owner": "services/bookings.py",
         "note": "the booking state machine's own history",
     },
+    "customer_offers": {
+        "write_mode": "mutable",
+        "retention_days": 2555,
+        "owner": "services/customer_offers.py",
+        "note": (
+            "mutable because an offer has a current state a customer reads "
+            "('still open for you'), while the trail in customer_offer_events is "
+            "append-only so how it got there stays answerable. NOT a ledger, so it "
+            "unlike points_transactions carries no signed delta and takes a "
+            "non-negative discount check"
+        ),
+    },
+    "customer_offer_events": {
+        "write_mode": "append_only",
+        "retention_days": 2555,
+        "owner": "services/customer_offers.py",
+        "note": (
+            "append-only: a goodwill credit that was offered, declined and "
+            "re-offered has to be provable, and overwriting the offer row to "
+            "record the latest status would erase exactly that. kind is the verb "
+            "rather than the resulting status, so 'accepted' and 'fulfilled' -- "
+            "two events, one status transition chain -- read the same way"
+        ),
+    },
     "points_transactions": {
         "write_mode": LEDGER,
         "retention_days": 2555,
@@ -2024,6 +2157,27 @@ OPEN_TEXT_COLUMNS: dict[str, str] = {
     # value per key, both descriptions have to live here or one of them is
     # silently lost. They used to be two separate entries, and the complaint one
     # won.
+    "offer_kind": (
+        "goodwill | waiver | priority, declared by CUSTOMER_OFFER_KINDS in "
+        "services/customer_offers.py. Open rather than an enum so a fourth kind "
+        "is a config row, matching how RECOVERY_SAVE_INCENTIVES and "
+        "ARREARS_WAIVER_POLICY already extend without a migration"
+    ),
+    "status": (
+        "several independent vocabularies share this column name: booking "
+        "lifecycle, arrears settlement, and now offer status, declared by "
+        "OFFER_STATUSES. All open; none is a database enum"
+    ),
+    "source_offer_id": (
+        "names a row in whichever upstream catalogue produced the offer -- a "
+        "RECOVERY_SAVE_INCENTIVES offer_id, an ARREARS_WAIVER_POLICY waiver_type, "
+        "or a RECOVERY_REVIEW_RULES rule_id. Three vocabularies in one column, so "
+        "it cannot be an enum and must be read with offer_kind"
+    ),
+    "decline_reason": (
+        "free text by design: the customer is explaining themselves and a "
+        "controlled vocabulary would lose the only informative part of it"
+    ),
     "event_type": (
         "two vocabularies share this column name: booking lifecycle events "
         "(extended by the state machine) and complaint events, which come from "
@@ -2063,6 +2217,25 @@ UNCONSTRAINED_REFERENCE_COLUMNS: dict[str, dict[str, str]] = {
             "an assignment can name a room that was never allocated; there is no "
             "rooms table in this schema to point at, so a foreign key is not the "
             "missing piece"
+        ),
+    },
+    "customer_offers.issued_by_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "an offer can be issued by the recovery sweep or by an integration "
+            "rather than by a person, and the sweep is identified by name in "
+            "`actor` -- pointing this at users.id would reject every automated "
+            "issuance, which is the majority of them"
+        ),
+    },
+    "customer_offers.arrears_entry_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "a waiver offer can be made for a principal with no arrears entry "
+            "written yet -- a fee that is about to be charged, or a quote that "
+            "pre-dates the row. The offer records what was offered, not a "
+            "settlement, so requiring the row to exist would refuse the offer at "
+            "the moment it is most useful"
         ),
     },
     "communication_overrides.set_by_admin_id": {

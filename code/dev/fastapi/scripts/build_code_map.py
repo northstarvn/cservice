@@ -295,6 +295,14 @@ TREE = _node(
         # operator uses, and this one is the set of acts that change what the
         # others do -- simulation, verification, promotion, rollback. Grouped
         # into business surfaces per maintenance rule 3, not one leaf per route.
+        # Stage B. Seven routes, split three ways by prefix: a customer's own
+        # inbox and one-tap accept/decline, and the operator's issue, report and
+        # outcome. The split *is* the authorization boundary, inherited from the
+        # existing /chat wildcards rather than restated per route.
+        _node("offers",
+              "customer_inbox", "customer_offer_detail",
+              "customer_offer_accept", "customer_offer_decline",
+              "offer_issue", "offer_report", "offer_outcome"),
         _node("kaizen",
               "catalog", "flow_catalog", "flow_simulation", "flow_sweep",
               "blockage_report", "blockage_log",
@@ -348,6 +356,21 @@ TREE = _node(
         _node("recovery_playbooks",
               "realtime_context", "playbook_rules", "credit_points", "escalation",
               "policy_guardrail", "orchestrator", "auto_sweep", "catalog"),
+        # Stage B. Three kinds, each naming the upstream table it reads rather
+        # than declaring a fourth offer catalogue: composing an offer already
+        # existed in recovery_playbooks and arrears_payments, and what was
+        # missing was the second act -- issuing it, handing it over, and
+        # recording what came back.
+        _node("recovery_offers",
+              "offer_kinds", "statuses", "transitions", "event_kinds",
+              "generosity_rules", "explanations",
+              "offer_eligibility", "offer_contact_gate",
+              "goodwill_preview", "waiver_preview", "priority_preview",
+              "expiry", "state_machine", "reference",
+              "offer_issue", "offer_accept", "offer_decline",
+              "offer_outcome", "offer_expiry_sweep", "follow_ups",
+              "offer_inbox", "offer_explanation", "offer_report",
+              "validation", "catalog"),
         # Stage A (Trust & Visibility). Four services, one per sub-surface; the
         # aggregator is leaf-level under its own node because its sections are
         # composable individually via the `section=` query parameter.

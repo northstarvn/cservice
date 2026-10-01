@@ -29,12 +29,13 @@ from app.routers import (
     complaints,
     identity,
     kaizen,
+    offers,
     topics,
     users,
     webhooks,
 )
 from app import kaizen_runner
-from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers, mail
+from app.services import audit_log, chat_analytics, customer_offers, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers, mail
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
 from app import (
@@ -250,6 +251,14 @@ app.include_router(topics.router, tags=["topics"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 app.include_router(complaints.router, tags=["complaints"])
+# Customer-facing recovery offers (Stage B). No prefix: the paths already carry
+# /chat, and a prefix here produced /chat/chat/me/offers on the first attempt.
+# Authorization is inherited from the existing /chat wildcards *by prefix* --
+# chat_reads / chat_writes for the customer's half, chat_admin (which carries
+# loa2 step-up, correct for a human committing a credit) for the operator's --
+# so a route added under either prefix inherits its gate rather than having to
+# remember it. No new AUTHZ_RULES rows, for the same reason.
+app.include_router(offers.router, tags=["offers"])
 # The release surface. Admin-gated on every route, and deliberately NOT under /meta*:
 # /meta* is public by intent and three of these endpoints mutate. See the note in
 # app/routers/kaizen.py and the BLOCKAGES entry for this subsystem.
@@ -291,6 +300,7 @@ async def app_metadata():
             "preference_consent_center",
             "customer_visible_recovery",
             "self_service_status",
+            "recovery_offers",
             "kaizen_release_surface",
             "complaint_learning",
             # The sign-in surface is listed as three features rather than one
@@ -1033,6 +1043,48 @@ async def app_ecosystem():
                     "incident it would have explained"
                 ),
             },
+            "recovery_offers": {
+                "routes": [
+                    "/chat/me/offers",
+                    "/chat/me/offers/{reference}",
+                    "/chat/me/offers/{reference}/accept",
+                    "/chat/me/offers/{reference}/decline",
+                    "/chat/admin/recovery/offers",
+                    "/chat/admin/recovery/offers/{reference}/outcome",
+                ],
+                "purpose": (
+                    "Stage B: composing an offer and giving it to a customer. "
+                    "recovery_playbooks already knew what to offer -- the "
+                    "RECOVERY_SAVE_INCENTIVES tiers and the ARREARS_WAIVER_POLICY "
+                    "gate -- and said so, composing previews that issue nothing. "
+                    "This issues them, hands them over, and records what came "
+                    "back. Three kinds, each naming the upstream rule that "
+                    "produced it so an offer says which policy fired rather than "
+                    "merely that one was made"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "CUSTOMER_OFFER_KINDS",
+                    "OFFER_STATUSES",
+                    "OFFER_TRANSITIONS",
+                    "OFFER_EVENT_KINDS",
+                    "OFFER_GENEROSITY_RULES",
+                    "OFFER_EXPLANATIONS",
+                ],
+                "notes": (
+                    "the preference gate governs *contact*, not existence: a "
+                    "reactive-only customer still receives the offer and can "
+                    "accept it in one tap, because a preference about how often "
+                    "to interrupt is not a preference about whether to be told. "
+                    "what the gate withholds is the notification, and it is "
+                    "deferred with a time rather than dropped. consent never "
+                    "withholds a service or recovery offer -- a customer who "
+                    "reported a problem does not get told we had a fix but they "
+                    "declined marketing. the offer's internal tier name never "
+                    "reaches the customer: 'Critical save offer' would tell them "
+                    "our churn model graded them critical"
+                ),
+            },
             "customer_visible_recovery": {
                 "routes": [
                     "/chat/me/recovery-status",
@@ -1297,6 +1349,12 @@ async def app_feature_summary():
             "regional_policy": "/meta/regional",
             "recovery_playbooks": "/chat/recovery/playbooks",
             "recovery_playbooks_admin": "/chat/admin/recovery/playbooks",
+            "customer_offers": "/chat/me/offers",
+            "customer_offer_accept": "/chat/me/offers/{reference}/accept",
+            "customer_offer_decline": "/chat/me/offers/{reference}/decline",
+            "offer_report_admin": "/chat/admin/recovery/offers",
+            "offer_issue_admin": "/chat/admin/recovery/offers",
+            "offer_outcome_admin": "/chat/admin/recovery/offers/{reference}/outcome",
             "recovery_guards": "/chat/admin/recovery-guards",
             "recovery_analytics": "/chat/admin/recovery-analytics",
             "recovery_outreach_plan": "/chat/admin/recovery-outreach-plan",
@@ -1330,6 +1388,13 @@ async def app_feature_summary():
             "customer_explanations": "/chat/me/explanations",
             "explanation_vocabulary": "/chat/admin/explanation-vocabulary",
             "preference_catalog": "/chat/admin/preference-catalog",
+            "customer_offers": "/chat/me/offers",
+            "customer_offer_detail": "/chat/me/offers/{reference}",
+            "customer_offer_accept": "/chat/me/offers/{reference}/accept",
+            "customer_offer_decline": "/chat/me/offers/{reference}/decline",
+            "offer_report_admin": "/chat/admin/recovery/offers",
+            "offer_issue_admin": "/chat/admin/recovery/offers",
+            "offer_outcome_admin": "/chat/admin/recovery/offers/{reference}/outcome",
         },
     }
 
