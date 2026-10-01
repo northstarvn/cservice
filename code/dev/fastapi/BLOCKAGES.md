@@ -77,6 +77,23 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   One means a person is accountable; the other means an automated credit stays
   worth giving. Giving a band an SLA nobody owns makes the one that is owned read as
   decoration — `validate_relationship_health` rejects it.
+- **A proactive path must call `care_gate.consult`, and that is checked against
+  source.** The list of places that can contact a customer is in
+  `care_gate.PROACTIVE_PATHS`, and `gate_coverage()` fails the build if a declared
+  path's source never calls the gate. Removing the gate from any of them breaks
+  `validate_care_gate()` rather than quietly restoring the defect — which is the
+  whole reason that module is not a docstring.
+- **`issue` and `push` stay separate, and `issue` follows consent only for a
+  consent-gated purpose.** A reactive-only customer must still receive the offer;
+  a marketing offer with no consent must not be created at all, because it could
+  never be sent.
+- **Acceptance and fulfilment are never averaged.** High acceptance with poor
+  fulfilment is a fulfilment problem, and the average points the operator at the
+  offer volume instead of at us.
+- **A learned complaint weight may change emphasis, never verdict.** Severity,
+  tier and auto-escalation are refused by reading
+  `complaint_learning.LEARNED_WEIGHT_AUTHORITY`; relaxing one upstream fails
+  `validate_care_weights()`.
 - **`OFFER_STATUSES` keeps `accepted` and `fulfilled` apart.** "You accepted and
   we have not done it yet" is a real state and collapsing it removes the only
   signal that there is a backlog.
@@ -326,6 +343,153 @@ healthier and is measurably worse.
   Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
 
 ## Expansion log
+
+### Stage D: the closed loop (2026-10-01)
+
+Five items. One of them turned out to be a finding rather than a feature, and that
+one is worth reading first.
+
+#### Preference fail-closed: the finding is a count, not a theory
+
+`customer_offers` was the **only** service in the codebase that consulted the
+preference centre. Everything else that can contact somebody did not:
+
+| path | what it chose | gate? |
+|---|---|---|
+| `recovery_playbooks.resolve_recovery_outreach_strategy` | channel, tone, framing | **no** |
+| `resolve_recovery_callback_plan` | an owner team and a deadline | **no** |
+| `loyalty_journey.next_best_action` | proactive by nature | **no** |
+| `communication_strategy` | how and when to speak | **no** |
+
+The only thing that could suppress recovery outreach was the
+`communication_suppression` rule pack — which answers a *different* question
+("tone this down given recent complaints") rather than "has this person told us
+how to contact them". So a customer who had reported a problem, asked for
+reactive contact only, and had a complaint last month could still be dialled.
+
+`app/services/care_gate.py` is one gate every path asks, and it **fails closed in
+three distinct modes** because they are genuinely different facts:
+
+- **`preferences_missing`** — we could not read them. Do not push. Not knowing how
+  somebody wants to be contacted is a reason not to interrupt them, not a reason
+  to assume it is fine.
+- **`preferences_empty`** — we read them and they expressed nothing. Permitted.
+  Silence is not a preference, and treating an unset preference as "do not contact
+  me" means nobody is ever contacted until they opt in, which is a different
+  product with a different consent model.
+- **`unregistered`** — a proactive surface that forgot to register itself, which is
+  exactly the case the module exists for.
+
+It keeps Stage B's split, which is what makes a preference respectable rather than
+suppressive: a reactive-only customer still receives the offer and can accept it
+in one tap; what is withheld is the *notification*, deferred with a time. `issue`
+follows consent only for a consent-gated purpose — a marketing offer with no
+consent is not created at all, because it could never be sent.
+
+**The proof is structural.** `gate_coverage()` reads the **source** of every
+declared path and fails if the gate call is absent — the same technique as the
+`authz` drift report, and for the same reason: a property nobody checks is a
+comment. `customer_offers.resolve_offer_contact` was **rewritten to delegate**
+rather than to keep its own copy of the logic, so there is one implementation to
+be wrong rather than two.
+
+#### Offer outcomes → promotion: three bugs, all found by the module's own validator
+
+Stage B published rates. Nothing *learned* from them. The ranking score is a
+**Wilson lower bound**, because a naive accept rate rewards making fewer offers:
+`1/1 = 100%` and the programme looks perfect.
+
+1. **The formula was not the closed form.** A centre-minus-margin decomposition that
+   looked equivalent returned **0.0116 for a 0/10 record** — a bound *above* the
+   observed rate of zero — and returned `1.0` for both `1/1` and `1000/1000`, so a
+   perfect record on one observation scored the same as a perfect record on a
+   thousand. The closed form is also why `p = 0` gives exactly 0: the numerator
+   collapses to `z² − z·z`.
+2. **`fulfilled` was excluded from `decided`.** An offer that reached fulfilled was
+   accepted first, so a tier with **six perfectly-delivered offers reported
+   `decided: 0`** and was therefore ranked as *no evidence* — the best-performing
+   row in the table, invisible.
+3. **The generosity bucket compared each rule against itself.** Every rule reported
+   identical numbers, so the ranking was decorative — a report that looks like an
+   analysis and measures nothing. Offers record `generosity_scale`, not the rule
+   that chose it, so attribution is by scale bucket and is published as coarse
+   rather than presented as exact.
+
+**Acceptance and fulfilment are ranked separately and never combined.** High
+acceptance with poor fulfilment is a *fulfilment* problem — we are promising things
+and not delivering them — and averaging the two would point an operator at the
+offer volume instead of at us. On the test data, `save_critical` shows acceptance
+`0.96` against fulfilment `0.09` and is correctly held rather than promoted.
+
+**Nothing is applied.** An engine that silently retuned itself from its own outputs
+would make `RECOVERY_SAVE_INCENTIVES` unauditable, and an unauditable policy table
+is how a system ends up doing something nobody can explain to a customer.
+
+#### Journey outcome loop: completion is a history question
+
+Completion means **"reached `status` at least once"**, read from the history, not
+"the state object says it is in status". A cycle sitting in `at_risk` on its fourth
+lap having completed three is not 0% complete. `max_cycles` is published because it
+distinguishes a working programme from a nagging one.
+
+Stuck stages get **different** actions: `follow_up` being sticky means we accepted
+and did not deliver (wake somebody up), while `offer` being sticky means we are
+asking and not hearing (a channel or timing change, and *not* the customer ignoring
+us). One generic "stuck" would be useless for both.
+
+#### Care weights: emphasis, not verdict
+
+`services/complaint_learning.py` has learned bounded, decayed, persisted weights
+since it landed, and until now only a report read them — the same shape as the
+`communication_suppression` pack that was authored, exported, validated, catalogued
+and had no caller for its whole life.
+
+A learned weight may change `recovery_emphasis`, `follow_up_hours`, a bounded
+`generosity_nudge`, and whether an unprompted message leads with an acknowledgement.
+It may **not** change severity, tier, or auto-escalation — and those three refusals
+are **read from** `complaint_learning.LEARNED_WEIGHT_AUTHORITY` rather than
+restated, so relaxing one upstream fails here until someone decides what a relaxed
+authority means. `validate_care_weights` asserts that, and a test flips the
+upstream flag to prove it fails.
+
+Every dimension is floored in the direction that means worse: `recovery_emphasis`
+cannot fall below 1.0, and the `follow_up_hours` floor equals the `critical` band's
+4h SLA. `generosity_nudge` is deliberately **two-sided** — a nudge down is the point
+of a nudge, and the floor that matters is enforced where the money is, in
+`OFFER_GENEROSITY_RULES` with its per-kind cap.
+
+#### Item 4 was already built in Stage B
+
+**Investment band → generosity** shipped with Stage B and needed no Stage D work:
+`OFFER_GENEROSITY_RULES` (three rules), `GENEROSITY_SCALE_BOUNDS = (0.5, 2.0)`,
+`OFFER_MAX_GENEROSITY_PERCENT = 50.0`, the scale **recorded on the offer row** so it
+cannot move under one already accepted, and `investment_context()` returning the one
+key `resolve_offer_generosity` reads. What Stage D added is the *evidence* — item 1
+ranks those rules by observed fulfilment, which is what turns the mechanism from
+"it can scale" into "we know whether scaling works".
+
+#### Verification
+
+- `python3 -m pytest tests/ -q` → **2836 passed** (43 new in
+  `tests/test_care_loop_stage_d.py`).
+- `validate_care_gate()` → **5 of 5 declared proactive paths call the gate**, 0
+  errors. `validate_care_weights()`, `validate_offer_outcomes()` valid.
+- `gate_coverage()` → `ungated: []`.
+- The gate's negative control: replacing a registry row with a function that does
+  not exist makes the validator fail.
+- Wilson bound: `0/10 → 0.0000` (never above the raw rate), `1/1 → 0.3784`,
+  `1000/1000 → 0.9984`, `500/1000 → 0.4798`.
+- `authz_drift_report(app.routes)` → **312 pairs, 0 unclassified, 0 mismatched**;
+  `validate_authz()` valid.
+- `from_app: ["care"]` records measured values and **app-computed wins** over a
+  hand-typed `care_offers_seen`.
+- `scripts/build_code_map.py` → `leaves=924 internal_nodes=84`; revision stays
+  **`r6`** with a fifth r6 addendum; `scripts/sync_code_map_md.py --check` in sync.
+
+Code map: `/meta/` `care_loop_stage_d` subservice (+4 endpoint keys, `care` added
+to the kaizen measurement sources), and `CODE_MAP.md` r6 fifth addendum ·
+`/meta/features`, `/meta/ecosystem`, `/meta/authz` · Tests:
+`tests/test_care_loop_stage_d.py`, `tests/test_kaizen_shadow_release.py`
 
 ### Stage C: what a relationship is worth, and what to do about it (2026-10-01)
 

@@ -1190,6 +1190,9 @@ def resolve_recovery_outreach_strategy(
     *,
     locale: str = "global",
     admin_override: Optional[dict[str, Any]] = None,
+    preferences_map: Optional[dict[str, Any]] = None,
+    consents: Optional[dict[str, bool]] = None,
+    last_contact_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """Resolve the outreach strategy for a recovery context.
 
@@ -1215,6 +1218,18 @@ def resolve_recovery_outreach_strategy(
     decision is the failure mode this module is otherwise built to avoid, and a
     conflict between "suppress this" and "this is a service recovery" is
     exactly the sort of thing a human should see.
+
+    * **It asks the care gate.** This was the largest ungated proactive surface
+      in the codebase: it picked a channel, a tone and a framing for somebody who
+      had already reported a problem, and the only thing that could stop it was
+      the ``communication_suppression`` rule pack -- which answers a *different*
+      question ("tone this down given recent complaints") rather than "has this
+      person told us how to contact them".
+
+      ``preferences_map=None`` means "could not read them", which the gate treats
+      as **do not push**. The strategy is still resolved and still reported,
+      because an operator looking at this panel needs to see what *would* be sent;
+      only ``push_permitted`` changes, and it defaults to False.
     """
     from app.services.communication_strategy import resolve_communication_strategy
 
@@ -1234,8 +1249,21 @@ def resolve_recovery_outreach_strategy(
     ]
     channel = str(params.get("channel", "email_followup"))
 
+    from app.services import care_gate
+
+    gate = care_gate.consult(
+        "recovery_outreach",
+        preferences_map,
+        consents,
+        purpose="recovery",
+        last_contact_at=last_contact_at,
+        channel=channel,
+    )
+
     return {
         "channel": channel,
+        "push_permitted": bool(gate["push"]),
+        "gate": gate,
         "tone": str(params.get("tone", "professional")),
         "framing": str(params.get("framing", "resolution_first")),
         "reply_urgency": str(params.get("reply_urgency", "standard")),
@@ -1260,14 +1288,34 @@ def resolve_recovery_callback_plan(
     context: dict[str, Any],
     *,
     now: Optional[datetime] = None,
+    preferences_map: Optional[dict[str, Any]] = None,
+    consents: Optional[dict[str, bool]] = None,
 ) -> dict[str, Any]:
-    """Pick the configured callback plan and resolve it to a due moment."""
+    """Pick the configured callback plan and resolve it to a due moment.
+
+    **A callback asks the care gate**, and it is the proactive surface where the
+    gate matters most: a callback carries an owner team and a deadline, so it is
+    the version hardest to decline once it has been dialled. With no preferences
+    supplied the plan is still resolved and still returned -- an operator
+    scheduling work needs to see it -- but ``push_permitted`` is False, because not
+    knowing how somebody wants to be contacted is a reason not to ring them.
+    """
     moment = now or datetime.now(timezone.utc)
+
+    from app.services import care_gate
+
     for plan in RECOVERY_CALLBACK_PLANS:
         ok, _fields = evaluate_when(plan.get("when", {}), context)
         if not ok:
             continue
         offset = float(plan["offset_hours"])
+        gate = care_gate.consult(
+            "recovery_callback",
+            preferences_map,
+            consents,
+            purpose="recovery",
+            channel=str(plan["channel"]),
+        )
         return {
             "plan_id": str(plan["plan_id"]),
             "label": str(plan["label"]),
@@ -1276,8 +1324,20 @@ def resolve_recovery_callback_plan(
             "owner_team": str(plan["owner_team"]),
             "offset_hours": offset,
             "due_at": (moment + timedelta(hours=offset)).isoformat(),
+            "push_permitted": bool(gate["push"]),
+            "gate": gate,
         }
-    return {**RECOVERY_CALLBACK_DEFAULT, "label": "", "due_at": moment.isoformat()}
+    return {
+        **RECOVERY_CALLBACK_DEFAULT,
+        "label": "",
+        "due_at": moment.isoformat(),
+        # No plan matched, so nothing is due and nothing is pushed. The gate is
+        # still consulted so the *reason* is on the record rather than implied.
+        "push_permitted": False,
+        "gate": care_gate.consult(
+            "recovery_callback", preferences_map, consents, purpose="recovery"
+        ),
+    }
 
 
 def resolve_recovery_incentive(

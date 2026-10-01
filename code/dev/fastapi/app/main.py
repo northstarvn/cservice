@@ -302,6 +302,7 @@ async def app_metadata():
             "self_service_status",
             "recovery_offers",
             "loyalty_status_stage_c",
+            "care_loop_stage_d",
             "kaizen_release_surface",
             "complaint_learning",
             # The sign-in surface is listed as three features rather than one
@@ -1044,6 +1045,57 @@ async def app_ecosystem():
                     "incident it would have explained"
                 ),
             },
+            "care_loop_stage_d": {
+                "routes": [
+                    "/kaizen/admin/care-gate",
+                    "/kaizen/admin/care-gate/consult",
+                    "/kaizen/admin/care-weights",
+                    "/kaizen/admin/offer-outcomes",
+                ],
+                "purpose": (
+                    "Stage D, the closed loop: one fail-closed gate every "
+                    "proactive path asks (with structural proof that each "
+                    "declared path's source calls it), offer outcomes ranked into "
+                    "recommendations for the playbook tiers and the generosity "
+                    "rules, journey completion and stuckness made actionable, and "
+                    "learned complaint weights turned into care emphasis"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "PROACTIVE_PATHS",
+                    "SERVICE_CRITICAL_PURPOSES",
+                    "CARE_DIMENSIONS",
+                    "CARE_WEIGHT_RULES",
+                    "REFUSED_LEARNED_POWERS",
+                    "WILSON_CONFIDENCE_Z",
+                    "PROVISIONAL_OUTCOME_COUNT",
+                    "MIN_OUTCOMES_TO_RANK",
+                    "RETIRE_BOUND",
+                    "RETIRE_MIN_OUTCOMES",
+                    "DECIDED_STATUSES",
+                    "DELIVERED_STATUSES",
+                ],
+                "notes": (
+                    "the finding behind care_gate is a COUNT, not a theory: before "
+                    "it, customer_offers was the only service that consulted the "
+                    "preference centre -- recovery outreach picked a channel, a "
+                    "tone and a framing for somebody who had already reported a "
+                    "problem, and a callback carried an owner team and a deadline. "
+                    "the gate fails CLOSED in three distinct modes, because "
+                    "'could not read their preferences', 'they have expressed "
+                    "nothing' and 'this surface forgot to register' are genuinely "
+                    "different facts. coverage is proven by reading each path's "
+                    "SOURCE, not by a docstring: a property nobody checks is a "
+                    "comment. offer_outcomes ranks on a Wilson lower bound because a "
+                    "naive rate rewards making fewer offers (1/1 is 100%), and it "
+                    "separates acceptance from fulfilment because averaging them "
+                    "points the operator at the offer volume instead of at us. "
+                    "care_weights moves emphasis and never verdict: severity, tier "
+                    "and auto-escalation are refused by reading "
+                    "complaint_learning.LEARNED_WEIGHT_AUTHORITY rather than "
+                    "restating it"
+                ),
+            },
             "loyalty_status_stage_c": {
                 "routes": [
                     "/kaizen/admin/loyalty-status",
@@ -1377,6 +1429,10 @@ async def app_feature_summary():
             "kaizen_shadow": "/kaizen/admin/shadow",
             "kaizen_shadow_verify": "/kaizen/admin/shadow/verify",
             "kaizen_levels": "/kaizen/admin/levels",
+            "kaizen_care_gate": "/kaizen/admin/care-gate",
+            "kaizen_care_gate_consult": "/kaizen/admin/care-gate/consult",
+            "kaizen_care_weights": "/kaizen/admin/care-weights",
+            "kaizen_offer_outcomes": "/kaizen/admin/offer-outcomes",
             "kaizen_loyalty_status": "/kaizen/admin/loyalty-status",
             "kaizen_loyalty_status_preview": "/kaizen/admin/loyalty-status/preview",
             "kaizen_agent_copilot_preview": "/kaizen/admin/agent-copilot/preview",

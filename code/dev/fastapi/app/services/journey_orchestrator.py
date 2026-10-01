@@ -387,6 +387,9 @@ def next_step(
     recovery_context: Optional[Mapping[str, Any]] = None,
     investment_band: str = "",
     offer_warranted: bool = False,
+    preferences_map: Optional[Mapping[str, Any]] = None,
+    consents: Optional[Mapping[str, bool]] = None,
+    last_contact_at: Optional[Any] = None,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """What the orchestrator should do next, and the evidence for it.
@@ -411,6 +414,7 @@ def next_step(
         health_band=band,
         investment_band=investment_band,
     )
+    purpose = "recovery" if band in ("critical", "at_risk") else "service"
     current_stage = str((state or {}).get("stage") or "at_risk")
     # Counted here rather than read off the state. The state's
     # `same_precondition_attempts` is written by `record_attempt` for *its* call's
@@ -463,10 +467,22 @@ def next_step(
         suppressed=suppressed,
         actions=actions,
     )
+    from app.services import care_gate
+
+    gate = care_gate.consult(
+        "journey_next_action",
+        preferences_map,
+        consents,
+        purpose=purpose,
+        last_contact_at=last_contact_at,
+    )
+    evidence.extend(gate["reasons"])
     return {
         "stage": current_stage,
         "next_stage": step,
         "action": action,
+        "push_permitted": bool(gate["push"]),
+        "gate": gate,
         "actions": actions,
         "plan_source": "loyalty_journey" if plan else None,
         "health_band": band,

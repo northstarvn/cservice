@@ -122,7 +122,7 @@ class MeasureIn(BaseModel):
     """
 
     measured: dict[str, Any] = Field(default_factory=dict)
-    from_app: list[Literal["authz", "flows", "shadow"]] = Field(
+    from_app: list[Literal["authz", "flows", "shadow", "care"]] = Field(
         default_factory=list,
         description="measurement sources this server computes, merged over `measured`",
     )
@@ -141,6 +141,45 @@ class DeployIn(BaseModel):
 class RollbackIn(BaseModel):
     actor: str = Field(default="", max_length=120)
     reason: str = Field(default="", max_length=500)
+
+
+class CareGateConsultIn(BaseModel):
+    """Evidence for one gate consultation.
+
+    ``preferences`` is ``Optional`` and ``None`` means *could not read them*, which
+    the gate treats as **do not push**. That distinction is the whole point of the
+    endpoint: an unreadable profile and an empty one are different facts, and only
+    the first fails closed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path_id: str = Field(default="offer_notification", max_length=60)
+    preferences: Optional[dict[str, Any]] = None
+    consents: dict[str, bool] = Field(default_factory=dict)
+    purpose: str = Field(default="", max_length=40)
+    hour: Optional[float] = Field(default=None, ge=0.0, lt=24.0)
+    channel: str = Field(default="", max_length=40)
+    now: Optional[datetime] = None
+
+
+class CareWeightsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weights: dict[str, float] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    preferences: Optional[dict[str, Any]] = None
+    consents: dict[str, bool] = Field(default_factory=dict)
+    now: Optional[datetime] = None
+
+
+class OfferOutcomesIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    offers: list[dict[str, Any]] = Field(default_factory=list)
+    states: list[dict[str, Any]] = Field(default_factory=list)
+    window_days: int = Field(default=0, ge=0, le=3650)
+    now: Optional[datetime] = None
 
 
 class LoyaltyPreviewIn(BaseModel):
@@ -386,6 +425,113 @@ async def run_sweep_now(
         "summary": kaizen_runner.summarize(result),
         "exit_code": result["exit_code"],
         "sweep": result,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stage D: the closed loop
+# ---------------------------------------------------------------------------
+
+
+@router.get("/kaizen/admin/care-gate")
+async def care_gate_report(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Every declared proactive path, and whether its source calls the gate.
+
+    Published rather than only computed, because the list of proactive paths is
+    the thing a reviewer needs to argue with -- and because "are we respecting
+    consent everywhere" is only answerable if the set of places that *could*
+    contact somebody is written down somewhere.
+    """
+    from app.services import care_gate
+
+    return {
+        **care_gate.gate_coverage(),
+        "validation": care_gate.validate_care_gate(),
+        "catalog": care_gate.build_care_gate_catalog(),
+    }
+
+
+@router.post("/kaizen/admin/care-gate/consult")
+async def care_gate_consult(
+    payload: CareGateConsultIn,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Ask the gate what one proactive path may do, for one customer.
+
+    A what-if for the gate itself, so a policy can be checked before it is
+    committed to a table. **Pure** -- it reads the supplied preferences and
+    consents and asks nothing else, which is what makes it safe to point at an
+    arbitrary evidence set.
+    """
+    from app.services import care_gate
+
+    return care_gate.consult(
+        payload.path_id,
+        payload.preferences,
+        payload.consents,
+        purpose=payload.purpose,
+        hour=payload.hour,
+        channel=payload.channel,
+        now=payload.now,
+    )
+
+
+@router.post("/kaizen/admin/care-weights")
+async def care_weights_report(
+    payload: CareWeightsIn,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """What the learned complaint weights say about caring for the next customer.
+
+    Reads the supplied weight map rather than the database, so the policy can be
+    exercised against a known evidence set. The three refusals -- severity, tier,
+    auto-escalation -- are on the payload so a reader sees them without opening
+    the module.
+    """
+    from app.services import care_weights
+
+    return care_weights.resolve_care_weights(
+        payload.weights,
+        context=payload.context,
+        preferences_map=payload.preferences,
+        consents=payload.consents,
+        now=payload.now,
+    )
+
+
+@router.post("/kaizen/admin/offer-outcomes")
+async def offer_outcomes_report(
+    payload: OfferOutcomesIn,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Rank the offer sources by what happened, and by fulfilment.
+
+    Two scores, published together and never combined: high acceptance with poor
+    fulfilment is a *fulfilment* problem, and averaging the two would point an
+    operator at the offer volume instead of at us.
+    """
+    from app.services import offer_outcomes
+
+    rankings = offer_outcomes.rank_offer_outcomes(
+        payload.offers, now=payload.now, window_days=payload.window_days
+    )
+    return {
+        "rankings": rankings,
+        "generosity_rankings": offer_outcomes.rank_generosity_rules(
+            payload.offers, now=payload.now, window_days=payload.window_days
+        ),
+        "recommended_changes": offer_outcomes.recommend_scale_adjustments(rankings),
+        "summary": offer_outcomes.summarise_outcomes(
+            payload.offers, now=payload.now, window_days=payload.window_days
+        ),
+        "journey": offer_outcomes.journey_outcome_report(payload.states),
+        "note": (
+            "nothing here is applied. This module ranks and recommends; publishing a "
+            "changed RECOVERY_SAVE_INCENTIVES row is a human act on a table that "
+            "owns its own evidence"
+        ),
     }
 
 
@@ -831,6 +977,12 @@ async def measure_candidate(
 #: Data rather than an if/elif so adding a source does not mean editing a branch
 #: and so ``/kaizen/admin/catalog`` can list them.
 _MEASUREMENT_SOURCES: dict[str, str] = {
+    "care": (
+        "offer_outcomes.care_loop_measurements() -- counted from the offer rows "
+        "and journey states. Counts decisions and stuckness; it never applies a "
+        "change, because an engine that retunes its own table makes the table "
+        "unauditable"
+    ),
     "authz": (
         "release_ladder.authorization_measurements(app.routes) -- the live "
         "route table, checked against AUTHZ_RULES"
@@ -860,6 +1012,13 @@ def _app_measurements(sources: list[str]) -> dict[str, Any]:
             computed.update(
                 release_ladder.authorization_measurements(main_module.app.routes)
             )
+        elif source == "care":
+            # Imported here rather than at module scope: offer_outcomes reads the
+            # offer model, and a router importing it eagerly would pull the
+            # persistence layer in for a route that only counts evidence.
+            from app.services import offer_outcomes
+
+            computed.update(offer_outcomes.care_loop_measurements())
         elif source == "flows":
             runs = real_life_flows.run_all_flows()
             computed.update(real_life_flows.flow_gate_measurements(runs))

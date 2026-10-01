@@ -302,6 +302,13 @@ TREE = _node(
         # Stage C's operator and policy surfaces, under the release router
         # because they are the same question from the other end: what is built,
         # what state is it in, and what does the ladder say about promoting it.
+        # Stage D's policy surfaces, under the release router for the same
+        # reason Stage C is: these answer "what have we learned, and is it safe to
+        # act on", which is the release surface's own question.
+        _node("kaizen_stage_d",
+              "care_gate_report", "care_gate_consult",
+              "care_weights_report", "offer_outcomes_report",
+              "care_measurement_source"),
         _node("kaizen_stage_c",
               "loyalty_status_catalog", "loyalty_status_preview",
               "agent_copilot_preview"),
@@ -397,10 +404,31 @@ TREE = _node(
               "experiential_signals", "experiential_ledger", "tier_resolution",
               "investment_bands", "risk_inversion", "investment_band",
               "investment_context", "validation", "catalog"),
+        # Stage D, part 2: learned complaint weights -> how we care next.
+        # Emphasis, not verdict. The three refusals (severity, tier,
+        # auto-escalate) are read from complaint_learning's authority table by
+        # the validator rather than restated here, so relaxing one upstream fails
+        # in this module until someone decides what it means.
+        _node("care_weights",
+              "dimensions", "weight_rules", "resolution", "signal_metadata",
+              "refused_powers", "async_loader", "validation", "catalog"),
+        # Stage D, part 1: the one gate every proactive path asks, plus the
+        # structural proof that each declared path's source calls it.
+        _node("care_gate",
+              "proactive_paths", "consult", "decisions", "coverage",
+              "source_scan", "service_critical_purposes", "validation", "catalog"),
         _node("relationship_health",
               "health_bands", "health_signals", "health_overrides",
               "band_resolution", "health_report", "evidence_grading",
               "triage_rollup", "status_invariant", "validation", "catalog"),
+        # Stage D, part 3: what the outcomes taught us. Ranks and recommends;
+        # never applies, because an engine that retunes its own table from its own
+        # outputs makes that table unauditable.
+        _node("offer_outcomes",
+              "outcome_summary", "ranking", "wilson_bound", "recommendations",
+              "generosity_ranking", "scale_buckets", "scale_recommendations",
+              "journey_report", "stuck_actions", "care_loop_measurements",
+              "validation", "catalog"),
         _node("journey_orchestrator",
               "stages", "transitions", "stage_purpose", "stage_timeboxes",
               "initial_state", "precondition_hash", "transition_resolution",

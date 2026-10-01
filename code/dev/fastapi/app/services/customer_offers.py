@@ -527,8 +527,8 @@ def offer_eligibility(kind: str, context: Mapping[str, Any] | None = None) -> di
 
 
 def resolve_offer_contact(
-    preferences_map: Mapping[str, Any],
-    consents: Mapping[str, bool],
+    preferences_map: Mapping[str, Any] | None,
+    consents: Mapping[str, bool] | None,
     *,
     purpose: str,
     hour: Optional[float] = None,
@@ -536,7 +536,23 @@ def resolve_offer_contact(
     resolved_channel: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """Ask ``preferences.effective_contact_plan`` whether to make contact.
+    """Ask the care gate whether to make contact.
+
+    A thin wrapper over :func:`app.services.care_gate.consult` rather than a
+    second implementation of the same logic. That module exists because this one
+    was the **only** service in the codebase that consulted the preference centre
+    -- recovery outreach, callbacks, journey steps and communication all chose how
+    to contact somebody without asking. One gate, asked by every path, so there is
+    one place to be wrong.
+
+    ``preferences_map`` is now ``Optional`` so ``None`` means "could not read
+    them", which the gate treats as **do not push**. The Stage B version had no
+    way to express that: it took a ``Mapping`` and an empty dict looked identical
+    to a real profile with nothing in it, so a failed read would have been
+    indistinguishable from a customer who had expressed no preference -- and the
+    second is permissive while the first is not.
+
+    Ask ``preferences.effective_contact_plan`` whether to make contact.
 
     Returns ``{"issue": bool, "proactive": bool, ...}`` and the split is the
     whole design:
@@ -554,67 +570,37 @@ def resolve_offer_contact(
     proactive: False`` and a ``deferred_until`` — the offer waits in their inbox,
     which is the difference between respecting a preference and hiding a fix.
     """
-    moment = now or _now()
-    plan = preferences.effective_contact_plan(
-        dict(preferences_map or {}),
-        dict(consents or {}),
+    from app.services import care_gate
+
+    decision = care_gate.consult(
+        "offer_notification",
+        preferences_map,
+        consents,
+        purpose=purpose,
+        hour=hour,
+        last_contact_at=last_contact_at,
         resolved_channel=resolved_channel,
-        hour=hour if hour is not None else float(moment.hour),
+        now=now,
     )
-    purpose_name = str(purpose)
-    service_critical = purpose_name in {"service", "recovery"}
-    # The issuance decision is asked of `is_outreach_permitted`, not of the
-    # plan's top-level `permitted`. That was a real bug: the plan reports the
-    # *service* gate at the top and publishes `marketing_permitted` beside it, so
-    # reading `permitted` for a marketing purpose returns the answer to a
-    # different question -- and marketing offers were being created with the
-    # consent explicitly withdrawn. `is_outreach_permitted` is purpose-aware, and
-    # it is the same primitive the plan itself uses, so there is still only one
-    # consent implementation in this codebase.
-    consent = preferences.is_outreach_permitted(
-        dict(consents or {}), purpose_name, service_critical=service_critical
-    )
-    issue = bool(consent.get("permitted", True))
-
-    proactive = True
-    deferred_until: Optional[str] = None
-    reasons: list[str] = []
-    if not plan.get("within_contact_window", True) or plan.get("held_for_quiet_hours"):
-        proactive = False
-        reasons.append("outside the customer's contact window (quiet hours)")
-        window = dict(plan.get("contact_window") or {})
-        start = window.get("start_hour")
-        deferred_until = _next_window_start(moment, start)
-    if plan.get("reactive_only"):
-        proactive = False
-        reasons.append(
-            "the customer asked for reactive contact only; the offer is issued "
-            "and waits in their inbox, and is not pushed"
-        )
-    cooldown_hours = float(plan.get("cooldown_hours") or 0.0)
-    if proactive and cooldown_hours > 0 and last_contact_at is not None:
-        elapsed = (moment - _aware(last_contact_at)).total_seconds() / 3600.0
-        if elapsed < cooldown_hours:
-            proactive = False
-            reasons.append(
-                f"only {elapsed:.1f}h since the last contact; the stated cap is "
-                f"{cooldown_hours:g}h"
-            )
-            deferred_until = (_aware(last_contact_at) + timedelta(hours=cooldown_hours)).isoformat()
-
     return {
-        "issue": issue,
-        "proactive": proactive,
-        "deferred_until": deferred_until,
-        "purpose": purpose_name,
-        "service_critical": service_critical,
-        "channel": dict(plan.get("channel") or {}),
-        "frequency": str(plan.get("frequency") or ""),
-        "cooldown_hours": cooldown_hours,
-        "contact_plan_reason": str(plan.get("reason") or ""),
-        "consent": dict(consent),
-        "consent_gate_applied": not service_critical,
-        "reasons": reasons,
+        # Kept as `issue`/`proactive` because the Stage B surface and its tests
+        # read those names, and renaming a published key to fix nothing.
+        "issue": decision["issue"],
+        "proactive": decision["push"],
+        "push": decision["push"],
+        "deferred_until": decision["deferred_until"],
+        "purpose": decision["purpose"],
+        "service_critical": decision["service_critical"],
+        "channel": {"channel": decision["channel"], "source": "care_gate", "honored": True}
+        if decision["channel"]
+        else {"channel": "", "source": "none", "honored": False},
+        "frequency": decision["frequency"],
+        "cooldown_hours": decision["cooldown_hours"],
+        "contact_plan_reason": decision["contact_plan_reason"],
+        "consent": decision["consent"],
+        "consent_gate_applied": not decision["service_critical"],
+        "gate_mode": decision["mode"],
+        "reasons": decision["reasons"],
         "note": (
             "issue and proactive are separate questions. A reactive-only customer "
             "still receives the offer and can accept it in one tap; what is "

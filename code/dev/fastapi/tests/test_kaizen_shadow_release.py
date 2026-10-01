@@ -2224,7 +2224,7 @@ class TestRoutes:
         paths = [
             route.path for route in kaizen.router.routes
         ]
-        assert len(paths) == 22, paths
+        assert len(paths) == 26, paths
         for path in paths:
             assert path.startswith("/kaizen/admin"), path
 
@@ -2655,7 +2655,10 @@ class TestEndpoints:
 
     def test_the_catalog_lists_the_measurement_sources(self, admin_client):
         sources = admin_client.get("/kaizen/admin/catalog").json()["measurement_sources"]
-        assert set(sources) == {"authz", "flows", "shadow"}
+        # `care` joined Stage D: it counts offer outcomes and journey stuckness from
+        # the rows, so a gate about the care loop cannot be satisfied by typing a
+        # number into a request body.
+        assert set(sources) == {"authz", "flows", "shadow", "care"}
         for name, description in sources.items():
             assert len(description) > 30, name
 
@@ -3017,6 +3020,13 @@ class TestTheGateRejectsAnonymous:
         # a customer conversation as anything on this router gets. It reads
         # evidence and writes nothing, and it must still be admin-gated.
         ("POST", "/kaizen/admin/agent-copilot/preview"),
+        ("GET", "/kaizen/admin/care-gate"),
+        ("POST", "/kaizen/admin/care-gate/consult"),
+        ("POST", "/kaizen/admin/care-weights"),
+        # `offer-outcomes` reads a customer's whole outcome history and ranks the
+        # offer tiers against each other. It is the most revealing route on this
+        # router and the one most worth refusing to an anonymous caller.
+        ("POST", "/kaizen/admin/offer-outcomes"),
     ]
 
     def test_every_kaizen_route_refuses_an_unauthenticated_caller(self):
@@ -3052,6 +3062,14 @@ class TestTheGateRejectsAnonymous:
         "/kaizen/admin/loyalty-status": "/kaizen/admin/loyalty-status",
         "/kaizen/admin/loyalty-status/preview": "/kaizen/admin/loyalty-status/preview",
         "/kaizen/admin/agent-copilot/preview": "/kaizen/admin/agent-copilot/preview",
+        # Stage D, the closed loop. `care-gate` reports which proactive paths ask
+        # the preference gate; `offer-outcomes` ranks them by what happened. Both
+        # admin-gated: the first publishes the list of places that can contact a
+        # customer, and the second reads that customer's outcome history.
+        "/kaizen/admin/care-gate": "/kaizen/admin/care-gate",
+        "/kaizen/admin/care-gate/consult": "/kaizen/admin/care-gate/consult",
+        "/kaizen/admin/care-weights": "/kaizen/admin/care-weights",
+        "/kaizen/admin/offer-outcomes": "/kaizen/admin/offer-outcomes",
     }
 
     def test_the_list_is_the_whole_router(self):
