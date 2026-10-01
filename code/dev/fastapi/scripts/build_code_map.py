@@ -299,6 +299,12 @@ TREE = _node(
         # inbox and one-tap accept/decline, and the operator's issue, report and
         # outcome. The split *is* the authorization boundary, inherited from the
         # existing /chat wildcards rather than restated per route.
+        # Stage C's operator and policy surfaces, under the release router
+        # because they are the same question from the other end: what is built,
+        # what state is it in, and what does the ladder say about promoting it.
+        _node("kaizen_stage_c",
+              "loyalty_status_catalog", "loyalty_status_preview",
+              "agent_copilot_preview"),
         _node("offers",
               "customer_inbox", "customer_offer_detail",
               "customer_offer_accept", "customer_offer_decline",
@@ -382,6 +388,28 @@ TREE = _node(
               "next_steps", "loyalty_explanation", "churn_explanation",
               "recovery_explanation", "posture_explanation", "validation",
               "catalog"),
+        # Stage C, four modules and four responsibilities, deliberately not
+        # merged. Loyalty status is earned and monotone; relationship health is
+        # live and may fall; the orchestrator carries state between passes; the
+        # copilot composes the other three and re-derives none of them.
+        _node("loyalty_status",
+              "status_rules", "status_tiers", "status_resolution",
+              "experiential_signals", "experiential_ledger", "tier_resolution",
+              "investment_bands", "risk_inversion", "investment_band",
+              "investment_context", "validation", "catalog"),
+        _node("relationship_health",
+              "health_bands", "health_signals", "health_overrides",
+              "band_resolution", "health_report", "evidence_grading",
+              "triage_rollup", "status_invariant", "validation", "catalog"),
+        _node("journey_orchestrator",
+              "stages", "transitions", "stage_purpose", "stage_timeboxes",
+              "initial_state", "precondition_hash", "transition_resolution",
+              "attempt_record", "stage_advance", "next_step", "stuck",
+              "cycle_summary", "validation", "catalog"),
+        _node("agent_copilot",
+              "protected_facts", "fact_detection", "leak_marking",
+              "confidence", "opening", "what_is_true", "why", "next_action",
+              "offer_lines", "card", "validation", "catalog"),
         _node("preferences",
               "catalog", "consents", "consent_trail", "consent_gate",
               "contact_window", "frequency", "channel_preference", "contact_plan",

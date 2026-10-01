@@ -301,6 +301,7 @@ async def app_metadata():
             "customer_visible_recovery",
             "self_service_status",
             "recovery_offers",
+            "loyalty_status_stage_c",
             "kaizen_release_surface",
             "complaint_learning",
             # The sign-in surface is listed as three features rather than one
@@ -1043,6 +1044,47 @@ async def app_ecosystem():
                     "incident it would have explained"
                 ),
             },
+            "loyalty_status_stage_c": {
+                "routes": [
+                    "/kaizen/admin/loyalty-status",
+                    "/kaizen/admin/loyalty-status/preview",
+                    "/kaizen/admin/agent-copilot/preview",
+                ],
+                "purpose": (
+                    "Stage C in four services: loyalty status and an experiential "
+                    "ledger, the LTV/investment signal that sizes a goodwill "
+                    "offer, a journey orchestrator that carries at-risk -> offer -> "
+                    "follow-up -> status across passes, and an agent copilot that "
+                    "assembles 360 + plain-language why + next-best-action into "
+                    "one card an agent can read"
+                ),
+                "status": "ready",
+                "config_tables": [
+                    "LOYALTY_STATUS_RULES",
+                    "EXPERIENTIAL_SIGNALS",
+                    "EXPERIENTIAL_TIER_RULES",
+                    "INVESTMENT_BANDS",
+                    "RELATIONSHIP_HEALTH_BANDS",
+                    "HEALTH_SIGNALS",
+                    "HEALTH_OVERRIDES",
+                    "ORCHESTRATION_STAGES",
+                    "ORCHESTRATION_TRANSITIONS",
+                    "COPILOT_DO_NOT_LEAD_WITH",
+                ],
+                "notes": (
+                    "status is EARNED and never decays for inactivity: a "
+                    "customer-visible demotion for going quiet punishes the exact "
+                    "pause a loyalty programme should forgive. relationship health "
+                    "is the opposite -- live, and allowed to fall -- so a customer "
+                    "can be Trusted and critical at once, which is the combination "
+                    "that deserves the fastest response. the investment band is "
+                    "ORDINAL, not monetary: there is no revenue column in this "
+                    "schema and any LTV figure built from it would be a guess "
+                    "wearing a float. the orchestrator's repeat rule compares a "
+                    "precondition hash rather than a stage or a count, so cycling "
+                    "the loop does not permit a fourth identical offer"
+                ),
+            },
             "recovery_offers": {
                 "routes": [
                     "/chat/me/offers",
@@ -1335,6 +1377,9 @@ async def app_feature_summary():
             "kaizen_shadow": "/kaizen/admin/shadow",
             "kaizen_shadow_verify": "/kaizen/admin/shadow/verify",
             "kaizen_levels": "/kaizen/admin/levels",
+            "kaizen_loyalty_status": "/kaizen/admin/loyalty-status",
+            "kaizen_loyalty_status_preview": "/kaizen/admin/loyalty-status/preview",
+            "kaizen_agent_copilot_preview": "/kaizen/admin/agent-copilot/preview",
             "kaizen_completeness": "/kaizen/admin/completeness",
             "kaizen_sweep": "/kaizen/admin/sweep",
             "kaizen_candidates": "/kaizen/admin/candidates",

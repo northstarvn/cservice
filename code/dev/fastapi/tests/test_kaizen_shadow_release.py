@@ -2224,7 +2224,7 @@ class TestRoutes:
         paths = [
             route.path for route in kaizen.router.routes
         ]
-        assert len(paths) == 19, paths
+        assert len(paths) == 22, paths
         for path in paths:
             assert path.startswith("/kaizen/admin"), path
 
@@ -3011,6 +3011,12 @@ class TestTheGateRejectsAnonymous:
         # is asserted for it separately: a route that runs 21 flow simulations is
         # exactly the kind that must not be reachable by anyone who finds the URL.
         ("POST", "/kaizen/admin/sweep"),
+        ("GET", "/kaizen/admin/loyalty-status"),
+        ("POST", "/kaizen/admin/loyalty-status/preview"),
+        # The copilot preview assembles an agent-facing card, which is as close to
+        # a customer conversation as anything on this router gets. It reads
+        # evidence and writes nothing, and it must still be admin-gated.
+        ("POST", "/kaizen/admin/agent-copilot/preview"),
     ]
 
     def test_every_kaizen_route_refuses_an_unauthenticated_caller(self):
@@ -3040,6 +3046,12 @@ class TestTheGateRejectsAnonymous:
         # table is keyed by path, so one entry covers both verbs.
         "/kaizen/admin/completeness": "/kaizen/admin/completeness",
         "/kaizen/admin/sweep": "/kaizen/admin/sweep",
+        # Stage C, added to the same router as the release surface because it is
+        # the same question from the other end: what is built, what state is it
+        # in, and what does the ladder say about promoting it.
+        "/kaizen/admin/loyalty-status": "/kaizen/admin/loyalty-status",
+        "/kaizen/admin/loyalty-status/preview": "/kaizen/admin/loyalty-status/preview",
+        "/kaizen/admin/agent-copilot/preview": "/kaizen/admin/agent-copilot/preview",
     }
 
     def test_the_list_is_the_whole_router(self):

@@ -39,6 +39,7 @@ Three read/decide/write splits worth stating
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -140,6 +141,49 @@ class DeployIn(BaseModel):
 class RollbackIn(BaseModel):
     actor: str = Field(default="", max_length=120)
     reason: str = Field(default="", max_length=500)
+
+
+class LoyaltyPreviewIn(BaseModel):
+    """Evidence for a Stage C what-if. Pure, no database.
+
+    Timestamps are optional and default to now; every field is optional because
+    the point is to ask "what would this look like for *this* evidence", including
+    the evidence-free case.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    now: Optional[datetime] = None
+    bookings: list[dict[str, Any]] = Field(default_factory=list)
+    booking_events: list[dict[str, Any]] = Field(default_factory=list)
+    complaints: list[dict[str, Any]] = Field(default_factory=list)
+    chat_rows: list[dict[str, Any]] = Field(default_factory=list)
+    churn_band: str = Field(default="", max_length=30)
+    latest_activity_at: Optional[datetime] = None
+    journey_plan: dict[str, Any] = Field(default_factory=dict)
+    state: dict[str, Any] = Field(default_factory=dict)
+    offer_kind: str = Field(default="", max_length=30)
+    recovery_context: dict[str, Any] = Field(default_factory=dict)
+    offer_warranted: bool = False
+
+
+class CopilotPreviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    now: Optional[datetime] = None
+    customer_360: dict[str, Any] = Field(default_factory=dict)
+    explanations: dict[str, Any] = Field(default_factory=dict)
+    journey_plan: dict[str, Any] = Field(default_factory=dict)
+    bookings: list[dict[str, Any]] = Field(default_factory=list)
+    complaints: list[dict[str, Any]] = Field(default_factory=list)
+    chat_rows: list[dict[str, Any]] = Field(default_factory=list)
+    churn_band: str = Field(default="", max_length=30)
+    latest_activity_at: Optional[datetime] = None
+    offers: list[dict[str, Any]] = Field(default_factory=list)
+    state: dict[str, Any] = Field(default_factory=dict)
+    offer_kind: str = Field(default="", max_length=30)
+    recovery_context: dict[str, Any] = Field(default_factory=dict)
+    offer_warranted: bool = False
 
 
 class SweepIn(BaseModel):
@@ -343,6 +387,160 @@ async def run_sweep_now(
         "exit_code": result["exit_code"],
         "sweep": result,
     }
+
+
+# ---------------------------------------------------------------------------
+# Stage C: loyalty status, relationship health, the orchestrator, the copilot
+# ---------------------------------------------------------------------------
+
+
+@router.get("/kaizen/admin/loyalty-status")
+async def loyalty_status_catalog(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The Stage C tables: statuses, signals, tiers, investment bands, stages.
+
+    Published rather than only reachable through a computation, because these are
+    *policy* -- the weights, the cut points and the state machine -- and a policy
+    nobody can read is a policy nobody can argue with before it is wrong.
+    """
+    from app.services import (
+        agent_copilot,
+        journey_orchestrator,
+        loyalty_status,
+        relationship_health,
+    )
+
+    return {
+        "loyalty_status": loyalty_status.build_loyalty_status_catalog(),
+        "relationship_health": relationship_health.build_relationship_health_catalog(),
+        "journey_orchestrator": journey_orchestrator.build_orchestrator_catalog(),
+        "agent_copilot": agent_copilot.build_copilot_catalog(),
+        "validation": {
+            "loyalty_status": loyalty_status.validate_loyalty_status(),
+            "relationship_health": relationship_health.validate_relationship_health(),
+            "journey_orchestrator": journey_orchestrator.validate_orchestrator(),
+            "agent_copilot": agent_copilot.validate_copilot(),
+        },
+        "note": (
+            "four modules, four responsibilities, deliberately not merged. loyalty "
+            "status is earned and monotone; relationship health is live and may "
+            "fall; the orchestrator carries state between passes; the copilot "
+            "composes the other three and re-derives none of them"
+        ),
+    }
+
+
+@router.post("/kaizen/admin/loyalty-status/preview")
+async def loyalty_status_preview(
+    payload: LoyaltyPreviewIn,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Run the Stage C grading over supplied evidence, with no database.
+
+    Read-only and pure on purpose: it is a *what-if* surface for the policy, so
+    tuning a cut point or a weight can be checked before it is committed to a
+    table. That is the alternative to tuning in production and discovering the
+    answer from a customer.
+    """
+    from app.services import journey_orchestrator, loyalty_status, relationship_health
+
+    ledger = loyalty_status.build_experiential_ledger(
+        bookings=payload.bookings,
+        booking_events=payload.booking_events,
+        complaints=payload.complaints,
+        chat_rows=payload.chat_rows,
+        now=payload.now,
+    )
+    status = loyalty_status.resolve_loyalty_status(ledger)
+    health = relationship_health.build_relationship_health(
+        ledger=ledger,
+        churn_band=payload.churn_band,
+        complaints=payload.complaints,
+        chat_rows=payload.chat_rows,
+        latest_activity_at=payload.latest_activity_at,
+        now=payload.now,
+    )
+    step = journey_orchestrator.next_step(
+        state=payload.state,
+        health=health,
+        journey_plan=payload.journey_plan,
+        offer_kind=payload.offer_kind,
+        recovery_context=payload.recovery_context,
+        investment_band=health["investment_band"],
+        offer_warranted=payload.offer_warranted,
+        now=payload.now,
+    )
+    return {
+        "ledger": ledger,
+        "status": status,
+        "health": health,
+        "investment": loyalty_status.resolve_investment_band(
+            ledger=ledger,
+            churn_band=payload.churn_band,
+            relationship_health=health,
+        ),
+        "next_step": step,
+        "note": (
+            "status and health disagreeing is the expected and useful case: a "
+            "customer who is Trusted and critical at once is the one that deserves "
+            "the fastest response, and a single blended number hides it"
+        ),
+    }
+
+
+@router.post("/kaizen/admin/agent-copilot/preview")
+async def copilot_preview(
+    payload: CopilotPreviewIn,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Assemble an agent's card from supplied evidence. Pure.
+
+    The card is a composition: it never re-derives the 360, the explanations or
+    the journey plan, because a third answer to a question the codebase already
+    answers twice is the one an agent would believe.
+    """
+    from app.services import agent_copilot, journey_orchestrator, loyalty_status
+
+    ledger = loyalty_status.build_experiential_ledger(
+        bookings=payload.bookings,
+        complaints=payload.complaints,
+        chat_rows=payload.chat_rows,
+        now=payload.now,
+    )
+    status = loyalty_status.resolve_loyalty_status(ledger)
+    health = None
+    if payload.churn_band or payload.complaints or payload.chat_rows:
+        from app.services import relationship_health
+
+        health = relationship_health.build_relationship_health(
+            ledger=ledger,
+            churn_band=payload.churn_band,
+            complaints=payload.complaints,
+            chat_rows=payload.chat_rows,
+            latest_activity_at=payload.latest_activity_at,
+            now=payload.now,
+        )
+    card = agent_copilot.build_copilot_card(
+        customer_360=payload.customer_360,
+        explanations=payload.explanations,
+        journey_plan=payload.journey_plan,
+        health=health,
+        status=status,
+        offers=payload.offers,
+        now=payload.now,
+    )
+    card["orchestrator_step"] = journey_orchestrator.next_step(
+        state=payload.state,
+        health=health,
+        journey_plan=payload.journey_plan,
+        offer_kind=payload.offer_kind,
+        recovery_context=payload.recovery_context,
+        investment_band=str((health or {}).get("investment_band") or ""),
+        offer_warranted=payload.offer_warranted,
+        now=payload.now,
+    )
+    return card
 
 
 # ---------------------------------------------------------------------------

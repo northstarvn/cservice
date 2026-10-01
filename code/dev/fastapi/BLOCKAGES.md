@@ -56,6 +56,27 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
 - **`customer_offers.generosity_scale` is stored, never recomputed at fulfilment.**
   A scale re-read from the live investment signal can move an amount the customer
   has already accepted.
+- **Loyalty status never decays for inactivity, and health is not a status.**
+  Together they mean a customer can be `Trusted` and `critical` at the same time,
+  which is the combination that deserves the fastest response. A blended number
+  hides it and a demotion punishes them for our failure, so neither is allowed:
+  `STATUS_DECAYS_ON_INACTIVITY` is an error if set, and `assert_health_is_not_status`
+  raises if a report claims otherwise.
+- **The investment band is ordinal and must never be summed.** There is no revenue
+  column in this schema; an LTV figure built from these inputs would be a guess
+  wearing a float. It feeds `OFFER_GENEROSITY_RULES`, and that table's bounds and
+  per-kind cap are what stop a band becoming an unbounded liability.
+- **`chase_repeats` means extra messages about one booking**, not total message
+  volume. Ten messages about ten different things is not chasing, and treating it
+  as such makes the ledger punish an engaged customer.
+- **The orchestrator's repeat rule compares a precondition hash, never the stage or
+  the count.** Cycling `at_risk → … → status → at_risk` is a new attempt, not a
+  reset; a state that reset its attempt history on re-entry would permit a fourth
+  identical offer to someone who has already declined three.
+- **`sla_hours` and `offer_window_hours` are separate columns and must stay so.**
+  One means a person is accountable; the other means an automated credit stays
+  worth giving. Giving a band an SLA nobody owns makes the one that is owned read as
+  decoration — `validate_relationship_health` rejects it.
 - **`OFFER_STATUSES` keeps `accepted` and `fulfilled` apart.** "You accepted and
   we have not done it yet" is a real state and collapsing it removes the only
   signal that there is a backlog.
@@ -305,6 +326,236 @@ healthier and is measurably worse.
   Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
 
 ## Expansion log
+
+### Stage C: what a relationship is worth, and what to do about it (2026-10-01)
+
+Four services, four responsibilities, deliberately not merged. The split *is* the
+design, and the first version of the health module had it wrong.
+
+#### 1. Loyalty status + experiential ledger: `services/loyalty_status.py`
+
+The gap is narrower than "loyalty". This system already has points, a loyalty
+*score*, churn risk and a next-best-action engine. What it had no answer for is
+the question a retention conversation turns on: *how much is this relationship
+worth, and are we being generous in proportion?* Today the only answer is a points
+balance, which is a poor proxy for both halves — 40 points and four years of
+reliable service is worth more than 900 points and a pattern of cancellations.
+
+**The ledger is a computed view over events that already exist.** Nothing is
+accumulated or stored. A stored copy would need its own reconciliation and would
+leave every existing engine with two sources of truth for the same fact.
+
+**Five signals, and two of them are about us, not them.** `reliability` (was the
+work done), `tenure`, `follow_through`, `goodwill_returned` (came back after
+something went wrong — the heaviest positive weight, because someone who reported a
+problem and returned has demonstrated trust no amount of completed bookings
+manufactures), and `chasing_effort`, which is **negative on purpose**: effort spent
+chasing is a cost we imposed, and a ledger that only records positives cannot
+represent a customer who cost us a great deal and should still be treated well —
+which is the case where being stingy costs the most.
+
+**Status is earned and never decays.** No `decay` field, no calendar transition,
+and no status rule mentions recency. A customer-visible demotion for going quiet
+punishes the exact pause a loyalty programme should forgive, and teaches people the
+programme is not worth caring about. `validate_loyalty_status` **errors** if anyone
+sets `STATUS_DECAYS_ON_INACTIVITY = True`.
+
+**The investment band is ordinal, not monetary.** There is no revenue column in
+this schema, so any LTV figure produced from it would be a guess wearing a float.
+`strategic > high > standard > low > unscored` is a claim about ordering, and
+`unscored` is a real band because "we don't know what this is worth" and "worth
+nothing" must not collapse into one answer. Live risk **inverts** the contribution:
+a customer at `critical` churn risk scores zero on it however valuable their
+history, which is what routes them to an offer and a follow-up instead of an upsell.
+
+#### Two real defects, both found by looking at the output
+
+**A units bug that reported nobody worth anything.** The first version weighted the
+raw signal sums and divided by a "reachable maximum" that was *also* in mixed
+units — `tenure` is derived from a day count (2,555) while every other raw is a
+0..1 ratio, so `tenure / 365.0` made it dominate by three orders of magnitude, and
+the normalisation cancelled the mistake so **everyone** scored near zero. A
+seven-year, fully-reliable customer with a resolved complaint scored **0.012**.
+Nothing raised. The result read as "this customer is barely worth anything", which
+is exactly the conclusion this module exists to reach by evidence.
+
+Fixed by making every signal a 0..1 ratio and combining weights directly, plus a
+`countable` flag per signal: an **uncountable** signal (no complaints, so no
+return-after-complaint to credit) drops out of the weighted mean rather than
+scoring zero. Crediting an absence would let it inflate the score.
+
+**An ISO string silently became tenure 0.** `_aware()` returned `None` for a string,
+so a serialised date vanished and a loyal customer aged to zero. Same failure class
+as everything else today: a wrong value that reads exactly like a right one.
+
+#### `unscored` is not a tier
+
+`unscored` was the bottom rung at `min_score: 0.0` until a customer with three
+cancellations and an open complaint came back as `unscored` — *no recorded
+history* for someone whose recorded history was consistently bad. A zero score is
+the **bottom of the ladder**, not an absence from it. It is now the ledger's
+separate boolean flag; the ladder has four tiers starting at `bronze: 0.0`.
+
+#### 2. LTV / investment steering: the mechanism, already in Stage B
+
+`OFFER_GENEROSITY_RULES` was written in Stage B precisely so this could be filled
+in without touching the offers subsystem. The **scale is recorded on the offer
+row**, because a scale re-read at fulfilment time can move an amount the customer
+has already accepted. An absent signal yields `1.0`, never `0.0`: failing closed on
+money owed to a customer is how a well-meant generosity rule becomes a way of
+short-changing people. Bounds at both ends and a per-kind cap on top, so a rule
+cannot be configured into an unbounded liability.
+
+#### 3. Relationship-health summary: `services/relationship_health.py`
+
+**Health is the opposite of status, and that is the point.** Status is earned and
+monotone; health is live and may fall. Keeping them apart is what lets a customer
+be `Trusted` and `critical` at once — the combination that deserves the fastest
+response, which a single blended number hides and a demotion punishes.
+`assert_health_is_not_status()` raises if a report ever claims otherwise, so a
+future "let's demote them when they go critical" is a visible edit.
+
+#### **The band was inverted**
+
+This is the defect worth writing the entry for. The signals are *risk* measurements
+and the bands are named by *health*, so the arithmetic moved the right direction and
+the ladder read it backwards:
+
+| churn risk | first version | correct |
+|---|---|---|
+| `low` (healthy) | score 0.12 → **`critical`** | `healthy` |
+| `critical` (sick) | score 0.36 → **`at_risk`** | `at_risk` |
+
+The healthiest customers were sent to a human and the sickest to an automated
+offer. Fixed by declaring `POLARITY = "higher_is_healthier"` and inverting on the
+way in, so the published score reads the way the bands do.
+
+**And the band walk was first-match in a worst-first table**, so a flawless 1.000
+resolved to `at_risk`. The docstring described a best-first walk the code did not
+do. The test now pins the walk, not the description.
+
+**Dispositive findings are rules, not arithmetic.** `HEALTH_OVERRIDES` exists
+because a weighted mean cannot express *"an open complaint **and** high churn risk
+is a crisis even though nothing else looks wrong"* — and forcing it to means one
+signal carries ~70% of the weight and the other five become decoration. So:
+
+- `critical_churn` — never merely `strained`, whatever the arithmetic says.
+- `open_complaint_and_risk` — `critical`, with a 4h SLA. Two systems failing the
+  same customer at once.
+- `severe_dormancy` — at most `strained`. A weighted mean cannot express "not
+  heard from in six months is not healthy", because the other five signals still
+  score above the healthy floor.
+
+Churn risk does carry 42% of the composite — because the module's own prose calls
+it the most predictive number available, and the weight now says so out loud
+instead of the prose merely asserting it.
+
+**`sla_hours` and `offer_window_hours` are separate columns.** `sla_hours` means *a
+person is accountable*; `offer_window_hours` means *an automated credit stays worth
+giving*. The first draft gave `at_risk` a 24h `sla_hours` meaning "act within a day",
+and the validator caught it — an SLA nobody owns is decoration and it makes the one
+that is owned read as decoration too.
+
+**The rollup is a triage queue, not the health of the book.** It reads cheap rows
+rather than building N reports (the expensive path runs eight engines per user and
+one calls a sentiment model), so churn risk is published as **unmeasured** rather
+than assumed good, and `is_exhaustive: False` is on the payload.
+
+#### 4. Journey orchestrator: `services/journey_orchestrator.py`
+
+`services/loyalty_journey.py` is a good next-best-action engine. It is also a
+function of the present — run it twice on the same customer and it returns the same
+plan, because it has no memory of what was done. Which produces the loop this
+module exists to close:
+
+> we recognise an at-risk customer, offer them something, they accept, and at the
+> next check they are recognised as at-risk *again*, so we offer them something
+> *again*.
+
+Each pass looks correct in isolation; the repetition is only visible across passes,
+which is worse than having no orchestration at all.
+
+**It is a cycle, not a staircase.** `status → at_risk` is the only backward edge
+and it is what lets a customer whose health fell be recognised again. A re-entry is
+a **new attempt, not a reset**.
+
+**The repeat rule compares a precondition hash** of (offer kind, recovery context,
+health band, investment band) — not the stage and not the count. So cycling four
+times does not reset the attempt history, and "we already offered this" becomes the
+useful question instead of "we already offered *this thing*, in *this situation*".
+
+**Two defects here, the second one instructive.**
+
+1. The count was taken *before* recording, so `MAX_SAME_OFFER_ATTEMPTS = 3`
+   permitted a **fourth** identical offer. The off-by-one landed exactly where
+   nagging a customer who has already said no three times becomes a blocked number.
+2. `next_step` then read the count off the state — which `record_attempt` writes
+   for *its own* precondition — so a changed situation stayed suppressed by a
+   decision made about the old one. **That is the third time in this work that a
+   derived value read instead of the table has been the bug** (the first two being
+   `assess_capabilities` reading `ENGINE_BY_ID` and the deferral cache). Each was
+   found by asserting behaviour rather than reading code.
+
+#### 5. Agent copilot: `services/agent_copilot.py`
+
+An agent about to speak to a customer wants three things, and the codebase already
+produced each of them: what is true (the 360), why in words a customer could hear
+(`customer_explain`), and what to do next (`loyalty_journey`). **The copilot
+composes them and re-derives none** — a third answer to a question the codebase
+already answers twice is the one an agent would believe.
+
+Its actual contribution is an **ordering** and a **prohibition**.
+`COPILOT_DO_NOT_LEAD_WITH` is machine-readable and covers the churn score, the
+access band, the policy tier and the investment band — the last being the most
+indefensible thing to say out loud, because it exists to size a credit and saying
+it would be accurate and monstrous. **Every row carries a `say_instead`**: a
+prohibition without a substitute is a dead end, and a rule agents work around is
+worse than no rule.
+
+**The leak scan covers the whole card, not the opening.** The first version scanned
+only `opening` and `headline` and passed a card whose `what_is_true` facts read
+*"their churn score is 0.82 and access band is elite"* — which is the realistic
+path, because `customer_360.summary_text` is a summary of the customer's own
+record and it will happily contain our internal labels. Leaked facts are now
+**marked in place rather than stripped**, because hiding them makes the copilot look
+as though it does not know the field, and an agent who cannot see it cannot reason
+about where else it leaks.
+
+**Critical health overrides a matched journey plan.** A customer at `critical` needs
+a person regardless of which onboarding or activation scenario matched, and letting
+a plan argue them out of it would be the worst version of this feature: a
+correct-looking recommendation to upsell somebody who has an open complaint.
+
+**Nothing writes.** `requires_human: True` on every card, because a
+customer-facing statement written by a rule engine is a promise this system cannot
+keep.
+
+#### Verification
+
+- `python3 -m pytest tests/ -q` → **2793 passed** (114 new across
+  `tests/test_loyalty_status_stage_c.py` and
+  `tests/test_relationship_orchestrator_copilot_stage_c.py`).
+- All four validators valid: `validate_loyalty_status()`,
+  `validate_relationship_health()`, `validate_orchestrator()`,
+  `validate_copilot()`.
+- `authz_drift_report(app.routes)` → **308 pairs, 0 unclassified, 0 mismatched**;
+  `validate_authz()` valid.
+- Health ladder end-to-end: `low → healthy 1.000`, `high → strained 0.707`,
+  `critical → at_risk 0.581` (override fired), `high + open complaint → critical`
+  (arithmetic said `strained`).
+- Orchestrator: attempts 1 and 2 execute, attempt 3 suppressed, a changed situation
+  is not a repeat, `status → at_risk` counts a cycle, a five-day-old `offer` stage
+  reports stuck.
+- Copilot: critical churn + an LTV mention → `internal_only_facts_present` names
+  both, `opening_rewritten: True`, and the offending fact is flagged with a reason.
+- `scripts/build_code_map.py` → `leaves=891 internal_nodes=80`; revision stays
+  **`r6`** with a fourth r6 addendum; `scripts/sync_code_map_md.py --check` in sync.
+
+Code map: `/meta/` `loyalty_status_stage_c` subservice (+3 endpoint keys), and
+`CODE_MAP.md` r6 fourth addendum · `/meta/features`, `/meta/ecosystem`,
+`/meta/authz` · Tests: `tests/test_loyalty_status_stage_c.py`,
+`tests/test_relationship_orchestrator_copilot_stage_c.py`,
+`tests/test_kaizen_shadow_release.py`
 
 ### Stage B: customer-facing recovery offers (2026-10-01)
 
