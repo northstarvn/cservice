@@ -23,6 +23,24 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   applied at the presentation point (`customer_360._build_communication`,
   `self_service.build_self_service_status`) and the override is reported
   explicitly rather than folded into the engine.
+- **Quiet hours are evaluated in the customer's local hour, never the server's.**
+  `region_windows.local_hour` is the only place the arithmetic lives; do not
+  inline `moment.hour` anywhere else. The Stage D gate did, and the whole Stage D
+  suite stayed green because every persona lived in the server's timezone.
+- **An unresolved region is `unattributed`, not closed.** Absence of a region has
+  no office hours to exclude contact, so the fallback must not carry a staffed
+  window. It is conservative about the *hour* (UTC) and exempt from staffing
+  closure. Narrowing it was tried and reverted — that fabricates a constraint
+  rather than adding caution.
+- **A recognised device shortens authentication, never permission.** It must not
+  unlock unattended contact, and a contact refusal must not stop a customer
+  acting on their own account. `care_personalization.assert_trust_does_not_overreach`
+  states this in code.
+- **The copilot is the default pane.** Moving off it requires `explicit=True`;
+  a default any caller can move by naming a pane is not a default.
+- **Acceptance and fulfilment are never combined into one success rate.** High
+  acceptance with poor fulfilment is a fulfilment problem, and averaging the two
+  points an operator at the offer volume instead of at us.
 - **The consent gate must never suppress `service` or `recovery` outreach.**
   A customer who reported a problem must not have the fix withheld because of a
   marketing setting. `CONSENT_GATED_PURPOSES` is the published list of which
@@ -343,6 +361,135 @@ healthier and is measurably worse.
   Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
 
 ## Expansion log
+
+### Stage E: contact is a regional question (2026-10-01)
+
+Five items. The first is a defect in code this project shipped last stage, and it
+is the most useful thing found in this stage, so it comes first.
+
+#### The contact gate evaluated quiet hours in UTC
+
+`services/care_gate.py` computed the hour for quiet-hours and frequency checks as
+`float(moment.hour)` on a UTC datetime. A customer in Auckland — UTC+13 in
+October — had their stated 22:00-to-08:00 quiet hours checked against **UTC
+hours**:
+
+| moment (UTC) | Auckland local | the gate's answer |
+|---|---|---|
+| 2026-10-01 10:00Z | 23:00 | **push: true** |
+| 2026-10-01 23:00Z | 12:00 | push: false |
+
+The gate was not slightly wrong. It was wrong by up to thirteen hours for roughly
+half the world, and **every test of it passed**, because every persona in the
+Stage D suite lived in the server's timezone. The two personas that would have
+caught it — one in Auckland, one in US/East, at the same UTC moment — did not
+exist.
+
+* **Conclusion.** Defect, not a gap. The part was built and wrong for every
+  customer outside the server's own offset. Nothing in the design noticed because
+  the test suite and the server shared a timezone.
+* **Suggestion (not applied).** `region_windows.local_hour` now holds the
+  arithmetic in one exported place, and the Stage E probe varies *only* the
+  region at a fixed UTC moment so a UTC-reading implementation produces identical
+  answers for every persona and the audit grades it `partial` rather than
+  `complete`. The generalisable fix is a lint on any `moment.hour` outside
+  `region_windows`; this module does not add one, because a lint that flags
+  legitimate UTC reads is worse than none.
+
+#### Three bugs found while building the table that fixes it
+
+Each of these is the recurring failure class in this project — a wrong value that
+looks right, caught by asserting behaviour rather than by reading code.
+
+| what | how it was found | why it looked fine |
+|---|---|---|
+| `dst_offset_hours` was a *delta* in some rows and the *total summer offset* in others, so Auckland resolved to **UTC+25** | `validate_regions` range check | every region had a plausible-looking number; only arithmetic disagreed |
+| `validate_regions`'s "fallback is the narrowest window" check compared `start - close` and took `min` of the negatives, selecting the **widest** region in the table | a test asserting a fact about the function rather than the intent | a check with an inverted comparison still runs, still returns a report, and reads as a check |
+| a Stage D test asserted `push is True` with no `now` and no region, so it was **green by wall-clock luck** | the region change exposed it as clock-dependent | it had never failed because it was never asked at a different time |
+
+The second is the one worth keeping. **A validator with an inverted comparison is
+worse than no validator**, because it reports a finding on every run and a reader
+concludes the area is checked.
+
+#### Two corrections to my own reasoning, recorded because both felt right
+
+* **"An unknown region should be the narrowest window."** Wrong. "We do not know
+  where they are" is not "the region we do not know about is closed" — it is the
+  *absence* of a region, and an absence of a region has no office hours.
+  Narrowing the fallback to 09:00–17:00 weekdays made every customer with no
+  declared region unreachable for most of the day: a fabricated constraint, not a
+  cautious one. The fallback is now marked `unattributed`, sits on UTC, and is
+  exempt from staffing closure. It is conservative about the *hour*, not about an
+  office it does not have.
+* **`requires_consent_gate` was all-`False` across every care step**, so the branch
+  that refuses device-unlocked contact was never reachable and the invariant
+  "recognition shortens authentication, not permission" was asserted in prose and
+  untested in code. A step that genuinely depends on the gate
+  (`send_message_unattended`) now exists so the branch is live.
+
+#### Purpose-limited personalization
+
+`CONSENT_GATED_PURPOSES` already listed `personalization` and `care_gate` already
+refused a gated purpose without consent. That is the **outer** limit. Nothing
+recorded which dimensions a message for a given purpose may use, so the inner
+limit was enforced by whoever wrote the message — where the temptation is always
+towards *more*, because more of it feels more relevant.
+
+* `recovery` and `service` may use `history_reference` unconditionally: the
+  message is about something that happened to this person, so referring to it is
+  accuracy, not surveillance.
+* `marketing` needs the `personalization` consent for it.
+* `analytics` may use nothing at all — it names a measurement, not a message.
+* `peer_comparison` is refused for every purpose, and
+  `validate_personalization_limits` fails the build if any purpose lists it.
+
+**The cross-check that found the gap.** `validate_personalization_limits` reads
+`COPILOT_DO_NOT_LEAD_WITH` rather than restating it, and reported four protected
+facts — `churn_score`, `access_band`, `policy_tier`, `investment_band` — that
+were not personalization dimensions at all. They belong in both lists: a fact kept
+out of an agent's opening line while a copywriter is free to reach for it is not
+protected. This is why the validator reads the other table instead of holding a
+copy of it.
+
+#### The unified view, and why the copilot is the default pane
+
+By the end of Stage D the codebase answered six questions about a customer
+correctly — history, health, status, offers, journey, and what to say — and showed
+them in **six places**. An agent opening a customer saw `customer_360`, which
+contains none of health, status, offers or journey state, and formed a view from
+what was there.
+
+* **Conclusion.** Gap, not defect. Each answer was right; the composition was
+  missing.
+* **Suggestion (not applied).** Adding them to `CUSTOMER_360_SECTIONS` would have
+  been the obvious move and wrong twice: it turns a composition into a
+  reimplementation, and it puts *judgements* (a health band is a conclusion drawn
+  from facts, and it can be wrong) next to *records*. `relationship_view`
+  composes instead, and the copilot is the default pane because it is the only one
+  an agent can act on directly — every other pane is evidence for it, and evidence
+  an agent has to go and find does not get read.
+* The default is also the **safe** direction: the copilot refuses to lead with
+  internal facts and requires a human. Moving off it needs `explicit=True`, so
+  "naming a pane" is not the same as "asking for one" — an agent deliberately
+  inspecting a health band is doing something different from one opening a call,
+  and both deserve to work.
+
+#### Audit result
+
+Completeness share **0.7872 → 0.8889**; `untested` 7 → 4. The three new engines
+graded `untested` when first registered, which is the audit being right: a part
+that resolves is not a part that has been measured. They reached `complete` only
+once probes existed whose personas disagree. **0 blockers.** Four probes added
+(`contact_hour_is_local`, `personalization_is_purpose_limited`,
+`trusted_device_never_overreaches`, `copilot_is_the_default_pane`), bound to five
+flows; 65/65 subflows exercised, 21/21 probes registered and every one named by a
+flow.
+
+One more honest limit: `contact_hour_is_local` derives its expectation from the
+**stated window**, not from the region table, so it cannot detect an edit to the
+offsets themselves. `validate_regions`'s range and distinct-offset checks are the
+independent oracle for the table, and the arithmetic probe is the oracle for the
+function.
 
 ### Stage D: the closed loop (2026-10-01)
 

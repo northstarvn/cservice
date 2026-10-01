@@ -125,6 +125,13 @@ PROBE_CAPABILITY: dict[str, str] = {
     "complaint_verdict_is_explained": "complaints",
     "shadow_is_one_way": "shadow_env",
     "authz_routes_classified": "authz_governance",
+    # Stage E. Each of these was graded `untested` when its engine was first
+    # registered, which is the audit being right: a part that resolves is not a
+    # part that has been measured. The mapping is what promotes it.
+    "contact_hour_is_local": "region_windows",
+    "personalization_is_purpose_limited": "care_personalization",
+    "trusted_device_never_overreaches": "care_personalization",
+    "copilot_is_the_default_pane": "relationship_view",
 }
 
 
@@ -230,6 +237,33 @@ ENGINES: tuple[dict[str, Any], ...] = (
         "target": "authz_drift_report",
         "declared_by": "meta_feature:authz_catalog",
         "flows": ("admin_governance_review",),
+    },
+    # Stage E. Registered because a part with no probe grades `untested`, and
+    # `untested` blocks promotion from l4_live -- so leaving these out would have
+    # made the audit describe a promotion barrier nobody had implemented.
+    {
+        "capability_id": "region_windows",
+        "title": "regional local hours and contact windows",
+        "root": "app.services.region_windows",
+        "target": "evaluate_contact_window",
+        "declared_by": "meta_feature:region_windows",
+        "flows": ("at_risk_customer_recovery", "preference_and_consent_change"),
+    },
+    {
+        "capability_id": "care_personalization",
+        "title": "purpose-limited personalization and trusted-device care paths",
+        "root": "app.services.care_personalization",
+        "target": "resolve_personalization",
+        "declared_by": "meta_feature:care_personalization",
+        "flows": ("at_risk_customer_recovery", "preference_and_consent_change"),
+    },
+    {
+        "capability_id": "relationship_view",
+        "title": "the unified relationship view and its default pane",
+        "root": "app.services.relationship_view",
+        "target": "build_relationship_view",
+        "declared_by": "meta_feature:relationship_view",
+        "flows": ("customer_360_review", "support_agent_triage"),
     },
 )
 

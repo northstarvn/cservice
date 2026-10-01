@@ -1048,6 +1048,221 @@ def _probe_shadow_isolation(persona: Persona) -> ProbeOutcome:
 #: Every probe, by id. Kept as data so a flow's subflows name probes rather than
 #: importing them, and a missing probe is a validator error instead of an
 #: ``AttributeError`` halfway through a run.
+# ---------------------------------------------------------------------------
+# Stage E probes
+# ---------------------------------------------------------------------------
+
+
+def _probe_local_contact_hour(persona: Persona) -> ProbeOutcome:
+    """Quiet hours must be evaluated where the customer is, not where the server is.
+
+    The Stage D gate read ``float(moment.hour)`` off a UTC datetime, so a customer
+    in Auckland had their stated 09:00-17:00 window checked against UTC hours and
+    the whole Stage D suite stayed green, because every persona in it was the
+    server's timezone.
+
+    So this probe's personas differ *only* in region, at one fixed UTC moment. If
+    the hour were read at UTC, every persona would agree and the constant-answer
+    detector would grade this part ``partial`` rather than ``complete`` -- which is
+    the honest outcome, not a passing test.
+    """
+    from app.services import region_windows
+
+    moment = datetime(2026, 10, 1, 23, 0, tzinfo=timezone.utc)
+    # Every persona is given the *same* stated window. Only the region varies.
+    window = {"contact_window_start_hour": 9, "contact_window_end_hour": 17,
+              "quiet_hours_enabled": True}
+    regions = {
+        "abandoned_pending": "oceania_auckland",   # 12:00 local -- inside
+        "loyal_with_points": "us_east",            # 19:00 local -- outside
+        "at_risk_high_value": "europe_london",     # 00:00 local -- outside
+    }
+    region = regions.get(persona.persona_id, "us_east")
+    observed = region_windows.evaluate_contact_window(
+        preferences_map=window, region_id=region, moment=moment
+    )
+    hour = int(observed["local_hour"])
+    within = bool(observed["within_declared_window"])
+    # The expectation is derived from the *stated window*, not from the engine.
+    expected_within = 9 <= hour < 17
+    reasons: list[str] = []
+    if hour == 23:
+        reasons.append(
+            f"resolved 23:00 local in {region}, which is the UTC hour: the local-hour "
+            "arithmetic is not being applied"
+        )
+    if within != expected_within:
+        reasons.append(
+            f"{hour:02d}:00 local against a 09:00-17:00 window should be "
+            f"{'inside' if expected_within else 'outside'}"
+        )
+    return _outcome(
+        "contact_hour_is_local",
+        persona,
+        not reasons,
+        f"{region} at 23:00Z is {hour:02d}:00 local, "
+        f"{'inside' if within else 'outside'} the stated window",
+        observed={"region": region, "local_hour": hour,
+                  "within_declared_window": within,
+                  "utc_hour": moment.hour},
+        expected={"local_hour_not_utc_hour": hour != 23,
+                  "matches_stated_window": within == expected_within},
+        error="; ".join(reasons),
+    )
+
+
+def _probe_purpose_limited_personalization(persona: Persona) -> ProbeOutcome:
+    """A recovery message may refer to history; a marketing one may not.
+
+    Persona matters here for a real reason: the personas differ in whether they
+    granted the ``personalization`` consent, and a marketing message's
+    permissions are the one case where that boolean changes the answer. Asking
+    every persona the marketing question with the same consent would let a
+    constant engine pass.
+    """
+    from app.services import care_personalization
+
+    granted = {
+        "loyal_with_points": True,
+        "abandoned_pending": False,
+        "at_risk_high_value": False,
+    }.get(persona.persona_id, False)
+    consents = {"personalization": granted}
+    recovery = care_personalization.resolve_personalization(
+        purpose="recovery", consents=consents
+    )
+    marketing = care_personalization.resolve_personalization(
+        purpose="marketing", consents=consents
+    )
+    reasons: list[str] = []
+    # Recovery is never limited by the marketing consent flag.
+    if "history_reference" not in recovery["allowed"]:
+        reasons.append(
+            "recovery refused history_reference. A recovery message written more "
+            "generically because of a marketing flag is worse at the one job it has"
+        )
+    should_have_history = "history_reference" in marketing["allowed"]
+    if should_have_history != granted:
+        reasons.append(
+            f"marketing {'has' if should_have_history else 'refuses'} "
+            f"history_reference but personalization consent is {granted}"
+        )
+    if not marketing["refusal_reasons"]:
+        reasons.append(
+            "marketing refusals carry no reasons. A refusal that only says 'not "
+            "permitted' is not actionable by whoever writes the message"
+        )
+    return _outcome(
+        "personalization_is_purpose_limited",
+        persona,
+        not reasons,
+        f"consent={granted}: recovery allows history_reference, marketing "
+        f"{'allows' if should_have_history else 'refuses'} it",
+        observed={"consent": granted,
+                  "recovery_allowed": list(recovery["allowed"]),
+                  "marketing_allowed": list(marketing["allowed"]),
+                  "marketing_refused": list(marketing["refused"])},
+        expected={"recovery_allows_history": True,
+                  "marketing_follows_consent": should_have_history == granted},
+        error="; ".join(reasons),
+    )
+
+
+def _probe_trusted_device_respects_the_gate(persona: Persona) -> ProbeOutcome:
+    """A recognised device must not unlock unattended contact.
+
+    The invariant is that recognition shortens *authentication* and never
+    *permission*. Personas differ in how strongly their device is recognised, and
+    the gate's verdict is held at refusing -- so a device can only ever widen the
+    set of permitted steps that are not contact.
+    """
+    from app.services import care_personalization
+
+    recognitions = {"abandoned_pending": 1, "loyal_with_points": 12}.get(
+        persona.persona_id, 5
+    )
+    trust = care_personalization.resolve_trust_band(
+        recognized=True, recognitions=recognitions, signals_matched=3
+    )
+    held = care_personalization.resolve_care_paths(trust, gate={"push": False})
+    reasons: list[str] = []
+    if "send_message_unattended" in held["permitted_step_ids"]:
+        reasons.append(
+            f"a {trust['band']} device unlocked unattended contact while the "
+            "preference gate refused it. Recognition shortens authentication, not "
+            "permission"
+        )
+    for step in ("accept_own_offer", "decline_own_offer"):
+        if step not in held["permitted_step_ids"]:
+            reasons.append(
+                f"the gate refusing *contact* also blocked {step}. A contact "
+                "preference must not stop them acting on their own account"
+            )
+    return _outcome(
+        "trusted_device_never_overreaches",
+        persona,
+        not reasons,
+        f"{trust['band']} device, gate refusing push: "
+        f"{len(held['permitted_step_ids'])} steps permitted, "
+        f"{len(held['refused_step_ids'])} refused",
+        observed={"trust_band": trust["band"], "recognitions": recognitions,
+                  "permitted": list(held["permitted_step_ids"]),
+                  "refused": list(held["refused_step_ids"])},
+        expected={"contact_still_gated": True,
+                  "own_account_steps_permitted": True},
+        error="; ".join(reasons),
+    )
+
+
+def _probe_relationship_view_default_pane(persona: Persona) -> ProbeOutcome:
+    """The copilot is the pane an agent lands on, and moving off it is deliberate.
+
+    Personas differ in whether they *asked* for another pane, which is the only
+    thing that moves the default. If the default could be moved by naming a pane,
+    every persona would agree and this would pass a default that was not one.
+    """
+    from app.services import relationship_view
+
+    requested = {
+        "loyal_with_points": "history",
+        "abandoned_pending": "",
+        "at_risk_high_value": "history",
+    }.get(persona.persona_id, "")
+    explicit = persona.persona_id == "loyal_with_points"
+    view = relationship_view.build_relationship_view(
+        copilot_card={"opening": "Thanks for getting in touch.", "user_id": 1},
+        health={"band": "stable"},
+        status={"status": "Trusted"},
+        pane=requested or None,
+        explicit_pane=explicit,
+    )
+    reasons: list[str] = []
+    if explicit and view["pane"] != "history":
+        reasons.append(
+            f"an explicitly requested pane was refused: got {view['pane']!r}. "
+            "Inspection is a different act from opening a conversation"
+        )
+    if not explicit and view["pane"] != relationship_view.DEFAULT_PANE:
+        reasons.append(
+            f"a merely-named pane moved the default to {view['pane']!r}. A default "
+            "any caller can move by naming something is not a default"
+        )
+    if view["requires_human"] is not True:
+        reasons.append("the view does not require a human; it may be acting alone")
+    return _outcome(
+        "copilot_is_the_default_pane",
+        persona,
+        not reasons,
+        f"requested {requested or '(none)'!r} explicit={explicit} -> "
+        f"{view['pane']!r}",
+        observed={"requested": requested, "explicit": explicit,
+                  "pane": view["pane"],
+                  "pane_was_defaulted": view["pane_was_defaulted"]},
+        expected={"pane": "history" if explicit else relationship_view.DEFAULT_PANE},
+        error="; ".join(reasons),
+    )
+
+
 PROBES: dict[str, Probe] = {
     "access_band_resolves": _probe_access_band,
     "access_band_matches_thresholds": _probe_band_spread,
@@ -1066,6 +1281,10 @@ PROBES: dict[str, Probe] = {
     "rule_pack_selects": _probe_rule_pack_selection,
     "authz_routes_classified": _probe_admin_governance,
     "shadow_is_one_way": _probe_shadow_isolation,
+    "contact_hour_is_local": _probe_local_contact_hour,
+    "personalization_is_purpose_limited": _probe_purpose_limited_personalization,
+    "trusted_device_never_overreaches": _probe_trusted_device_respects_the_gate,
+    "copilot_is_the_default_pane": _probe_relationship_view_default_pane,
 }
 PROBE_IDS: tuple[str, ...] = tuple(sorted(PROBES))
 
@@ -1127,7 +1346,10 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
             "recovery_lifecycle_stage",
             "recovery_never_withholds_a_fix",
             "consent_gate_excludes_service",
-        ),
+        
+            "recovery_lifecycle_stage",
+            "recovery_never_withholds_a_fix",
+            "consent_gate_excludes_service", "contact_hour_is_local", "personalization_is_purpose_limited", "trusted_device_never_overreaches"),
         "surfaces": ("/chat/admin/recovery/playbooks", "/chat/admin/recovery-guards"),
         "invariant": (
             "a customer who reported a problem is never refused a fix because of a "
@@ -1148,7 +1370,10 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
             "retention_series_builds",
             "retention_health_bands",
             "forecast_confidence_decays",
-        ),
+        
+            "retention_series_builds",
+            "retention_health_bands",
+            "forecast_confidence_decays", "contact_hour_is_local"),
         "surfaces": ("/chat/admin/retention-health", "/chat/admin/retention-forecast"),
         "invariant": "forecast confidence decays with horizon and with sample size",
         "description": (
@@ -1200,7 +1425,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "customer",
         "personas": ("loyal_with_points", "repeatedly_cancelled"),
         "subflows": ("read_preferences", "save_preference", "grant_consent", "revoke_consent", "strategy_applies"),
-        "probe_ids": ("consent_gate_excludes_service",),
+        "probe_ids": ("consent_gate_excludes_service", "contact_hour_is_local", "personalization_is_purpose_limited", "trusted_device_never_overreaches"),
         "surfaces": ("/chat/me/preferences", "/chat/me/consent-history"),
         "invariant": (
             "a purpose added to the consent-gated set shows up in the guard rather "
@@ -1217,7 +1442,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "support_agent",
         "personas": ("loyal_with_points", "abandoned_pending", "repeatedly_cancelled"),
         "subflows": ("classify_topic", "apply_route_policy", "check_capacity", "respond"),
-        "probe_ids": ("rule_pack_selects", "access_band_matches_thresholds"),
+        "probe_ids": ("rule_pack_selects", "access_band_matches_thresholds", "copilot_is_the_default_pane"),
         "surfaces": ("/topics/plan", "/topics/governance/routes"),
         "invariant": "a score just under a band boundary reports the band it missed and by how much",
         "description": (
@@ -1263,7 +1488,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "customer",
         "personas": ("loyal_with_points", "repeatedly_cancelled", "dormant_45_days"),
         "subflows": ("aggregate_sections", "build_communication", "explain_decisions"),
-        "probe_ids": ("retention_health_bands", "recovery_lifecycle_stage"),
+        "probe_ids": ("retention_health_bands", "recovery_lifecycle_stage", "copilot_is_the_default_pane"),
         "surfaces": ("/chat/customer-360", "/chat/me/explanations"),
         "invariant": "a section that could not be built is named rather than omitted",
         "description": (

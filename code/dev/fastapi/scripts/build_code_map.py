@@ -305,6 +305,13 @@ TREE = _node(
         # Stage D's policy surfaces, under the release router for the same
         # reason Stage C is: these answer "what have we learned, and is it safe to
         # act on", which is the release surface's own question.
+        # Stage E. Three admin surfaces: the region table, the personalization
+        # and device-care tables, and the view with its pane default. Under the
+        # release router for the reason Stages C and D are -- these are all
+        # answers to "what is built, and what does it permit".
+        _node("kaizen_stage_e",
+              "region_catalog", "care_personalization_catalog",
+              "relationship_catalog", "relationship_view"),
         _node("kaizen_stage_d",
               "care_gate_report", "care_gate_consult",
               "care_weights_report", "offer_outcomes_report",
@@ -429,6 +436,28 @@ TREE = _node(
               "generosity_ranking", "scale_buckets", "scale_recommendations",
               "journey_report", "stuck_actions", "care_loop_measurements",
               "validation", "catalog"),
+        # Stage E, part 1. The local-hour arithmetic lives in one exported place
+        # (`local_hour`) so it cannot be inlined back into UTC by a later
+        # refactor -- which is how the Stage D gate stayed wrong for a whole
+        # stage with every test green.
+        _node("region_windows",
+              "regions", "region_resolution", "offsets", "local_hour",
+              "local_day_of_week", "local_date", "coverage_window",
+              "region_open", "contact_window", "validation", "catalog"),
+        # Stage E, parts 2 and 5. Two tables, one file: what a message for a
+        # purpose may use, and what a recognised device may do without asking
+        # again. The second never widens what a message may say.
+        _node("care_personalization",
+              "personalization_dimensions", "purpose_limits", "resolution",
+              "refusal_reasons", "care_steps", "trust_bands", "trust_band",
+              "care_paths", "overreach_invariant", "validation", "catalog"),
+        # Stage E, parts 3 and 4. The copilot is the default pane and the raw
+        # surfaces are reachable but never first, because an agent who has to go
+        # and find the thing does not find it.
+        _node("relationship_view",
+              "panes", "standing", "pane_resolution", "what_is_true",
+              "journey_lines", "offer_outcome_lines", "open_commitments",
+              "contact_gate", "view", "render", "validation", "catalog"),
         _node("journey_orchestrator",
               "stages", "transitions", "stage_purpose", "stage_timeboxes",
               "initial_state", "precondition_hash", "transition_resolution",

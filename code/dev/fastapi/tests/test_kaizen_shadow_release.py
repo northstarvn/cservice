@@ -2221,10 +2221,18 @@ class TestRoutes:
         assert rule["exposure"] == "admin"
         assert rule["enforced_by"] == ("get_current_admin_user",)
 
-        paths = [
-            route.path for route in kaizen.router.routes
-        ]
-        assert len(paths) == 26, paths
+        # Set equality against the declared PATHS rather than a length. A count
+        # is a tripwire that fires on every added route and asks the author to
+        # update a literal; what actually matters is that the router and the
+        # declaration name the same routes, and that a swap (one added here, one
+        # removed there) keeps the count still and hides the change.
+        other = TestTheGateRejectsAnonymous
+        # FILLED maps the literal paths a test hits onto the router's templates
+        # (`/candidates/x/advance` -> `/candidates/{candidate_id}/advance`), so
+        # the comparison has to go through it.
+        declared = {other.FILLED.get(path, path) for _method, path in other.PATHS}
+        paths = {route.path for route in kaizen.router.routes}
+        assert paths == declared, paths ^ declared
         for path in paths:
             assert path.startswith("/kaizen/admin"), path
 
@@ -2366,7 +2374,20 @@ class TestEndpoints:
         body = response.json()
         assert len(body["flows"]) == 12
         assert len(body["personas"]) == 5
-        assert len(body["probes"]) == 17
+        # Not a magic number. A count assertion is a tripwire that fires on every
+        # added probe and asks the author to update a literal, which trains people
+        # to update the literal without asking whether the new probe is reachable.
+        # This asserts the property that actually matters instead: every probe
+        # registered is named by at least one flow, so a probe can never be written
+        # and forgotten.
+        registered = set(body["probes"])
+        named = {p for f in body["flows"] for p in f.get("probe_ids", ())}
+        assert registered, "the surface published no probes at all"
+        assert named == registered, (
+            "probes registered but not bound to a flow: "
+            f"{sorted(registered - named)}; named but unregistered: "
+            f"{sorted(named - registered)}"
+        )
         assert body["score_scale"] == [0.0, 100.0]
 
     def test_simulating_one_flow_reports_its_runs(self, admin_client):
@@ -3027,6 +3048,18 @@ class TestTheGateRejectsAnonymous:
         # offer tiers against each other. It is the most revealing route on this
         # router and the one most worth refusing to an anonymous caller.
         ("POST", "/kaizen/admin/offer-outcomes"),
+        # Stage E. `regions` publishes the contact windows -- the hours this
+        # business may contact somebody, per region -- and `care-personalization`
+        # publishes the limits on what a message may use. Both are policy tables
+        # rather than customer data, and both are still admin-gated: who may be
+        # contacted, and about what, is not public.
+        ("GET", "/kaizen/admin/regions"),
+        ("GET", "/kaizen/admin/care-personalization"),
+        ("GET", "/kaizen/admin/relationship-catalog"),
+        # Takes caller-supplied surfaces and composes them. A POST because it
+        # builds from parts rather than looking them up, and because a view of a
+        # customer is exactly what must not be readable by anyone who finds it.
+        ("POST", "/kaizen/admin/relationship-view"),
     ]
 
     def test_every_kaizen_route_refuses_an_unauthenticated_caller(self):
@@ -3070,6 +3103,15 @@ class TestTheGateRejectsAnonymous:
         "/kaizen/admin/care-gate/consult": "/kaizen/admin/care-gate/consult",
         "/kaizen/admin/care-weights": "/kaizen/admin/care-weights",
         "/kaizen/admin/offer-outcomes": "/kaizen/admin/offer-outcomes",
+        # Stage E. `regions` and `care-personalization` publish *policy* tables --
+        # the contact windows and the limits on what a message may use -- so
+        # reading them is a governance question. `relationship-view` composes a
+        # customer view from caller-supplied parts, which is why it is a POST:
+        # it takes surfaces rather than looking them up.
+        "/kaizen/admin/regions": "/kaizen/admin/regions",
+        "/kaizen/admin/care-personalization": "/kaizen/admin/care-personalization",
+        "/kaizen/admin/relationship-catalog": "/kaizen/admin/relationship-catalog",
+        "/kaizen/admin/relationship-view": "/kaizen/admin/relationship-view",
     }
 
     def test_the_list_is_the_whole_router(self):

@@ -536,6 +536,96 @@ async def offer_outcomes_report(
 
 
 # ---------------------------------------------------------------------------
+# Stage E: regions, personalization limits, device care, the unified view
+# ---------------------------------------------------------------------------
+
+
+@router.get("/kaizen/admin/regions")
+async def region_catalog(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The region table, published so the contact windows are reviewable.
+
+    A table rather than a timezone database, and the difference is the point: the
+    windows are data a human can read, question and amend, rather than behaviour
+    that has to be understood by reading code.
+    """
+    from app.services import region_windows
+
+    return {
+        **region_windows.build_region_catalog(),
+        "validation": region_windows.validate_regions(),
+        "note": (
+            "never derived from an IP. A geo-IP tells you where a packet came "
+            "from, which is a VPN, a hotel, a mobile network or a travel day away "
+            "from where the person is. this table is read from the account"
+        ),
+    }
+
+
+@router.get("/kaizen/admin/care-personalization")
+async def care_personalization_catalog(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """What a message for a purpose may use, and what a device may do unattended."""
+    from app.services import care_personalization
+
+    return {
+        **care_personalization.build_stage_e_catalog(),
+        "personalization_validation": (
+            care_personalization.validate_personalization_limits()
+        ),
+        "device_care_validation": care_personalization.validate_trusted_device_care(),
+        "note": (
+            "a recognised device shortens authentication and never permission. it "
+            "does not change what a message may say, and it does not change what a "
+            "recovery offer is worth"
+        ),
+    }
+
+
+@router.get("/kaizen/admin/relationship-catalog")
+async def relationship_catalog(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The panes and the standing claims, published."""
+    from app.services import relationship_view
+
+    return {
+        **relationship_view.build_relationship_catalog(),
+        "validation": relationship_view.validate_relationship_view(),
+    }
+
+
+@router.post("/kaizen/admin/relationship-view")
+async def relationship_view(
+    payload: dict,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Compose the unified view from surfaces the caller already has.
+
+    Takes the parts as arguments rather than calling them, for the same reason the
+    copilot does: a view that re-derived health, status or offers would be a
+    *second* answer to each of those questions, and the second one is the one an
+    agent would read.
+    """
+    from app.services import relationship_view as rv
+
+    return rv.build_relationship_view(
+        copilot_card=payload.get("copilot_card"),
+        health=payload.get("health"),
+        status=payload.get("status"),
+        offers=payload.get("offers") or (),
+        journey_plan=payload.get("journey_plan"),
+        customer_360=payload.get("customer_360"),
+        contact_window=payload.get("contact_window"),
+        gate=payload.get("gate"),
+        pane=payload.get("pane"),
+        explicit_pane=bool(payload.get("explicit_pane", False)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Stage C: loyalty status, relationship health, the orchestrator, the copilot
 # ---------------------------------------------------------------------------
 

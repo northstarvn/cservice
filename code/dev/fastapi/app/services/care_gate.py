@@ -164,6 +164,7 @@ def consult(
     hour: Optional[float] = None,
     last_contact_at: Optional[datetime] = None,
     resolved_channel: Optional[str] = None,
+    region_id: Optional[str] = None,
     now: Optional[datetime] = None,
     channel: str = "",
 ) -> dict[str, Any]:
@@ -190,6 +191,8 @@ def consult(
     difference between respecting a preference and hiding a fix from the person
     who asked for less interruption.
     """
+    from app.services import region_windows
+
     moment = _aware(now) or _now()
     declared = PROACTIVE_PATHS_BY_ID.get(str(path_id))
     if declared is None:
@@ -228,11 +231,25 @@ def consult(
             service_critical=service_critical,
         )
 
+    # The customer's LOCAL hour, never the server's.
+    #
+    # This line was `hour=hour if hour is not None else float(moment.hour)` on a
+    # UTC datetime, which evaluated Auckland's 22:00 quiet hours against 09:00 UTC
+    # and found the window open. Every test of it passed, because every test used
+    # a customer in the same timezone as the server. `region_windows.local_hour`
+    # exists so the arithmetic is in one exported place and cannot be inlined back
+    # into UTC by a later refactor.
+    local = region_windows.evaluate_contact_window(
+        preferences_map=dict(preferences_map),
+        region_id=region_id,
+        moment=moment,
+    )
+    effective_hour = hour if hour is not None else float(local["local_hour"])
     plan = preferences.effective_contact_plan(
         dict(preferences_map),
         dict(consents or {}),
         resolved_channel=resolved_channel,
-        hour=hour if hour is not None else float(moment.hour),
+        hour=effective_hour,
     )
     consent = preferences.is_outreach_permitted(
         dict(consents or {}), purpose_name, service_critical=service_critical
@@ -269,6 +286,15 @@ def consult(
         push = False
         reasons.append("outside their contact window (quiet hours)")
         deferred_until = _next_window_start(moment, (plan.get("contact_window") or {}).get("start_hour"))
+    # A closed region is an operational fact; quiet hours are a promise the customer
+    # made. Deferred for the second and ignoring the first are different acts with
+    # different reasons, and the reason is what tells an operator whether to
+    # requeue or to fix a preference.
+    if not local["region"]["open"]:
+        push = False
+        reasons.append(
+            "their region is closed: " + str(local["region"]["in_hours_reason"])
+        )
     cooldown = float(plan.get("cooldown_hours") or 0.0)
     if push and cooldown > 0 and last_contact_at is not None:
         last = _aware(last_contact_at)
@@ -297,6 +323,7 @@ def consult(
         cooldown_hours=cooldown,
         consent=dict(consent),
         contact_plan_reason=str(plan.get("reason") or ""),
+        local_window=local,
     )
 
 
@@ -327,6 +354,7 @@ def _decision(**kwargs: Any) -> dict[str, Any]:
         "issue": bool(kwargs.get("issue", True)),
         "push": bool(kwargs.get("push", False)),
         "deferred_until": kwargs.get("deferred_until"),
+        "local_window": dict(kwargs.get("local_window") or {}),
         "purpose": str(kwargs.get("purpose") or ""),
         "service_critical": bool(kwargs.get("service_critical", False)),
         "mode": str(kwargs.get("mode") or ""),
@@ -338,10 +366,16 @@ def _decision(**kwargs: Any) -> dict[str, Any]:
         "contact_plan_reason": str(kwargs.get("contact_plan_reason") or ""),
         "generated_at": (kwargs.get("moment") or _now()).isoformat(),
         "pushes": str((PROACTIVE_PATHS_BY_ID.get(path_id) or {}).get("pushes") or ""),
+        "region_id": str(
+            (kwargs.get("local_window") or {}).get("region_id") or ""
+        ),
+        "local_hour": int((kwargs.get("local_window") or {}).get("local_hour") or 0),
         "note": (
             "issue and push are separate questions. a service or recovery thing "
             "existing and being undelivered is not the same as not existing, and "
-            "collapsing the two is how a preference becomes a suppression"
+            "collapsing the two is how a preference becomes a suppression. "
+            "local_hour is the hour *where the customer is*: reading float(moment.hour) "
+            "on a UTC datetime is what made Auckland's quiet hours advisory"
         ),
     }
 

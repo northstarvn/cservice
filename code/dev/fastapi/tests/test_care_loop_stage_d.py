@@ -126,10 +126,20 @@ class TestTheGateFailsClosed:
         from app.services import care_gate
 
         unreadable = care_gate.consult("recovery_outreach", None, None)
-        empty = care_gate.consult("recovery_outreach", {}, {})
+        # A fixed `now` and a real region. Without them this test depended on the
+        # wall clock: it asserted `push is True` at whatever hour the suite
+        # happened to run, so it was green by luck rather than by design. The
+        # property under test is about the *preference* dimension -- silence is not
+        # a preference -- and it is a different property from whether the chosen
+        # region's office is open, which Stage E made a real question.
+        at = datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
+        empty = care_gate.consult(
+            "recovery_outreach", {}, {}, region_id="us_east", now=at
+        )
         assert unreadable["push"] is False
         assert empty["mode"] == "preferences_read"
         assert empty["push"] is True
+        assert not any("preferences" in reason for reason in empty["reasons"])
 
     def test_an_unregistered_path_cannot_push(self):
         """A new proactive surface that forgot to register is the case this

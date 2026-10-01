@@ -303,6 +303,7 @@ async def app_metadata():
             "recovery_offers",
             "loyalty_status_stage_c",
             "care_loop_stage_d",
+            "regional_care_stage_e",
             "kaizen_release_surface",
             "complaint_learning",
             # The sign-in surface is listed as three features rather than one
@@ -1045,6 +1046,42 @@ async def app_ecosystem():
                     "incident it would have explained"
                 ),
             },
+            "regional_care_stage_e": {
+                "routes": [
+                    "/kaizen/admin/regions",
+                    "/kaizen/admin/care-personalization",
+                    "/kaizen/admin/relationship-catalog",
+                    "/kaizen/admin/relationship-view",
+                ],
+                "purpose": (
+                    "Stage E: contact is a regional question, personalization is a "
+                    "per-purpose one, and an agent should land on the copilot "
+                    "rather than on a table"
+                ),
+                "why": (
+                    "the finding is a defect in code this project already shipped. "
+                    "The Stage D gate read float(moment.hour) off a UTC datetime, so "
+                    "a customer in Auckland had their stated 09:00-17:00 window "
+                    "checked against UTC hours and the entire Stage D suite stayed "
+                    "green -- because every persona in it lived in the server's "
+                    "timezone. The arithmetic now lives in one exported function, "
+                    "so it cannot be inlined back into UTC by a later refactor"
+                ),
+                "invariants": [
+                    "quiet hours are evaluated in the customer's local hour, never "
+                    "the server's",
+                    "an unresolved region is unattributed rather than closed: an "
+                    "absence of a region has no office hours to exclude contact",
+                    "region is never derived from an IP address",
+                    "a recognised device shortens authentication and never "
+                    "permission; it cannot unlock unattended contact",
+                    "a contact refusal must not stop a customer acting on their own "
+                    "account",
+                    "the copilot is the default pane and moving off it requires an "
+                    "explicit request",
+                    "acceptance and fulfilment stay separable columns",
+                ],
+            },
             "care_loop_stage_d": {
                 "routes": [
                     "/kaizen/admin/care-gate",
@@ -1433,6 +1470,10 @@ async def app_feature_summary():
             "kaizen_care_gate_consult": "/kaizen/admin/care-gate/consult",
             "kaizen_care_weights": "/kaizen/admin/care-weights",
             "kaizen_offer_outcomes": "/kaizen/admin/offer-outcomes",
+            "kaizen_regions": "/kaizen/admin/regions",
+            "kaizen_care_personalization": "/kaizen/admin/care-personalization",
+            "kaizen_relationship_catalog": "/kaizen/admin/relationship-catalog",
+            "kaizen_relationship_view": "/kaizen/admin/relationship-view",
             "kaizen_loyalty_status": "/kaizen/admin/loyalty-status",
             "kaizen_loyalty_status_preview": "/kaizen/admin/loyalty-status/preview",
             "kaizen_agent_copilot_preview": "/kaizen/admin/agent-copilot/preview",
