@@ -304,6 +304,7 @@ async def app_metadata():
             "loyalty_status_stage_c",
             "care_loop_stage_d",
             "regional_care_stage_e",
+            "policy_motion_stage_f",
             "kaizen_release_surface",
             "complaint_learning",
             # The sign-in surface is listed as three features rather than one
@@ -1046,6 +1047,44 @@ async def app_ecosystem():
                     "incident it would have explained"
                 ),
             },
+            "policy_motion_stage_f": {
+                "routes": [
+                    "/kaizen/admin/policy-motion",
+                    "/kaizen/admin/policy-motion/ledger",
+                    "/kaizen/admin/trust-continuity",
+                    "/kaizen/admin/value-trajectory",
+                ],
+                "purpose": (
+                    "Stage F: record why a rule changed, and whether what we "
+                    "promise still holds for somebody who believed the old version"
+                ),
+                "why": (
+                    "the exposure arrived with Stages C and D. this codebase is "
+                    "full of tables that decide things about people, none of them "
+                    "left a trace when edited, and that was survivable while the "
+                    "edits were rare and reviewed. it stops being survivable the "
+                    "moment something learns -- care weights derive emphasis from "
+                    "observed complaints, offer outcomes rank generosity rules by "
+                    "measured fulfilment -- because now a table can change itself "
+                    "and nobody downstream can tell what moved or why"
+                ),
+                "invariants": [
+                    "a motion records and never applies; an engine that retunes its "
+                    "own table from its own outputs makes that table unauditable",
+                    "the evidence bar is per class of change, and a change to what "
+                    "somebody is owed needs a comparison rather than a count",
+                    "opinion never justifies anything on its own",
+                    "an unclassifiable change is measured against the strictest "
+                    "class as a floor, and clearing that floor is not a verdict",
+                    "a motion with no reason and no proposer is refused",
+                    "the ledger lists insufficient motions first",
+                    "an unchecked promise is not a held one: 'nothing is broken' "
+                    "and 'nothing was looked at' must not be the same answer",
+                    "a broken promise names the commitment it broke",
+                    "no status movement lowers a rank without evidence, and only the "
+                    "declared risk movement may lower one at all",
+                ],
+            },
             "regional_care_stage_e": {
                 "routes": [
                     "/kaizen/admin/regions",
@@ -1474,6 +1513,10 @@ async def app_feature_summary():
             "kaizen_care_personalization": "/kaizen/admin/care-personalization",
             "kaizen_relationship_catalog": "/kaizen/admin/relationship-catalog",
             "kaizen_relationship_view": "/kaizen/admin/relationship-view",
+            "kaizen_policy_motion": "/kaizen/admin/policy-motion",
+            "kaizen_policy_motion_ledger": "/kaizen/admin/policy-motion/ledger",
+            "kaizen_trust_continuity": "/kaizen/admin/trust-continuity",
+            "kaizen_value_trajectory": "/kaizen/admin/value-trajectory",
             "kaizen_loyalty_status": "/kaizen/admin/loyalty-status",
             "kaizen_loyalty_status_preview": "/kaizen/admin/loyalty-status/preview",
             "kaizen_agent_copilot_preview": "/kaizen/admin/agent-copilot/preview",

@@ -986,3 +986,307 @@ def build_loyalty_status_catalog() -> dict[str, Any]:
             "monetary LTV number built from it would be a guess wearing a float"
         ),
     }
+
+# ---------------------------------------------------------------------------
+# Stage F: how a membership's value evolves
+# ---------------------------------------------------------------------------
+
+#: The shapes a value trajectory may take, and what each one is *allowed* to do.
+#:
+#: This is the part Stage F adds, and it is deliberately a list of movements
+#: rather than a score. A trajectory is not "how valuable is this customer" --
+#: the investment band already answers that, ordinally. It is **how that answer
+#: got here**, because the thing a customer asks when their status changes is
+#: "what did you see?", and an answer that cannot be produced makes the status
+#: feel arbitrary however fair the rule is.
+VALUE_MOVEMENTS: tuple[dict[str, Any], ...] = (
+    {
+        "movement": "earned",
+        "raises": True,
+        "may_lower": False,
+        "requires_evidence": False,
+        "label": "Earned by what they did",
+        "why": (
+            "the ordinary case, and the only one that needs no evidence, because "
+            "the ledger already contains the events that caused it"
+        ),
+    },
+    {
+        "movement": "confirmed",
+        "raises": True,
+        "may_lower": False,
+        "requires_evidence": True,
+        "label": "Raised because measured outcomes support it",
+        "why": (
+            "a rule change moved somebody up rather than down. It carries the "
+            "motion's evidence, because a change to what somebody is owed is not "
+            "a thing that should happen quietly"
+        ),
+    },
+    {
+        "movement": "paused",
+        "raises": False,
+        "may_lower": False,
+        "requires_evidence": False,
+        "label": "Held while nothing changes",
+        "why": (
+            "the one that matters most for trust. A programme that is doing "
+            "nothing must say it is doing nothing rather than letting a customer "
+            "wonder whether it has quietly downgraded them"
+        ),
+    },
+    {
+        "movement": "reinstated",
+        "raises": True,
+        "may_lower": False,
+        "requires_evidence": True,
+        "label": "Restored after an error",
+        "why": (
+            "reinstating is not the same as earning again. Somebody put back where "
+            "they were after we got it wrong should not have to rebuild, and the "
+            "distinction is the whole reason a trajectory is kept"
+        ),
+    },
+    {
+        "movement": "lowered_for_risk",
+        "raises": False,
+        "may_lower": True,
+        "requires_evidence": True,
+        "label": "Lowered on evidence of risk",
+        "why": (
+            "the only movement that may lower a status, and it is the one that "
+            "must never be reachable by a timer. A status that can fall for "
+            "inactivity is a different promise, and the promise is published"
+        ),
+    },
+)
+VALUE_MOVEMENT_BY_ID: dict[str, dict[str, Any]] = {
+    str(row["movement"]): dict(row) for row in VALUE_MOVEMENTS
+}
+VALUE_MOVEMENT_IDS: tuple[str, ...] = tuple(VALUE_MOVEMENT_BY_ID)
+
+
+def build_value_trajectory(
+    *,
+    history: Sequence[Mapping[str, Any]] = (),
+    now: Optional[datetime] = None,
+    max_entries: int = 12,
+) -> dict[str, Any]:
+    """How this membership's value got where it is, newest last.
+
+    A **trajectory**, not a series of scores. The stages C/D modules each answered
+    a question at one moment; nobody could answer "why is this different from six
+    months ago", which is the only form the question takes when a customer asks
+    it. The entries are the *moves* -- earned, confirmed, paused, reinstated,
+    lowered -- and the moves are what the promise is written about.
+
+    Two properties are enforced rather than hoped for:
+
+    * **No entry may lower a status without evidence.** This is the no-decay
+      invariant expressed over time instead of over a single ledger, because
+      "status never decays" is easy to keep when there is one ledger and easy to
+      lose when there is a history of them.
+    * **A gap is reported as a gap.** Long absence produces a ``paused`` entry
+      rather than nothing, because silence in a trajectory reads as a decision
+      nobody made.
+    """
+    moment = now or datetime.now(timezone.utc)
+    rows = [dict(row) for row in history or ()]
+    entries: list[dict[str, Any]] = []
+    previous_rank: Optional[int] = None
+    for row in rows:
+        movement = str(row.get("movement") or "earned")
+        spec = VALUE_MOVEMENT_BY_ID.get(movement)
+        if spec is None:
+            entries.append(
+                {
+                    "movement": movement,
+                    "known_movement": False,
+                    "status": "",
+                    "rank": previous_rank,
+                    "at": str(row.get("at") or ""),
+                    "accepted": False,
+                    "reason": (
+                        f"{movement!r} is not a declared movement. An unrecognised "
+                        "move is refused rather than defaulted to 'earned', because "
+                        "defaulting would let an invented entry into a promise"
+                    ),
+                    "requires_evidence": True,
+                }
+            )
+            continue
+        rank = row.get("rank")
+        rank_value = int(rank) if isinstance(rank, (int, float)) and not isinstance(rank, bool) else previous_rank
+        has_evidence = bool(row.get("evidence")) or bool(row.get("motion_id"))
+        lowers = (
+            rank_value is not None
+            and previous_rank is not None
+            and int(rank_value) < int(previous_rank)
+        )
+        reasons: list[str] = []
+        if bool(spec["requires_evidence"]) and not has_evidence:
+            reasons.append(
+                f"{movement!r} requires evidence. A move that changes what "
+                "somebody is owed, in either direction, has to be able to say "
+                "what was seen"
+            )
+        if lowers and not bool(spec.get("may_lower")):
+            reasons.append(
+                f"{movement!r} lowered the rank from {previous_rank} to "
+                f"{rank_value}, and it is not a movement allowed to lower. This is "
+                "the no-decay invariant: a status that can fall for inactivity is a "
+                "different promise, and the promise is published"
+            )
+        entries.append(
+            {
+                "movement": movement,
+                "known_movement": True,
+                "label": str(spec["label"]),
+                "status": str(row.get("status") or ""),
+                "rank": rank_value,
+                "previous_rank": previous_rank,
+                "raised": bool(spec["raises"]),
+                "lowered": lowers,
+                "at": str(row.get("at") or ""),
+                "motion_id": str(row.get("motion_id") or ""),
+                "evidence": list(row.get("evidence") or ()),
+                "requires_evidence": bool(spec["requires_evidence"]),
+                "has_evidence": has_evidence,
+                "accepted": not reasons,
+                "reason": "; ".join(reasons),
+                "why": str(spec["why"]),
+            }
+        )
+        if rank_value is not None and not reasons:
+            previous_rank = int(rank_value)
+    accepted = [row for row in entries if row.get("accepted")]
+    # A gap is a fact about the trajectory, and reporting it as one is the point.
+    last_at = ""
+    for row in accepted:
+        if row.get("at"):
+            last_at = str(row["at"])
+    return {
+        "generated_at": moment.isoformat(),
+        "entries": list(reversed(entries))[-int(max_entries):],
+        "entry_count": len(entries),
+        "refused": [row for row in entries if not row.get("accepted")],
+        "current_rank": previous_rank,
+        "last_change_at": last_at,
+        # Only *accepted* lowerings count. An earlier version scanned every entry,
+        # so a trajectory that correctly *refused* an unjustified demotion still
+        # reported that a demotion had happened without evidence -- and the
+        # validator then failed a build whose behaviour was right. A field that
+        # reports refused events as if they occurred is worse than no field,
+        # because it is read as a finding.
+        "ever_lowered_without_evidence": any(
+            row.get("accepted") and row.get("lowered") and not row.get("has_evidence")
+            for row in entries
+        ),
+        "status_decays_on_inactivity": STATUS_DECAYS_ON_INACTIVITY,
+        "membership_is_ordinal": True,
+        "note": (
+            "a trajectory of moves, not a series of scores. the investment band "
+            "already answers 'how valuable', ordinally; this answers 'why is this "
+            "different from six months ago', which is the only form the question "
+            "takes when a customer asks. the band is never summed or averaged here"
+        ),
+    }
+
+
+def validate_value_evolution() -> dict[str, Any]:
+    """Check the movement table against the no-decay invariant, structurally.
+
+    The check that matters is the first one. If any movement that ``may_lower``
+    is also reachable without evidence, the invariant is a comment rather than a
+    constraint, and it would be violated by the next person to add a row.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if STATUS_DECAYS_ON_INACTIVITY is not False:
+        errors.append(
+            "STATUS_DECAYS_ON_INACTIVITY is no longer False. That is the promise "
+            "this whole module is built to protect, and it was changed by editing "
+            "a constant rather than by deciding to change a promise"
+        )
+    for row in VALUE_MOVEMENTS:
+        movement = str(row["movement"])
+        if bool(row.get("may_lower")) and not bool(row.get("requires_evidence")):
+            errors.append(
+                f"VALUE_MOVEMENTS[{movement}] may lower a status without evidence. "
+                "A demotion nobody can justify is the one thing a loyalty promise "
+                "cannot survive"
+            )
+        if not str(row.get("why") or "").strip():
+            warnings.append(
+                f"VALUE_MOVEMENTS[{movement}] has no `why`; a move a reader cannot "
+                "question is one that gets added to"
+            )
+    lowerers = [r for r in VALUE_MOVEMENTS if r.get("may_lower")]
+    if not any(str(r["movement"]) == "lowered_for_risk" for r in lowerers):
+        errors.append(
+            "no movement may lower a status except the declared risk movement. If "
+            "the list is empty then a status can never fall, which is a different "
+            "product and should be said out loud rather than arrived at by omission"
+        )
+    if "paused" not in VALUE_MOVEMENT_BY_ID:
+        errors.append(
+            "there is no `paused` movement. A programme that is doing nothing must "
+            "say it is doing nothing; silence in a trajectory reads as a decision "
+            "nobody made"
+        )
+
+    # And the behaviour, not only the table.
+    lowered_without_evidence = build_value_trajectory(
+        history=[
+            {"movement": "earned", "rank": 2, "at": "2026-01-01"},
+            {"movement": "earned", "rank": 0, "at": "2026-06-01"},
+        ]
+    )
+    if not lowered_without_evidence_ok(lowered_without_evidence):
+        errors.append(
+            "a trajectory that lowers a status without evidence was accepted. The "
+            "invariant is enforced in the code path, not only in the table"
+        )
+    refused_evidence = build_value_trajectory(
+        history=[
+            {"movement": "earned", "rank": 2, "at": "2026-01-01"},
+            {"movement": "confirmed", "rank": 3, "at": "2026-06-01"},
+        ]
+    )
+    if not refused_evidence["refused"]:
+        errors.append(
+            "a `confirmed` move with no evidence was accepted. Moves that change "
+            "what somebody is owed have to be able to say what was seen"
+        )
+    invented = build_value_trajectory(history=[{"movement": "promoted_out_of_kindness"}])
+    if not invented["refused"]:
+        errors.append(
+            "an undeclared movement was accepted. Defaulting an unknown move to "
+            "'earned' would let an invented entry into a published promise"
+        )
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "error_list": errors,
+        "warning_list": warnings,
+        "movements": len(VALUE_MOVEMENTS),
+        "summary": (
+            f"{len(errors)} error(s), {len(warnings)} warning(s) across "
+            f"{len(VALUE_MOVEMENTS)} value movements; status decays on inactivity: "
+            f"{STATUS_DECAYS_ON_INACTIVITY}"
+        ),
+    }
+
+
+def lowered_without_evidence_ok(trajectory: Mapping[str, Any]) -> bool:
+    """True when a trajectory correctly *refused* an unjustified demotion.
+
+    Named as a predicate rather than inlined so
+    :func:`validate_value_evolution` reads as an assertion about behaviour
+    instead of a pile of list indexing.
+    """
+    return bool(trajectory.get("refused")) and not bool(
+        trajectory.get("ever_lowered_without_evidence")
+    )

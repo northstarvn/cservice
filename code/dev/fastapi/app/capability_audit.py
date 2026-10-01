@@ -132,6 +132,10 @@ PROBE_CAPABILITY: dict[str, str] = {
     "personalization_is_purpose_limited": "care_personalization",
     "trusted_device_never_overreaches": "care_personalization",
     "copilot_is_the_default_pane": "relationship_view",
+    # Stage F.
+    "policy_motion_needs_evidence": "policy_motion",
+    "broken_promise_is_visible": "policy_motion",
+    "status_never_decays": "value_evolution",
 }
 
 
@@ -256,6 +260,22 @@ ENGINES: tuple[dict[str, Any], ...] = (
         "target": "resolve_personalization",
         "declared_by": "meta_feature:care_personalization",
         "flows": ("at_risk_customer_recovery", "preference_and_consent_change"),
+    },
+    {
+        "capability_id": "policy_motion",
+        "title": "evidence-based policy motion and trust under continuous change",
+        "root": "app.services.policy_motion",
+        "target": "build_motion",
+        "declared_by": "meta_feature:policy_motion_stage_f",
+        "flows": ("admin_governance_review", "at_risk_customer_recovery"),
+    },
+    {
+        "capability_id": "value_evolution",
+        "title": "how a membership's value evolves, without decaying",
+        "root": "app.services.loyalty_status",
+        "target": "build_value_trajectory",
+        "declared_by": "meta_feature:policy_motion_stage_f",
+        "flows": ("customer_360_review", "dormant_customer_win_back"),
     },
     {
         "capability_id": "relationship_view",

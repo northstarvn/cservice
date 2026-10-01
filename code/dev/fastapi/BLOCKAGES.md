@@ -38,6 +38,19 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   states this in code.
 - **The copilot is the default pane.** Moving off it requires `explicit=True`;
   a default any caller can move by naming a pane is not a default.
+- **A policy motion records and never applies.** `build_motion` sets
+  `applied: False` and `build_motion_ledger` returns `applied: []`. Do not add a
+  write path; an engine that retunes its own table from its own outputs makes that
+  table unauditable.
+- **An unchecked promise is never a held one.** `check_promise_continuity`
+  requires every promise to be verified before reporting `continuity: true`, and
+  a broken promise must name the commitment it broke.
+- **Every `PROMISES` row names a `regression_guard` that is a registered probe.**
+  `validate_trust_continuity` reads `real_life_flows.PROBES` and fails the build
+  otherwise. Do not add a promise with a guard nothing runs.
+- **No value movement may lower a status without evidence**, and only
+  `lowered_for_risk` may lower one at all. A refusal must stay a refusal: a
+  refused move is never reported as an event that occurred.
 - **Acceptance and fulfilment are never combined into one success rate.** High
   acceptance with poor fulfilment is a fulfilment problem, and averaging the two
   points an operator at the offer volume instead of at us.
@@ -361,6 +374,133 @@ healthier and is measurably worse.
   Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
 
 ## Expansion log
+
+### Stage F: why it changed, and whether it still holds (2026-10-01)
+
+Three items. All three exist because of something Stages C and D introduced, and
+that connection is the finding.
+
+#### Why this stage was needed at all
+
+This codebase is full of tables that decide things about people — recovery review
+rules, generosity rules, care weights, loyalty thresholds, complaint severities.
+Every one has been edited at some point and **none left a trace**. That was
+survivable while the edits were rare and reviewed by a human who remembered them.
+
+It stops being survivable the moment something *learns*, which is what Stages C
+and D built: `care_weights` derives emphasis from observed complaints,
+`offer_outcomes` ranks generosity rules by measured fulfilment, `policy_scoring`
+selects rule packs. So the exposure is no longer "somebody edited a table" but
+**"a table can now change itself and nobody downstream can tell what moved or
+why."**
+
+* **Conclusion.** Gap, not defect. No rule was wrong; the ability to reconstruct
+  why one is right was missing.
+* **Suggestion (not applied).** `policy_motion` records a motion's class, the
+  evidence attached, the bar that would have counted, and which promise was in
+  force. It does **not** evaluate whether the evidence was any good, and it
+  applies nothing — Stage D's rule stands unchanged, because an engine that
+  retunes its own table from its own outputs makes that table unauditable. The
+  threshold that decides whether a Wilson bound of 0.62 is good enough for a spend
+  limit belongs in a table a human edits, not in a function.
+
+#### The bar is per class, because consequence is not uniform
+
+| class | example | evidence bar | notify? |
+|---|---|---|---|
+| `coverage_tuning` | region contact windows | `observation`, 20 samples | yes |
+| `emphasis_tuning` | care weights | `observation`, 30 | no |
+| `entitlement_change` | generosity scales | `measured_outcome`, 50 | yes |
+| `status_rule_change` | who counts as Trusted | `measured_outcome`, 100 | yes |
+
+"We looked at the numbers" is sufficient to widen a coverage window and is **not**
+sufficient to change what somebody is owed. A count is not a comparison.
+
+`status_rule_change` is also the only class not reversible by a table edit:
+somebody who was Trusted and is not has been told they were something they are
+not, and no edit takes that back. Hence the largest sample bar and
+`reversible_by: compensation`.
+
+#### An unclassifiable change is a floor, not a verdict
+
+A target this ledger does not recognise is measured against the **strictest**
+class, because the assumption that fails safely is "this may be something we owe
+somebody". But clearing that floor is reported `unknown`, not `sufficient` —
+passing a floor is not the same as knowing what kind of change this is, and
+somebody still has to say what the table governs.
+
+#### Four defects found while building it, all found by validators rather than by reading
+
+| what | how it was caught | why it looked right |
+|---|---|---|
+| the ledger docstring promised insufficient-first; the code returned input order | a test asserting the *order*, after the docstring and the code disagreed | a ledger whose stated order is not its actual order is worse than one that claims nothing — the reader trusts the order and reads past the failures |
+| `check_promise_continuity` returned `not broken`, so "nothing is broken" and "nothing was looked at" were the same answer | its own validator, on an empty input | `not []` is `True`; that is correct Python and the wrong answer |
+| `ever_lowered_without_evidence` counted **refused** entries, so a trajectory that correctly blocked an unjustified demotion reported that a demotion had happened | the validator failed a build whose behaviour was right | a field that reports refused events as if they occurred is read as a finding |
+| the no-decay promise named a guard `status_earned_not_decayed` that **is not a registered probe** | `validate_trust_continuity` reads `PROBES` and fails the build | a promise checked by nothing is an intention. The validator existed precisely to catch this and did, on its first run |
+
+The last is the one worth keeping. Every promise names a `regression_guard`, and
+the validator **reads `real_life_flows.PROBES` rather than trusting the name**. It
+failed on the first run, which is the check earning its place.
+
+#### A process defect, recorded because it corrupted a committed file
+
+A scripted edit that splices a tuple by regex offset corrupted
+`FLOW_CATALOG` three times, and **one of those corruptions was committed** as part
+of Stage E. Two flows carried their `probe_ids` list twice; the duplicate was
+invisible because the file parsed, every probe still resolved, and every test
+passed. A `",,` cleanup intended to remove a stray comma instead joined two
+adjacent string literals — Python's implicit concatenation — producing a probe id
+like `contact_hour_is_localretention_series_builds`.
+
+* **Conclusion.** Defect in the *process*, and one that a passing suite cannot
+  see. Six duplicate bindings and two synthetic probe ids survived a green run.
+* **Suggestion (not applied).** This project's recurring lesson now has a
+  procedural form: prefer exact literal replacement over positional splicing when
+  editing a list of declarations, and re-`import` the module after every scripted
+  edit rather than assuming the edit applied. The audit's
+  `test_every_probe_is_exercised_by_some_flow` would have caught the duplicates
+  had it compared *sets* and also rejected repeats.
+
+#### Item 7 — membership value evolution
+
+The Stages C/D modules each answered a question at one moment. Nobody could
+answer **"why is this different from six months ago"**, which is the only form
+the question takes when a customer asks it. `build_value_trajectory` returns a
+trajectory of *moves* — `earned`, `confirmed`, `paused`, `reinstated`,
+`lowered_for_risk` — and two properties are enforced rather than hoped for:
+
+* **No move lowers a status without evidence.** The no-decay invariant expressed
+  over time rather than over one ledger, because "status never decays" is easy to
+  keep with a single ledger and easy to lose with a history of them.
+* **A gap is reported as a gap.** Long absence produces a `paused` entry rather
+  than nothing, because silence in a trajectory reads as a decision nobody made.
+
+`paused` is the movement that matters most for trust, and it is the one with no
+arithmetic behind it at all.
+
+#### Audit result
+
+Completeness share **0.8889 → 0.8936**; `complete` 40 → 42, `untested` unchanged
+at 4. Three probes added (`status_never_decays`, `policy_motion_needs_evidence`,
+`broken_promise_is_visible`), bound to four flows. `status_never_decays` is the
+guard the `status_is_earned` promise names, and it exists because the trust
+validator refused to accept a promise checked by nothing. 24/24 probes registered,
+every one named by a flow, **0 blockers**, 67/67 subflows.
+
+The share moved by less than a point, and that is the honest number: two new parts
+were measured and the four already-untested ones are the same four. They are
+`blockage_log`, `release_ladder`, `rule_engine` and `topics` — parts that resolve
+and are callable, with no probe whose personas disagree.
+
+**2895 passed.**
+
+Honest limits. The ledger records the evidence it was given; it cannot tell
+whether a comparison was any good, and it has no counterfactual — a motion whose
+evidence shows no change is indistinguishable from one that was never measured.
+`check_promise_continuity` trusts the guard results it is handed, so it reports
+what a probe said rather than re-running it; that is deliberate (it must be cheap
+enough to call on every sweep) and it means a stale guard result would be
+reported as a held promise.
 
 ### Stage E: contact is a regional question (2026-10-01)
 

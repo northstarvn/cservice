@@ -3060,6 +3060,16 @@ class TestTheGateRejectsAnonymous:
         # builds from parts rather than looking them up, and because a view of a
         # customer is exactly what must not be readable by anyone who finds it.
         ("POST", "/kaizen/admin/relationship-view"),
+        # Stage F. `policy-motion` publishes the evidence bar every change to a
+        # policy table has to clear, which is the table a future edit will be
+        # judged against -- so it is read under admin. `trust-continuity` reports
+        # whether a promise still holds; it reads guard results rather than
+        # looking them up, and answers `false` for an unchecked promise rather
+        # than assuming, which is the whole point of it.
+        ("GET", "/kaizen/admin/policy-motion"),
+        ("POST", "/kaizen/admin/policy-motion/ledger"),
+        ("POST", "/kaizen/admin/trust-continuity"),
+        ("POST", "/kaizen/admin/value-trajectory"),
     ]
 
     def test_every_kaizen_route_refuses_an_unauthenticated_caller(self):
@@ -3112,6 +3122,10 @@ class TestTheGateRejectsAnonymous:
         "/kaizen/admin/care-personalization": "/kaizen/admin/care-personalization",
         "/kaizen/admin/relationship-catalog": "/kaizen/admin/relationship-catalog",
         "/kaizen/admin/relationship-view": "/kaizen/admin/relationship-view",
+        "/kaizen/admin/policy-motion": "/kaizen/admin/policy-motion",
+        "/kaizen/admin/policy-motion/ledger": "/kaizen/admin/policy-motion/ledger",
+        "/kaizen/admin/trust-continuity": "/kaizen/admin/trust-continuity",
+        "/kaizen/admin/value-trajectory": "/kaizen/admin/value-trajectory",
     }
 
     def test_the_list_is_the_whole_router(self):

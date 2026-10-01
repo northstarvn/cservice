@@ -626,6 +626,73 @@ async def relationship_view(
 
 
 # ---------------------------------------------------------------------------
+# Stage F: policy motion, and trust under continuous change
+# ---------------------------------------------------------------------------
+
+
+@router.get("/kaizen/admin/policy-motion")
+async def policy_motion_catalog(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The motion classes and the evidence bar each one has to clear."""
+    from app.services import policy_motion
+
+    return {
+        **policy_motion.build_trust_catalog(),
+        "motion_validation": policy_motion.validate_policy_motion(),
+        "trust_validation": policy_motion.validate_trust_continuity(),
+        "note": (
+            "records proposals and reports whether their evidence clears the bar. "
+            "applies nothing. an engine that retunes its own table from its own "
+            "outputs makes that table unauditable"
+        ),
+    }
+
+
+@router.post("/kaizen/admin/policy-motion/ledger")
+async def policy_motion_ledger(
+    payload: dict,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Build a motion ledger from proposed changes, failures first."""
+    from app.services import policy_motion
+
+    return policy_motion.build_motion_ledger(payload.get("motions") or ())
+
+
+@router.post("/kaizen/admin/trust-continuity")
+async def trust_continuity(
+    payload: dict,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Does what we promise now still hold for somebody who believed it before?
+
+    A POST because the answer depends on guard results the caller supplies from a
+    run. It returns ``continuity: false`` for an unchecked promise rather than
+    assuming, because 'nothing is broken' and 'nothing was looked at' must not be
+    the same answer.
+    """
+    from app.services import policy_motion
+
+    return policy_motion.check_promise_continuity(
+        payload.get("promises") or (), guards=payload.get("guards") or {}
+    )
+
+
+@router.post("/kaizen/admin/value-trajectory")
+async def value_trajectory(
+    payload: dict,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """How a membership's value got where it is, and which moves were refused."""
+    from app.services import loyalty_status
+
+    return loyalty_status.build_value_trajectory(
+        history=payload.get("history") or (), now=payload.get("now")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Stage C: loyalty status, relationship health, the orchestrator, the copilot
 # ---------------------------------------------------------------------------
 

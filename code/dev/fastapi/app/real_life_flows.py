@@ -1263,6 +1263,167 @@ def _probe_relationship_view_default_pane(persona: Persona) -> ProbeOutcome:
     )
 
 
+# ---------------------------------------------------------------------------
+# Stage F probes
+# ---------------------------------------------------------------------------
+
+
+def _probe_status_never_decays(persona: Persona) -> ProbeOutcome:
+    """A status must not fall for inactivity, whatever the rule table says.
+
+    This is the guard the trust module names, and it is a guard rather than a
+    test because the invariant is structural: there is no decay field and no
+    calendar transition. The probe asserts the *structure*, then asserts the
+    behaviour for each persona's own inactivity, because a constant that reads
+    False while a rule still decays would pass a structure-only check.
+
+    Personas differ in how long they have been away, so a decay rule keyed on
+    elapsed days would show up here.
+    """
+    from app.services import loyalty_status
+
+    resolve_loyalty_status = loyalty_status.resolve_loyalty_status
+    reasons: list[str] = []
+    if loyalty_status.STATUS_DECAYS_ON_INACTIVITY is not False:
+        reasons.append(
+            "STATUS_DECAYS_ON_INACTIVITY is no longer False. That constant is the "
+            "promise, and changing it is a product decision, not an edit"
+        )
+    for row in loyalty_status.LOYALTY_STATUS_RULES:
+        if "decay" in row:
+            reasons.append(
+                f"status {row.get('status_id')!r} carries a `decay` field, which is "
+                "the shape the invariant exists to forbid"
+            )
+    away = int(persona.days_since_last_activity or 0)
+    ledger = {
+        "tier": "gold",
+        "reported_tier": "gold",
+        "unscored": False,
+        "days_since_last_activity": away,
+    }
+    now = resolve_loyalty_status(ledger)
+    decade = resolve_loyalty_status({**ledger, "days_since_last_activity": 3650})
+    if decade.get("status_id") != now.get("status_id"):
+        reasons.append(
+            f"a ten-year absence moved {now.get('status_id')!r} to "
+            f"{decade.get('status_id')!r}. Ten years of not calling is not a "
+            "demotion offence"
+        )
+    return _outcome(
+        "status_never_decays",
+        persona,
+        not reasons,
+        f"absent {away}d -> {now.get('status_id')!r}; absent 3650d -> "
+        f"{decade.get('status_id')!r}",
+        observed={"days_away": away, "status": now.get("status_id"),
+                  "status_after_10y": decade.get("status_id"),
+                  "decays_on_inactivity": loyalty_status.STATUS_DECAYS_ON_INACTIVITY},
+        expected={"status_after_10y": now.get("status_id")},
+        error="; ".join(reasons),
+    )
+
+
+def _probe_policy_motion_needs_evidence(persona: Persona) -> ProbeOutcome:
+    """A change to what somebody is owed needs evidence, not an opinion.
+
+    Personas differ in the evidence they attach, so a ledger that accepted
+    everything -- or refused everything -- would produce a constant answer and be
+    graded partial rather than complete.
+    """
+    from app.services import policy_motion
+
+    attachments = {
+        "loyal_with_points": [{"kind": "measured_outcome", "samples": 400}],
+        "abandoned_pending": [{"kind": "observation", "samples": 40}],
+        "at_risk_high_value": [{"kind": "opinion", "samples": 400}],
+        "repeatedly_cancelled": [],
+    }
+    evidence = attachments.get(persona.persona_id, [])
+    motion = policy_motion.build_motion(
+        target="app.services.loyalty_status.LOYALTY_STATUS_RULES",
+        evidence=evidence,
+        reason="retuning the status rule",
+        proposed_by="analytics",
+    )
+    sufficient = bool(evidence) and str(evidence[0]["kind"]) == "measured_outcome"
+    reasons: list[str] = []
+    if (motion["verdict"] == "sufficient") != sufficient:
+        reasons.append(
+            f"{evidence!r} gave {motion['verdict']!r}; status_rule_change needs "
+            "measured_outcome at 100 samples, so this should be "
+            f"{'sufficient' if sufficient else 'insufficient'}"
+        )
+    if motion["applied"] is not False:
+        reasons.append("the motion claims to have been applied; it must never be")
+    return _outcome(
+        "policy_motion_needs_evidence",
+        persona,
+        not reasons,
+        f"{len(evidence)} evidence item(s) -> {motion['verdict']}",
+        observed={"evidence": evidence, "verdict": motion["verdict"],
+                  "class_id": motion["class_id"]},
+        expected={"verdict": "sufficient" if sufficient else "insufficient"},
+        error="; ".join(reasons),
+    )
+
+
+def _probe_broken_promise_is_visible(persona: Persona) -> ProbeOutcome:
+    """A broken promise must be reported, and an unchecked one must not read as held.
+
+    Personas differ in which guard is failing, so a continuity function that
+    always returned True would agree with every persona here and be caught by the
+    constant-answer detector.
+    """
+    from app.services import policy_motion
+
+    failing = {
+        "loyal_with_points": "status_never_decays",
+        "abandoned_pending": "contact_hour_is_local",
+    }.get(persona.persona_id)
+    guards = {
+        str(row["regression_guard"]): True
+        for row in policy_motion.PROMISES
+        if str(row["regression_guard"]) != failing
+    }
+    if failing:
+        guards[failing] = False
+    declared = [{"promise_id": pid} for pid in policy_motion.PROMISE_IDS]
+    report = policy_motion.check_promise_continuity(declared, guards=guards)
+    reasons: list[str] = []
+    if failing:
+        if report["continuity"] is not False:
+            reasons.append(
+                f"{failing!r} is failing but continuity is {report['continuity']}. A "
+                "broken promise nobody can see is the same as one never made"
+            )
+        if not report["broken"]:
+            reasons.append("the broken promise is not listed")
+        for row in report["broken"]:
+            if not str(row.get("commitment") or "").strip():
+                reasons.append(
+                    "a broken promise is reported without the commitment it broke, so "
+                    "a reader learns that something broke and not what"
+                )
+    elif report["unverified"]:
+        reasons.append(
+            f"guards all True still leaves {len(report['unverified'])} unverified"
+        )
+    return _outcome(
+        "broken_promise_is_visible",
+        persona,
+        not reasons,
+        f"failing={failing or 'none'}: continuity={report['continuity']}, "
+        f"{len(report['broken'])} broken, {len(report['unverified'])} unverified",
+        observed={"failing_guard": failing or "",
+                  "continuity": report["continuity"],
+                  "broken": [r["promise_id"] for r in report["broken"]],
+                  "unverified": len(report["unverified"])},
+        expected={"continuity": False if failing else True},
+        error="; ".join(reasons),
+    )
+
+
 PROBES: dict[str, Probe] = {
     "access_band_resolves": _probe_access_band,
     "access_band_matches_thresholds": _probe_band_spread,
@@ -1285,6 +1446,9 @@ PROBES: dict[str, Probe] = {
     "personalization_is_purpose_limited": _probe_purpose_limited_personalization,
     "trusted_device_never_overreaches": _probe_trusted_device_respects_the_gate,
     "copilot_is_the_default_pane": _probe_relationship_view_default_pane,
+    "status_never_decays": _probe_status_never_decays,
+    "policy_motion_needs_evidence": _probe_policy_motion_needs_evidence,
+    "broken_promise_is_visible": _probe_broken_promise_is_visible,
 }
 PROBE_IDS: tuple[str, ...] = tuple(sorted(PROBES))
 
@@ -1346,10 +1510,11 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
             "recovery_lifecycle_stage",
             "recovery_never_withholds_a_fix",
             "consent_gate_excludes_service",
-        
-            "recovery_lifecycle_stage",
-            "recovery_never_withholds_a_fix",
-            "consent_gate_excludes_service", "contact_hour_is_local", "personalization_is_purpose_limited", "trusted_device_never_overreaches"),
+            "contact_hour_is_local",
+            "personalization_is_purpose_limited",
+            "trusted_device_never_overreaches",
+            "policy_motion_needs_evidence",
+        ),
         "surfaces": ("/chat/admin/recovery/playbooks", "/chat/admin/recovery-guards"),
         "invariant": (
             "a customer who reported a problem is never refused a fix because of a "
@@ -1370,10 +1535,9 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
             "retention_series_builds",
             "retention_health_bands",
             "forecast_confidence_decays",
-        
-            "retention_series_builds",
-            "retention_health_bands",
-            "forecast_confidence_decays", "contact_hour_is_local"),
+            "contact_hour_is_local",
+            "status_never_decays",
+        ),
         "surfaces": ("/chat/admin/retention-health", "/chat/admin/retention-forecast"),
         "invariant": "forecast confidence decays with horizon and with sample size",
         "description": (
@@ -1442,7 +1606,11 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "support_agent",
         "personas": ("loyal_with_points", "abandoned_pending", "repeatedly_cancelled"),
         "subflows": ("classify_topic", "apply_route_policy", "check_capacity", "respond"),
-        "probe_ids": ("rule_pack_selects", "access_band_matches_thresholds", "copilot_is_the_default_pane"),
+        "probe_ids": (
+            "rule_pack_selects",
+            "access_band_matches_thresholds",
+            "copilot_is_the_default_pane",
+        ),
         "surfaces": ("/topics/plan", "/topics/governance/routes"),
         "invariant": "a score just under a band boundary reports the band it missed and by how much",
         "description": (
@@ -1457,7 +1625,12 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "admin",
         "personas": ("admin_console",),
         "subflows": ("classify_routes", "validate_ladder", "read_blockages", "release_shadow"),
-        "probe_ids": ("authz_routes_classified", "shadow_is_one_way"),
+        "probe_ids": (
+            "authz_routes_classified",
+            "shadow_is_one_way",
+            "policy_motion_needs_evidence",
+            "broken_promise_is_visible",
+        ),
         "surfaces": ("/meta/authz", "/kaizen/admin/catalog", "/kaizen/admin/shadow"),
         "invariant": (
             "every live route is classified, and the shadow is provably unable to "
@@ -1488,7 +1661,13 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "customer",
         "personas": ("loyal_with_points", "repeatedly_cancelled", "dormant_45_days"),
         "subflows": ("aggregate_sections", "build_communication", "explain_decisions"),
-        "probe_ids": ("retention_health_bands", "recovery_lifecycle_stage", "copilot_is_the_default_pane"),
+        "probe_ids": (
+            "retention_health_bands",
+            "recovery_lifecycle_stage",
+            "copilot_is_the_default_pane",
+            "status_never_decays",
+            "broken_promise_is_visible",
+        ),
         "surfaces": ("/chat/customer-360", "/chat/me/explanations"),
         "invariant": "a section that could not be built is named rather than omitted",
         "description": (

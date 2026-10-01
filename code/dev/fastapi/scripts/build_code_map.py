@@ -309,6 +309,13 @@ TREE = _node(
         # and device-care tables, and the view with its pane default. Under the
         # release router for the reason Stages C and D are -- these are all
         # answers to "what is built, and what does it permit".
+        # Stage F. Four admin surfaces: the motion/evidence tables, a ledger
+        # builder, the trust-continuity check, and the value trajectory. All
+        # admin-gated for the same reason -- they publish the standard a future
+        # change will be judged against, and who holds it to account is not public.
+        _node("kaizen_stage_f",
+              "policy_motion_catalog", "policy_motion_ledger",
+              "trust_continuity", "value_trajectory"),
         _node("kaizen_stage_e",
               "region_catalog", "care_personalization_catalog",
               "relationship_catalog", "relationship_view"),
@@ -410,7 +417,14 @@ TREE = _node(
               "status_rules", "status_tiers", "status_resolution",
               "experiential_signals", "experiential_ledger", "tier_resolution",
               "investment_bands", "risk_inversion", "investment_band",
-              "investment_context", "validation", "catalog"),
+              "investment_context",
+              # Stage F, item 7: a trajectory of moves rather than a series of
+              # scores. `build_value_trajectory` refuses an unjustified
+              # demotion, which is the no-decay invariant expressed over time
+              # instead of over a single ledger.
+              "value_movements", "value_movement", "value_trajectory",
+              "value_evolution_validation",
+              "validation", "catalog"),
         # Stage D, part 2: learned complaint weights -> how we care next.
         # Emphasis, not verdict. The three refusals (severity, tier,
         # auto-escalate) are read from complaint_learning's authority table by
@@ -458,6 +472,14 @@ TREE = _node(
               "panes", "standing", "pane_resolution", "what_is_true",
               "journey_lines", "offer_outcome_lines", "open_commitments",
               "contact_gate", "view", "render", "validation", "catalog"),
+        # Stage F, items 6 and 8. A changelog records that a thing changed; this
+        # records the evidence that was present, the bar that would have counted
+        # as sufficient, and which promise was in force at the time. It applies
+        # nothing, and `applied` is False on every motion it builds.
+        _node("policy_motion",
+              "motion_classes", "evidence_kinds", "classification", "motion",
+              "verdict", "ledger", "promises", "continuity", "broken",
+              "unverified", "motion_validation", "trust_validation", "catalog"),
         _node("journey_orchestrator",
               "stages", "transitions", "stage_purpose", "stage_timeboxes",
               "initial_state", "precondition_hash", "transition_resolution",

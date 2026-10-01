@@ -568,6 +568,11 @@ found it silently out by seven leaves.
       learning_publish,
       learning_blockages)
     complaints,
+      (policy_motion_catalog,
+      policy_motion_ledger,
+      trust_continuity,
+      value_trajectory)
+    kaizen_stage_f,
       (region_catalog,
       care_personalization_catalog,
       relationship_catalog,
@@ -800,6 +805,10 @@ found it silently out by seven leaves.
       risk_inversion,
       investment_band,
       investment_context,
+      value_movements,
+      value_movement,
+      value_trajectory,
+      value_evolution_validation,
       validation,
       catalog)
     loyalty_status,
@@ -882,6 +891,20 @@ found it silently out by seven leaves.
       validation,
       catalog)
     relationship_view,
+      (motion_classes,
+      evidence_kinds,
+      classification,
+      motion,
+      verdict,
+      ledger,
+      promises,
+      continuity,
+      broken,
+      unverified,
+      motion_validation,
+      trust_validation,
+      catalog)
+    policy_motion,
       (stages,
       transitions,
       stage_purpose,
