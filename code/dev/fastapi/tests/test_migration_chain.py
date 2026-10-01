@@ -39,6 +39,7 @@ CHAIN = (
     "20260929_01_add_preference_consent_tables.py",
     "20260930_01_add_complaint_cases.py",
     "20260930_02_sync_remaining_schema.py",
+    "20260930_03_add_complaint_learning.py",
 )
 
 #: The tables the *first* migration creates, before any delta runs. Used to
@@ -87,6 +88,35 @@ def chain_db(tmp_path):
     finally:
         conn.close()
         engine.dispose()
+
+
+def test_the_chain_lists_every_migration_file_on_disk():
+    """`CHAIN` is hand-maintained, and nothing checked it against the directory.
+
+    The omission is silent in the worst way: the new migration applies cleanly on
+    its own, so a developer testing it in isolation sees it work, while
+    `test_the_chain_builds_every_table_the_models_declare` reports the new tables
+    as "never created" with no hint that a file was simply left off a list. That
+    is exactly how `complaint_signal_weights` and its two siblings were built,
+    verified, and still missing from every migrated database.
+
+    The one legitimate reason for a file to be absent from `CHAIN` is being
+    archived -- `alembic/archived/` holds revisions that were removed from the
+    chain on purpose, and those are excluded by looking only in `versions/`.
+    """
+    versions = pathlib.Path(__file__).resolve().parents[1] / "alembic" / "versions"
+    on_disk = {
+        path.name
+        for path in versions.glob("*.py")
+        if not path.name.startswith("_")
+    }
+    assert on_disk - set(CHAIN) == set(), (
+        "these migration files exist but are not in CHAIN, so they never run "
+        f"against a migrated database: {sorted(on_disk - set(CHAIN))}"
+    )
+    assert set(CHAIN) - on_disk == set(), (
+        f"CHAIN names files that do not exist: {sorted(set(CHAIN) - on_disk)}"
+    )
 
 
 def test_the_chain_upgrades_from_an_empty_database(chain_db):

@@ -80,7 +80,7 @@ work on a real database:
      value too long for type character varying(32)
    ```
 
-   Ids are now short and opaque (`0001_initial` ... `0007_sync_remaining_schema`);
+   Ids are now short and opaque (`0001_initial` ... `0008_complaint_learning`);
    the date and description live in the filename. `test_migration_chain.py`
    asserts every id fits.
 3. **`recreate="always"` on PostgreSQL.** `20260905_01` forces a batch rebuild
@@ -122,6 +122,22 @@ in sync: the database matches Base.metadata
 | `0005_preference_consent` | `user_preference_profiles`, `user_consent_events` |
 | `0006_complaints` | `complaint_cases`, `complaint_events`, `complaint_decisions` |
 | `0007_sync_remaining_schema` | the ten tables the hand-written chain never covered |
+| `0008_complaint_learning` | `complaint_signal_weights`, `complaint_signal_observations`, `complaint_improvement_proposals` |
+
+### A migration file that is not in `CHAIN` never runs
+
+`tests/test_migration_chain.py` keeps a hand-maintained tuple of filenames called
+`CHAIN`, and for a while nothing compared it to the directory. A migration omitted
+from that tuple still applies perfectly in isolation — which is how it gets
+verified — while `alembic upgrade head` never runs it, so the tables it creates
+simply do not exist in a migrated database. `test_the_chain_builds_every_table_the
+_models_declare` then reports the missing tables without any hint that a file was
+left off a list.
+
+`0008_complaint_learning` was written that way and caught by exactly that test.
+`test_the_chain_lists_every_migration_file_on_disk` now fails if the two ever
+disagree, so **adding a migration means adding it to `CHAIN` in the same commit**
+— and the test will tell you if you forget.
 
 ### `alembic/env.py` also had to be fixed
 

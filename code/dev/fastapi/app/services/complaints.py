@@ -1505,6 +1505,20 @@ DECISION_FEEDS: list[dict[str, Any]] = [
         "async_only": False,
         "description": "Which guards passed, which are blocking, and whether the audit chain is intact.",
     },
+    {
+        "feed_id": "loyalty_contribution",
+        "label": "Learned loyalty contribution",
+        "kind": "historical",
+        "source": "complaint_signal_weights + complaint_signal_observations",
+        "required": False,
+        "async_only": True,
+        "description": (
+            "Which factors contributed to this case and how much each is worth, "
+            "using weights learned from what happened to customers after their "
+            "complaints closed. Advisory: it reorders and explains, it never sets "
+            "a tier. See complaint_learning.LEARNED_WEIGHT_AUTHORITY."
+        ),
+    },
 ]
 DECISION_FEED_BY_ID: dict[str, dict[str, Any]] = {
     str(row["feed_id"]): dict(row) for row in DECISION_FEEDS
@@ -1524,6 +1538,11 @@ DECISION_FEED_STALE_AFTER_SECONDS: dict[str, int] = {
     "external": 300,
     "communication_constraints": 86400,
     "governance": 300,
+    # A weight is a belief about a population, so it is stale in the same units as
+    # a relationship snapshot rather than on a 5-minute cache. Presenting a
+    # three-week-old weight as a current one would misrepresent exactly the thing
+    # the feed exists to make auditable.
+    "loyalty_contribution": 86400,
 }
 
 
@@ -1927,6 +1946,8 @@ def _probe_scope(**overrides: Any) -> dict[str, Any]:
         "regulatory_hours_remaining": 720.0,
         "regulatory": False,
         "resolved": False,
+        "acknowledged": False,
+        "open_only": True,
         "no_owner": False,
         "has_owner": True,
         "open_complaints": 0,
@@ -1985,6 +2006,8 @@ def _produced_context_keys() -> set[str]:
         "regulatory_hours_remaining",
         "regulatory",
         "resolved",
+        "acknowledged",
+        "open_only",
         "no_owner",
         "has_owner",
         "open_complaints",
@@ -2605,6 +2628,13 @@ async def collect_complaint_context(
         "regulatory_hours_remaining": None if statutory_hours_remaining is None else round(statutory_hours_remaining, 3),
         "regulatory": regulatory,
         "resolved": str(payload.get("status")) in COMPLAINT_RESOLVED_STATUSES,
+        # `acknowledged` and `open_only` exist for the system-raised detectors in
+        # complaint_learning. "Unanswered" is not the same as "unacknowledged",
+        # and the difference is the whole basis of the SLA-breach detector: a case
+        # nobody has even looked at is the one worth opening a system complaint
+        # about, whereas a case that is in progress and simply old is not.
+        "acknowledged": payload.get("acknowledged_at") is not None,
+        "open_only": str(payload.get("status")) not in COMPLAINT_TERMINAL_STATUSES,
         "no_owner": not payload.get("owner_user_id") and not payload.get("owner_team"),
         "has_owner": bool(payload.get("owner_user_id")) or bool(payload.get("owner_team")),
         "owner_user_id": payload.get("owner_user_id"),
@@ -2632,6 +2662,68 @@ async def collect_complaint_context(
         "resolved_stale_hours": round(resolved_stale, 3),
         "severity_understated_by": severity_understated_by,
     }
+    # --- learned loyalty contribution -----------------------------------------
+    # Imported inside the block on purpose. `complaint_learning` imports from this
+    # module at the top, so a module-level import here would be a cycle; a
+    # function-local import is the honest way to express a one-way dependency
+    # that the rest of this module does not need.
+    #
+    # The feed is advisory by construction. It reports the ranking and the
+    # weights behind it, and it is deliberately absent from `context` -- nothing
+    # downstream of here reads a learned number to reach a tier. That is the
+    # enforcement behind LEARNED_WEIGHT_AUTHORITY: the weight is not in the
+    # context the triggers are evaluated against, so it *cannot* move a tier even
+    # by accident.
+    from app.services import complaint_learning as _cl
+
+    try:
+        _weights = await _cl.load_weight_map(db)
+        # The stored stats, not just the numbers: `load_weight_map` returns an
+        # entry for every configured signal whether or not it has ever been
+        # observed, so counting its keys would report 17 learned weights on a
+        # cold database and the operator would have no way to tell.
+        _stored = await _cl.load_learned_weights(db)
+        _scored = _cl.score_contributions(context, _weights)
+        _learned = [
+            {
+                "signal_id": str(c["signal_id"]),
+                "weight": float(c["weight"]),
+                "direction": str(c["direction"]),
+                "label": str(c["label"]),
+            }
+            for c in _scored["contributions"]
+        ]
+        feeds["loyalty_contribution"] = {
+            "available": bool(_learned),
+            "observed": {
+                "contributions": _learned,
+                "loyalty_damage": _scored["loyalty_damage"],
+                "loyalty_protection": _scored["loyalty_protection"],
+                "top_signal_id": _scored["top_signal_id"],
+                "signals_learned": sum(
+                    1 for stat in _stored.values() if int(stat.get("observations", 0)) > 0
+                ),
+                "signals_configured": len(_cl.LOYALTY_SIGNALS),
+                "advisory": True,
+            },
+            "confidence": 1.0 if _learned else 0.0,
+            "citation": "complaint_signal_weights + complaint_signal_observations",
+            "observed_at": moment,
+            "gap": "" if _learned else "no contributing signal for this case",
+            "note": (
+                "advisory. Reorders and explains recommendations; never sets a tier "
+                "or triggers an escalation on its own"
+            ),
+        }
+    except SQLAlchemyError as exc:
+        gaps.append("loyalty_contribution")
+        feeds["loyalty_contribution"] = {
+            "available": False,
+            "gap": f"learned contribution unavailable: {exc}",
+            "citation": "complaint_signal_weights",
+            "note": "advisory feed; its absence does not change the tier decision",
+        }
+
     return {"context": context, "feeds": feeds, "gaps": sorted(set(gaps)), "case": payload}
 
 

@@ -552,7 +552,13 @@ class TestDecisionDossier:
     def test_declared_feeds_are_exactly_the_registry(self):
         """The dossier's feed set is the published registry, not a private list."""
         assert {f["feed_id"] for f in C.DECISION_FEEDS} == set(C.DECISION_FEED_BY_ID)
-        assert len(C.DECISION_FEEDS) == 10
+        # 10 pre-existing feeds plus `loyalty_contribution`, the advisory learned
+        # -weight feed. It is `required: False` on purpose: a weight table that has
+        # not learned anything yet must degrade the dossier's *explanation*, never
+        # the tier the triggers already decided.
+        assert len(C.DECISION_FEEDS) == 11
+        assert C.DECISION_FEED_BY_ID["loyalty_contribution"]["required"] is False
+        assert C.DECISION_FEED_BY_ID["loyalty_contribution"]["async_only"] is True
         # And every declared feed is reachable from the registry by kind.
         for kind in C.DECISION_FEED_KINDS:
             assert all(
@@ -1588,8 +1594,16 @@ class TestRoutes:
 
         inventory = deps.authz_route_inventory(app.routes)
         rows = [r for r in inventory if "complaint" in r["path"]]
-        assert len(rows) == 18
+        # 18 original routes plus the 12 complaint-learning endpoints. The count
+        # is pinned because a route that nobody counted is a route nobody looked
+        # at, and the failure mode it guards is a path that matches no rule and
+        # falls through to the catch-all.
+        assert len(rows) == 30
         assert all(r["delta"] == "match" for r in rows)
+        # And the learning surface is classified as one group, not by luck.
+        learning = [r for r in rows if "/complaints/admin/learning/" in r["path"]]
+        assert len(learning) == 12, sorted(r["path"] for r in learning)
+        assert all(r["rule_id"] == "complaints_admin" for r in learning)
 
     def test_the_admin_surface_is_admin_exposure(self):
         from app import deps
@@ -1597,9 +1611,16 @@ class TestRoutes:
 
         inventory = deps.authz_route_inventory(app.routes)
         admin = [r for r in inventory if r["path"].startswith("/complaints/admin")]
-        assert len(admin) == 5
+        # 5 original admin routes plus the 12 learning endpoints. All of them
+        # open cases, move learned weights, or register suggestions on the
+        # release ladder, so none of them can be anything but admin.
+        assert len(admin) == 17
         for row in admin:
             assert row["exposure"] == "admin", row["path"]
+            # The exposure label alone is not the guarantee. The `meta_surface`
+            # defect in the release-ladder work was a path classified as admin
+            # with no security dependency bound, so the check both the label and
+            # the binding assert.
             assert "get_current_admin_user" in row["actual_by"], row["path"]
 
     def test_the_customer_surface_is_caller_scoped(self):

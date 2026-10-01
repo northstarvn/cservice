@@ -624,6 +624,124 @@ class ComplaintDecision(Base, TimestampMixin):
     outcome_recorded_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class ComplaintSignalWeight(Base, TimestampMixin):
+    """The learned contribution weight for one complaint signal.
+
+    One row per `signal_id` in `services/complaint_learning.LOYALTY_SIGNALS`.
+    Persisted rather than held in module state on purpose: `risk_evaluator`
+    keeps its adaptive weights in a process-local dict, which means a restart
+    resets what the system learned from every complaint it has ever handled.
+    A weight that has to survive a deploy to count is a weight nobody can audit,
+    so this is a table with an explicit version and an observation count.
+
+    `weight` is the current value; `prior_weight` is where the configured
+    starting point sits, so decay has a destination and the "why is it this
+    number" question always has an answer. `confidence` is observations scaled
+    by agreement, and it is reported rather than acted on -- see
+    `LEARNED_WEIGHT_AUTHORITY` for why a learned weight cannot move a tier.
+    """
+
+    __tablename__ = "complaint_signal_weights"
+    __table_args__ = (
+        CheckConstraint("weight >= 0", name="ck_complaint_signal_weights_weight_non_negative"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1",
+                        name="ck_complaint_signal_weights_confidence_in_range"),
+        CheckConstraint("observations >= 0", name="ck_complaint_signal_weights_observations_non_negative"),
+        UniqueConstraint("signal_id", name="uq_complaint_signal_weights_signal"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(String(60), nullable=False, index=True)
+    weight = Column(Float, nullable=False, default=1.0)
+    prior_weight = Column(Float, nullable=False, default=1.0)
+    confidence = Column(Float, nullable=False, default=0.0)
+    observations = Column(Integer, nullable=False, default=0)
+    agreements = Column(Integer, nullable=False, default=0)
+    disagreements = Column(Integer, nullable=False, default=0)
+    # Bumped on every learning pass so a stale cache is detectable rather than
+    # silently wrong.
+    version = Column(Integer, nullable=False, default=1)
+    last_outcome_at = Column(DateTime(timezone=True), nullable=True)
+    note = Column(Text, nullable=False, default="")
+
+
+class ComplaintSignalObservation(Base, TimestampMixin):
+    """Append-only: one signal contributing to one case, and what came of it.
+
+    This is the learning set. Kept as rows rather than a running average on the
+    weight table for two reasons: the training signal has to be re-derivable when
+    the weighting rule changes, and a reviewer has to be able to answer "why
+    does ``sentiment_cliff`` weigh 1.8" by reading rows rather than trusting an
+    aggregate.
+
+    ``loyalty_outcome`` is measured against the retention objective, not against
+    "was the complaint closed". A resolution the customer then abandoned is a
+    failure and is recorded as one.
+    """
+
+    __tablename__ = "complaint_signal_observations"
+    __table_args__ = (
+        CheckConstraint("observations_snapshot >= 0",
+                        name="ck_complaint_signal_observations_count_non_negative"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    complaint_id = Column(Integer, ForeignKey("complaint_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    signal_id = Column(String(60), nullable=False, index=True)
+    # The weight at the moment the decision was taken, so a later re-weighting
+    # cannot retroactively change what the operator was shown.
+    weight_snapshot = Column(Float, nullable=False, default=1.0)
+    confidence_snapshot = Column(Float, nullable=False, default=0.0)
+    observations_snapshot = Column(Integer, nullable=False, default=0)
+    loyalty_outcome = Column(String(40), nullable=False, default="", index=True)
+    loyalty_delta = Column(Float, nullable=False, default=0.0)
+    # The evidence that produced the outcome, frozen with it.
+    evidence_json = Column(Text, nullable=False, default="{}")
+    # Set when this observation is superseded by a later one for the same pair,
+    # so a re-observation does not double-count.
+    superseded = Column(Boolean, nullable=False, default=False, index=True)
+    observed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ComplaintImprovementProposal(Base, TimestampMixin):
+    """A durable improvement suggestion derived from stacked complaints.
+
+    Durable because the detection is a pure function of complaint history: run
+    it twice on the same data and it must produce the same proposal id, and a
+    human who has already seen and dismissed one should not have it reappear on
+    the next sweep. `proposal_id` is therefore a deterministic hash of the
+    cluster's identity, and `status` records what happened to it.
+    """
+
+    __tablename__ = "complaint_improvement_proposals"
+    __table_args__ = (
+        # No invented check here. The cluster's case count, distinct-user count
+        # and reopen rate are *evidence*, and they live in `evidence_json`
+        # because they are computed at detection time and re-read verbatim;
+        # a CHECK on a column the table does not have is worse than no check,
+        # since it reads as a guarantee that was never enforced.
+        UniqueConstraint("proposal_id", name="uq_complaint_improvement_proposals_proposal"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    proposal_id = Column(String(80), nullable=False, index=True)
+    cluster_key = Column(String(120), nullable=False, index=True)
+    title = Column(String(255), nullable=False, default="")
+    component = Column(String(80), nullable=False, default="", index=True)
+    owner_hint = Column(String(80), nullable=False, default="")
+    priority = Column(String(20), nullable=False, default="medium", index=True)
+    impact = Column(String(20), nullable=False, default="medium")
+    effort = Column(String(20), nullable=False, default="medium")
+    rationale_json = Column(Text, nullable=False, default="[]")
+    recommended_action = Column(Text, nullable=False, default="")
+    signals_json = Column(Text, nullable=False, default="[]")
+    evidence_json = Column(Text, nullable=False, default="{}")
+    status = Column(String(30), nullable=False, default="detected", index=True)
+    # The release-ladder candidate this proposal was published as, if any.
+    candidate_id = Column(String(80), nullable=False, default="", index=True)
+
+
 # =============================================================================
 # Metadata layer: what the schema above means, and what it does not protect
 # =============================================================================
@@ -818,6 +936,10 @@ TABLE_FIELD_SENSITIVITY: dict[str, str] = {
     # in this family that belongs in a bulk export.
     "complaint_cases.satisfaction_score": "behavioral",
     "complaint_cases.reopened_count": "behavioral",
+    "complaint_signal_weights.signal_id": "internal",
+    "complaint_signal_observations.signal_id": "internal",
+    "complaint_improvement_proposals.recommended_action": "content",
+    "complaint_improvement_proposals.cluster_key": "internal",
 }
 
 # --- JSON payload columns ----------------------------------------------------
@@ -1217,6 +1339,32 @@ ENUM_FIELD_SPECS: dict[str, dict[str, Any]] = {
             "because the next decision supersedes it instead"
         ),
     },
+    "complaint_signal_observations.loyalty_outcome": {
+        "enum": None,
+        "values": ("", "retained", "re-engaged", "neutral", "dormant", "churned"),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"stayed": "retained", "returned": "re-engaged", "left": "churned"},
+        "note": (
+            "the vocabulary is LOYALTY_OUTCOMES in services/complaint_learning.py. "
+            "It is deliberately NOT complaint lifecycle vocabulary: 'resolved' is "
+            "a complaint outcome, 'retained' is a loyalty one, and conflating them "
+            "is how a system ends up confident about resolutions the customer "
+            "walked away from"
+        ),
+    },
+    "complaint_improvement_proposals.status": {
+        "enum": None,
+        "values": ("detected", "published", "acknowledged", "dismissed"),
+        "enforced": False,
+        "enforced_by": None,
+        "aliases": {"new": "detected", "open": "detected", "rejected": "dismissed"},
+        "note": (
+            "a proposal is 'dismissed' by a human, and dismissal is recorded "
+            "rather than achieved by the row disappearing, so the same cluster can "
+            "be re-detected without the decision being silently reversed"
+        ),
+    },
     "complaint_decisions.outcome_observed": {
         "enum": None,
         "values": ("", "held", "resolved", "reopened", "escalated_further", "complainant_left", "no_contact"),
@@ -1332,6 +1480,39 @@ TABLE_LIFECYCLE: dict[str, dict[str, Any]] = {
             "the institutional memory. outcome_observed is the one column written "
             "after the fact, once the case reaches a terminal state -- an append "
             "only table can still learn something, it just cannot rewrite it"
+        ),
+    },
+    "complaint_signal_weights": {
+        "write_mode": MUTABLE,
+        "retention_days": None,
+        "owner": "services/complaint_learning.py",
+        "note": (
+            "one row per learned signal weight. Mutable because a weight is a "
+            "current belief, not a record of what was believed; the history of "
+            "beliefs lives in complaint_signal_observations, which is why this "
+            "table can be rewritten wholesale without losing anything"
+        ),
+    },
+    "complaint_signal_observations": {
+        "write_mode": APPEND_ONLY,
+        "retention_days": 2555,
+        "owner": "services/complaint_learning.py",
+        "note": (
+            "the learning set. weight_snapshot freezes what the operator saw, so "
+            "a later re-weighting cannot rewrite history. superseded marks a row "
+            "re-observed rather than deleted, which is how a re-observation is "
+            "prevented from double-counting"
+        ),
+    },
+    "complaint_improvement_proposals": {
+        "write_mode": MUTABLE,
+        "retention_days": 2555,
+        "owner": "services/complaint_learning.py",
+        "note": (
+            "proposal_id is a deterministic hash of the cluster identity, so the "
+            "same evidence always yields the same id and a dismissed suggestion "
+            "does not reappear on the next sweep. Status and candidate_id change "
+            "as it moves; the evidence does not"
         ),
     },
     "topic_selections": {
@@ -1646,6 +1827,18 @@ UNCONSTRAINED_REFERENCE_COLUMNS: dict[str, dict[str, str]] = {
     "complaint_cases.category": {
         "severity": "out_of_band",
         "reason": "a reference into the COMPLAINT_CATEGORIES config table, not a row",
+    },
+    "complaint_signal_observations.signal_id": {
+        "severity": "out_of_band",
+        "reason": (
+            "a reference into the LOYALTY_SIGNALS config table, not a row. A signal "
+            "retired from the config leaves a historical id that is still the "
+            "correct record of what was measured at the time"
+        ),
+    },
+    "complaint_signal_weights.signal_id": {
+        "severity": "out_of_band",
+        "reason": "a reference into the LOYALTY_SIGNALS config table, not a row",
     },
     "complaint_cases.tier": {
         "severity": "out_of_band",

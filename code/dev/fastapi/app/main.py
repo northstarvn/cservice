@@ -32,6 +32,7 @@ from app.routers import (
     users,
     webhooks,
 )
+from app import kaizen_runner
 from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
@@ -136,6 +137,7 @@ async def lifespan(app: FastAPI):
     # the test suite stay untouched; enable per deployment via env).
     partition_worker = None
     recovery_worker = None
+    kaizen_worker = None
     try:
         if partition_manager.PARTITION_WORKER_ENABLED:
             partition_worker = asyncio.create_task(
@@ -151,6 +153,27 @@ async def lifespan(app: FastAPI):
             logger.info("Recovery playbook worker started")
         if high_throughput_pipeline.PIPELINE_AUTOSTART:
             await high_throughput_pipeline.get_default_pipeline().start()
+        if kaizen_runner.KAIZEN_AUTORUN:
+            # The self-check. Off by default, like the three above, and for the
+            # same reason plus one more: it costs 21 flow simulations, twelve
+            # module resolutions and a walk of every served route, so a developer
+            # boot should not pay for it unasked.
+            #
+            # It runs the sweep *immediately* rather than after the first
+            # interval, so a deployment that enables it and then crashes still
+            # leaves evidence that it ever started. And it never writes to
+            # BLOCKAGES.md unless the deployment opted in -- see
+            # app/kaizen_runner.py for why an automatic writer is worse than no
+            # writer.
+            kaizen_worker = asyncio.create_task(
+                kaizen_runner.sweep_forever(),
+                name="kaizen-sweep",
+            )
+            logger.info(
+                "Kaizen sweep worker started (every %ss, append=%s)",
+                kaizen_runner.KAIZEN_INTERVAL_SECONDS,
+                kaizen_runner.KAIZEN_APPEND,
+            )
     except Exception as e:
         logger.error(f"Background worker startup error: {e}", exc_info=True)
 
@@ -168,6 +191,12 @@ async def lifespan(app: FastAPI):
             recovery_worker.cancel()
             try:
                 await recovery_worker
+            except asyncio.CancelledError:
+                pass
+        if kaizen_worker is not None:
+            kaizen_worker.cancel()
+            try:
+                await kaizen_worker
             except asyncio.CancelledError:
                 pass
         await high_throughput_pipeline.get_default_pipeline().stop()
@@ -255,6 +284,7 @@ async def app_metadata():
             "customer_visible_recovery",
             "self_service_status",
             "kaizen_release_surface",
+            "complaint_learning",
         ],
     }
 
@@ -981,12 +1011,40 @@ async def app_ecosystem():
                     "sum of the weights"
                 ),
             },
+            "complaint_learning": {
+                "routes": [
+                    "/complaints/admin/learning/catalog",
+                    "/complaints/admin/learning/weights",
+                    "/complaints/admin/learning/observe",
+                    "/complaints/admin/learning/detect",
+                    "/complaints/admin/learning/raise",
+                    "/complaints/admin/learning/system-raised",
+                    "/complaints/admin/learning/clusters",
+                    "/complaints/admin/learning/proposals",
+                    "/complaints/admin/learning/publish",
+                    "/complaints/admin/learning/blockages",
+                ],
+                "purpose": (
+                    "complaints as a system-originated event stream: detectors that "
+                    "open a case for a customer who never complained (gated by "
+                    "confidence, cooldown and dedupe), contribution weights learned "
+                    "from whether the customer was actually retained, and stacked "
+                    "complaints turned into improvement proposals that enter the "
+                    "release ladder at l0_draft. The learned weights are advisory: "
+                    "they reorder and explain, and never set a tier. Nothing here "
+                    "writes BLOCKAGES.md -- it renders a pasteable section and a "
+                    "diff instead."
+                ),
+                "status": "ready",
+            },
             "kaizen_release_surface": {
                 "routes": [
                     "/kaizen/admin/catalog",
                     "/kaizen/admin/flows",
                     "/kaizen/admin/flows/run",
                     "/kaizen/admin/blockages",
+                    "/kaizen/admin/completeness",
+                    "/kaizen/admin/sweep",
                     "/kaizen/admin/shadow",
                     "/kaizen/admin/levels",
                     "/kaizen/admin/candidates",
@@ -1000,6 +1058,11 @@ async def app_ecosystem():
                     "BLOCKAGES.md, the one-way shadow environment whose impact on "
                     "live is structurally impossible, and the graded maturity "
                     "ladder an admin promotes along one measured rung at a time. "
+                    "Plus the completeness grading that answers *is it built yet* "
+                    "-- six graded states, and what counts as fatal depends on the "
+                    "rung, so an immature backend passes at l0_draft. "
+                    "`python3 scripts/run_kaizen.py` runs all of it in one command; "
+                    "CSERVICE_KAIZEN_AUTORUN=1 runs the same sweep on a timer. "
                     "Backend-only for now; the frontend is out of scope"
                 ),
                 "status": "ready",
@@ -1015,6 +1078,9 @@ async def app_ecosystem():
                     "PROBES",
                     "FLOW_CATALOG",
                     "BLOCKAGE_POLICY",
+                    "CAPABILITY_STATES",
+                    "PROBE_CAPABILITY",
+                    "ENGINES",
                 ],
                 "notes": (
                     "NOT under /meta*, deliberately: /meta* is public by intent "
@@ -1022,10 +1088,13 @@ async def app_ecosystem():
                     "BLOCKAGES.md, advance a candidate, roll back a deployment). "
                     "Gated as one block by AUTHZ_RULES['kaizen_admin'] so a route "
                     "added under the prefix inherits the gate instead of "
-                    "remembering it. Code and data version move as one "
-                    "promotable pair, and the rollback window is the last five "
-                    "deployment events -- a rollback appends rather than "
-                    "rewrites, so the history stays honest"
+                    "remembering it -- including the three added here. Code and "
+                    "data version move as one promotable pair, and the rollback "
+                    "window is the last five deployment events -- a rollback "
+                    "appends rather than "
+                    "rewrites, so the history stays honest. `python3 scripts/"
+                    "run_kaizen.py` runs every check in this entry in one command, "
+                    "and CSERVICE_KAIZEN_AUTORUN=1 runs the same sweep on a timer"
                 ),
             },
         },
@@ -1118,6 +1187,8 @@ async def app_feature_summary():
             "kaizen_shadow": "/kaizen/admin/shadow",
             "kaizen_shadow_verify": "/kaizen/admin/shadow/verify",
             "kaizen_levels": "/kaizen/admin/levels",
+            "kaizen_completeness": "/kaizen/admin/completeness",
+            "kaizen_sweep": "/kaizen/admin/sweep",
             "kaizen_candidates": "/kaizen/admin/candidates",
             "kaizen_candidate_measure": "/kaizen/admin/candidates/{candidate_id}/measure",
             "kaizen_candidate_advance": "/kaizen/admin/candidates/{candidate_id}/advance",

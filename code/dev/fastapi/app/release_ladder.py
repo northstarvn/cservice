@@ -191,6 +191,7 @@ MATURITY_LEVELS: tuple[dict[str, Any], ...] = (
             "rollback_target_available",
             "regressions_none",
             "authorization_complete",
+            "backend_completeness_honest",
         ),
         "description": (
             "serving a configured slice of real traffic. The first level where a "
@@ -201,7 +202,11 @@ MATURITY_LEVELS: tuple[dict[str, Any], ...] = (
         "level_id": "l4_live",
         "rank": 4,
         "serves_traffic": True,
-        "entry_gates": ("canary_error_rate_below_threshold", "rollback_target_available"),
+        "entry_gates": (
+            "canary_error_rate_below_threshold",
+            "rollback_target_available",
+            "backend_completeness_honest",
+        ),
         "description": (
             "serving everyone. Reached by promotion, and the only level a "
             "deployment ledger event is written for by ``deploy``."
@@ -308,6 +313,38 @@ PROMOTION_GATES: tuple[dict[str, Any], ...] = (
             f"at least {MIN_ROLLBACK_TARGETS} deployment event remains inside the "
             f"{ROLLBACK_WINDOW}-event rollback window. Deploying with nowhere to go "
             "back to is the one irreversible thing this ladder does."
+        ),
+    },
+    {
+        "gate_id": "backend_completeness_honest",
+        "severity": "blocking",
+        # One comparison, and the level-dependence lives in
+        # `capability_audit.capability_gate_measurements` rather than here,
+        # because a rule that has to be true for two different rungs at once is
+        # a rule nobody can read. What counts as blocking:
+        #
+        #   * stub / partial    -- every level. A part that exists and lies is
+        #                          worse than one honestly absent, at every rung,
+        #                          because it consumes the attention of whoever
+        #                          is triaging the report.
+        #   * absent / declared -- from l3_canary. A canary routes a real person
+        #                          through the change; discovering there that a
+        #                          flow cannot complete is too late, and in front
+        #                          of someone.
+        #   * untested          -- only at l4_live. Canarying an unmeasured part
+        #                          is exactly how you measure it; shipping one
+        #                          as the everyday path is not.
+        #
+        # So at l0_draft and l1_verified an immature backend passes this gate,
+        # which is the whole requirement behind it: "not built yet" is the
+        # starting state of this project and must not block the first commit of
+        # every feature.
+        "checks": ("capability_blocking",),
+        "passes_when": "capability_blocking == 0",
+        "description": (
+            "every declared part of the backend is as built as the rung allows: "
+            "nothing stubbed or half-working at any level, nothing merely promised "
+            "from l3_canary on, and nothing unexercised at l4_live"
         ),
     },
     {
@@ -467,7 +504,13 @@ class ReleaseCandidate:
         return LEVEL_RANK.get(self.level, 0)
 
     def pair(self) -> dict[str, str]:
-        return split_version_pair(self)
+        # `split_version_pair` reads with `.get`, so it needs the mapping form.
+        # Passing `self` raised `AttributeError: 'ReleaseCandidate' object has no
+        # attribute 'get'` on every call. Pre-existing bug: `pair()` is how the
+        # rollback path names the versions it must be able to return to, so a
+        # rollback that tried to resolve its own version pair could not. Found
+        # while wiring complaint improvement proposals onto the ladder.
+        return split_version_pair(self.as_dict())
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -594,6 +637,18 @@ def _apply_rule(
         if targets is None:
             return False, "rollback_targets must be a number"
         return targets >= MIN_ROLLBACK_TARGETS, f"rollback_targets={targets:g} need>={MIN_ROLLBACK_TARGETS}"
+    if gate_id == "backend_completeness_honest":
+        blocking = _num("capability_blocking")
+        if blocking is None:
+            return False, "capability_blocking must be a number"
+        detail = measured.get("capability_blocking_detail") or []
+        level = str(measured.get("for_level") or "")
+        return (
+            blocking <= 0,
+            f"capability_blocking={blocking:g}"
+            + (f" ({', '.join(str(item) for item in detail)})" if detail else "")
+            + (f" at {level}" if level else ""),
+        )
     if gate_id == "authorization_complete":
         in_sync = bool(values.get("authz_in_sync"))
         unlisted = _num("unlisted_public_writes")

@@ -154,6 +154,96 @@ hand-typed `authz_in_sync: true` would be an assertion about the running system
 rather than a measurement of it. App-computed values are merged last, so a
 number in the request body cannot override one this process measured.
 
+## One command, or one timer
+
+Everything above is reachable from a single entry point, because three scripts
+and an admin-only HTTP surface is the standard way a codebase ends up with a
+check nobody runs.
+
+```bash
+# flows + completeness + shadow isolation + authorization + the promotion gates
+python3 scripts/run_kaizen.py
+
+# grade as if promoting to live, machine-readable
+python3 scripts/run_kaizen.py --level l4_live --json
+
+# record the findings in BLOCKAGES.md (a person's decision, never automatic)
+python3 scripts/run_kaizen.py --append
+
+# the same thing on a loop instead of once
+python3 scripts/run_kaizen.py --daemon
+
+# what the timer has been doing, and whether it is even on
+python3 scripts/run_kaizen.py --status
+```
+
+**Three exit codes, because two of them must never be confused.**
+
+| code | meaning |
+|---|---|
+| `0` | nothing measured is wrong |
+| `1` | something measured is wrong: a flow failed, a part is a stub, a mutating public route is unlisted, the shadow can reach live, or a gate failed *with evidence* |
+| `2` | the sweep could not complete, so the answer is unknown |
+
+A gate that treats "no blockers" and "I could not tell" as the same number is a
+gate that has stopped running. Relatedly: **a gate that was never measured is
+not a failed gate.** On a checkout there is no canary serving traffic and no
+deployment ledger, so most gates are unmeasured by definition — a sweep that
+reported "no" every day would be a sweep people learned to ignore.
+
+### Completeness: the other axis
+
+`/flows` answers *does it behave*. The completeness report answers *is it there*,
+which is the question that matters while the backend is immature.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/kaizen/admin/completeness
+```
+
+Six graded states rather than a boolean:
+
+| state | meaning |
+|---|---|
+| `absent` | nothing to test |
+| `declared_only` | something promises it and nothing implements it |
+| `stub` | present and callable, but not branching |
+| `partial` | real implementation, wrong for at least one persona |
+| `untested` | present and callable, and no probe exercises it |
+| `complete` | present, non-stub, and every persona agreed |
+
+Two properties make it worth reading:
+
+- **Absence is evidence, never a caught exception.** A probe that raised is
+  equally consistent with a typo, a renamed argument and a regression, so
+  `unknown` never degrades to `absent` and a probe is deferred only when its
+  target positively failed to resolve.
+- **What is fatal depends on the rung.** A defect blocks everywhere; a gap blocks
+  from `l3_canary`; an unexercised part blocks only at `l4_live`. An immature
+  backend passes at `l0_draft` — "not built yet" is this project's starting state
+  and must not block the first commit of every feature.
+
+Two findings the report publishes that no probe could have found on its own:
+**orphan probes** (registered, classified, and invoked by no flow — so the
+registry overstates its own coverage) and **blind probes** (every persona is
+asked the same question, so a constant engine would satisfy them).
+
+### The automatic trigger
+
+`CSERVICE_KAIZEN_AUTORUN=1` starts the sweep as a background task, on the same
+idiom as `CSERVICE_PARTITION_WORKER`, `CSERVICE_AUTO_RECOVERY` and
+`CSERVICE_PIPELINE_AUTOSTART`. It runs **immediately** on start rather than
+after the first interval, so a deployment that enables it and then crashes still
+leaves evidence it ever started. Read the result at
+`GET /kaizen/admin/sweep`, which publishes the configuration beside the result —
+because the useful question is not "did it pass" but "is it running", and a
+worker that silently never started looks exactly like a healthy one.
+
+The scheduled sweep **never writes to `BLOCKAGES.md`** unless
+`CSERVICE_KAIZEN_APPEND=1`. An automatic writer fills the log with dated sections
+nobody wrote, and the duplicate-section guard refuses every one of them, so it is
+either a no-op or a flood. Automatic means *measured on a schedule and readable
+at an endpoint*; appending stays an act a person performs.
+
 `schema_drift_report.py` and `smoke_live_api.py` are not decoration. Every
 defect in the "found by running it against a real database" list below was
 invisible to the unit suite, because the suite's fakes do not enforce a column

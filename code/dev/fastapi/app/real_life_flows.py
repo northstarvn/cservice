@@ -64,6 +64,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from app import capability_audit
+
 FLOWS_CATALOG_VERSION = 1
 
 #: Every score in this system that feeds a thresholded table is on 0-100.
@@ -210,6 +212,16 @@ class ProbeOutcome:
     observed: dict[str, Any] = field(default_factory=dict)
     expected: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    #: True when this subflow was not exercised because the part it depends on
+    #: is **positively known** to be absent. Not a failure, and not a pass: it
+    #: is the absence of evidence about a part that is not there.
+    #:
+    #: Kept off ``held`` deliberately. A deferred subflow never counts as
+    #: evidence for anything, and folding it into ``held=True`` would let an
+    #: unbuilt part quietly satisfy the gate that was supposed to catch it.
+    deferred: bool = False
+    #: Why it was deferred, in the words of the check that established it.
+    deferral_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +232,8 @@ class ProbeOutcome:
             "observed": dict(self.observed),
             "expected": dict(self.expected),
             "error": self.error,
+            "deferred": self.deferred,
+            "deferral_reason": self.deferral_reason,
         }
 
 
@@ -235,6 +249,8 @@ def _outcome(
     observed: Optional[Mapping[str, Any]] = None,
     expected: Optional[Mapping[str, Any]] = None,
     error: str = "",
+    deferred: bool = False,
+    deferral_reason: str = "",
 ) -> ProbeOutcome:
     return ProbeOutcome(
         subflow_id=subflow_id,
@@ -244,7 +260,34 @@ def _outcome(
         observed=dict(observed or {}),
         expected=dict(expected or {}),
         error=error,
+        deferred=deferred,
+        deferral_reason=deferral_reason,
     )
+
+
+#: Capability id -> resolution, for the parts that are positively absent. Built
+#: lazily and cached per process, because it costs an import per engine and the
+#: simulator runs 21 flows x 3 probes.
+_DEFERABLE: dict[str, dict[str, Any]] | None = None
+
+
+def _deferrable() -> dict[str, dict[str, Any]]:
+    global _DEFERABLE
+    if _DEFERABLE is None:
+        _DEFERABLE = capability_audit.deferrable_capabilities()
+    return _DEFERABLE
+
+
+def reset_completeness_cache() -> None:
+    """Forget which parts are absent.
+
+    The test suite's negative controls delete a target to watch a probe change
+    verdict, and without this the cached answer would keep the earlier one --
+    which is the same class of bug as the frozen index this module's own
+    validator warns about.
+    """
+    global _DEFERABLE
+    _DEFERABLE = None
 
 
 def _probe(fn: Probe, subflow_id: str, persona: Persona) -> ProbeOutcome:
@@ -254,10 +297,33 @@ def _probe(fn: Probe, subflow_id: str, persona: Persona) -> ProbeOutcome:
     conclusions, which is the least useful possible result. The exception
     becomes an outcome with ``held: False`` and the message, so the run finishes
     and every other flow still contributes.
+
+    **And one exception is re-read.** If the part this probe exercises is
+    *positively* absent -- the module resolves and has no such name -- then the
+    exception is ``AttributeError``, which is the expected shape of "we have not
+    built this yet", and reporting it as ``probe_raised`` would tell the roadmap
+    it has an incident. So it becomes ``deferred`` instead.
+
+    The bar is deliberately high, and the bar is the whole design. A raised
+    probe is *not* taken as evidence of absence: ``may_defer`` returns ``None``
+    unless the target genuinely failed to resolve, so a typo, a renamed argument
+    and a regression all stay failures. An audit that guessed "not built yet"
+    from a traceback would shrink every report it was pointed at.
     """
     try:
         return fn(persona)
     except Exception as exc:  # noqa: BLE001 - a probe may touch anything
+        reason = capability_audit.may_defer(subflow_id, _deferrable())
+        if reason:
+            return _outcome(
+                subflow_id,
+                persona,
+                False,
+                f"deferred: the part this subflow exercises is not built ({reason})",
+                error=f"{type(exc).__name__}: {exc}",
+                deferred=True,
+                deferral_reason=reason,
+            )
         return _outcome(
             subflow_id,
             persona,
@@ -1244,12 +1310,44 @@ class FlowRun:
     duration_ms: float = 0.0
 
     @property
-    def passed(self) -> bool:
-        return all(outcome.held for outcome in self.outcomes)
+    def failures(self) -> list[ProbeOutcome]:
+        """Subflows that ran and did not hold. Deferred ones are excluded.
+
+        Excluding them is the point: a deferred subflow is a part that is not
+        built, and reporting it as a failure would put the roadmap on the
+        incident page. It is counted and named separately instead, because
+        quietly dropping it would be worse -- a flow that silently tested nothing
+        is indistinguishable from a flow that passed.
+        """
+        return [
+            outcome
+            for outcome in self.outcomes
+            if not outcome.held and not outcome.deferred
+        ]
 
     @property
-    def failures(self) -> list[ProbeOutcome]:
-        return [outcome for outcome in self.outcomes if not outcome.held]
+    def deferred(self) -> list[ProbeOutcome]:
+        """Subflows skipped because the part they exercise is absent."""
+        return [outcome for outcome in self.outcomes if outcome.deferred]
+
+    @property
+    def passed(self) -> bool:
+        """Did every subflow that *ran* hold?
+
+        True for a flow whose every subflow was deferred, because nothing failed
+        -- which is why :func:`flow_gate_measurements` publishes
+        ``subflows_deferred`` alongside it and the completeness layer refuses to
+        read the two together. A gate that only saw ``flows_failed: 0`` would be
+        satisfied by a backend that has built nothing.
+        """
+        return all(
+            outcome.held or outcome.deferred for outcome in self.outcomes
+        )
+
+    @property
+    def exercised(self) -> int:
+        """Subflows that actually ran, as opposed to being deferred."""
+        return len(self.outcomes) - len(self.deferred)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1259,7 +1357,9 @@ class FlowRun:
             "passed": self.passed,
             "duration_ms": self.duration_ms,
             "subflows": len(self.outcomes),
+            "exercised_subflows": self.exercised,
             "failed_subflows": len(self.failures),
+            "deferred_subflows": len(self.deferred),
             "outcomes": [outcome.as_dict() for outcome in self.outcomes],
         }
 
@@ -1326,18 +1426,35 @@ def flow_gate_measurements(runs: Sequence[FlowRun]) -> dict[str, Any]:
     failed = [run for run in runs if not run.passed]
     subflows = sum(len(run.outcomes) for run in runs)
     failed_subflows = sum(len(run.failures) for run in runs)
+    deferred_subflows = sum(len(run.deferred) for run in runs)
+    deferred = [outcome for run in runs for outcome in run.deferred]
     return {
         "flows_run": total,
         "flows_failed": len(failed),
         "subflows_run": subflows,
         "subflows_failed": failed_subflows,
+        # The four below are what make the two above honest. `flows_failed: 0`
+        # is also what a backend which has built nothing reports, and a gate
+        # reading only that cannot tell the two apart.
+        "subflows_deferred": deferred_subflows,
+        "subflows_exercised": subflows - deferred_subflows,
+        "flows_fully_deferred": len([run for run in runs if run.exercised == 0]),
+        "distinct_deferred_subflows": sorted(
+            {outcome.subflow_id for outcome in deferred}
+        ),
+        "deferral_reasons": sorted(
+            {outcome.deferral_reason for outcome in deferred if outcome.deferral_reason}
+        ),
         "distinct_failed_subflows": sorted(
             {outcome.subflow_id for run in failed for outcome in run.failures}
         ),
         "failed_flow_ids": [run.flow_id for run in failed],
         "note": (
             "a probe that raised counts as failed: an exception is not evidence. "
-            "flows_run counts flow/persona pairs, not catalog rows."
+            "flows_run counts flow/persona pairs, not catalog rows. A subflow is "
+            "*deferred* only when the part it exercises is positively absent, which "
+            "is why flows_failed stays 0 while subflows_deferred is non-zero -- read "
+            "the pair together or you will read an empty backend as a healthy one"
         ),
     }
 
@@ -1454,6 +1571,70 @@ BLOCKAGE_POLICY: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        # Completeness findings. Severity here is deliberately *not* the whole
+        # story: a gap is a warning in prose and a blocker at `l3_canary`, and
+        # the level-aware half lives in capability_audit.capability_gate_
+        # measurements so there is one place to read the policy rather than two
+        # that can disagree.
+        "category": "capability_not_built",
+        "severity": "warning",
+        "conclusion": "a part of the backend a flow depends on is absent or only promised",
+        "suggestion": (
+            "decide whether it is on the roadmap. At l0_draft this is normal and "
+            "blocks nothing; from l3_canary on, a customer can be routed into a "
+            "flow that cannot complete, which is what makes it a blocker there"
+        ),
+    },
+    {
+        "category": "capability_defect",
+        "severity": "blocker",
+        "conclusion": "a part exists and does not do the work it appears to do",
+        "suggestion": (
+            "treat this as a product defect, not a gap: `stub` means it answered "
+            "every persona identically, so read the engine before the tests"
+        ),
+    },
+    {
+        "category": "capability_untested",
+        "severity": "warning",
+        "conclusion": "a part is fully built and no probe exercises it",
+        "suggestion": (
+            "this is the one gap that gets *worse* as you promote, because "
+            "canarying an unmeasured part is how you measure it and shipping one "
+            "as the everyday path is not. Add a probe naming a persona whose "
+            "expectation differs, so the stub detector has something to compare"
+        ),
+    },
+    {
+        "category": "capability_unassessable",
+        "severity": "warning",
+        "conclusion": "the completeness audit could not resolve a declared part",
+        "suggestion": (
+            "check the audit's own import path first -- an unassessable part is "
+            "graded as if it were defective, so a broken audit must not be "
+            "mistaken for an immature backend"
+        ),
+    },
+    {
+        "category": "surface_not_served",
+        "severity": "warning",
+        "conclusion": "a flow names a route the backend does not serve",
+        "suggestion": (
+            "the flow's inventory is stale rather than the product broken: either "
+            "the route was renamed or never built. Resolve the intended name "
+            "against the live route table before assuming a feature is missing"
+        ),
+    },
+    {
+        "category": "probe_not_registered",
+        "severity": "blocker",
+        "conclusion": "a flow names a probe that PROBES does not register",
+        "suggestion": (
+            "the flow claims an invariant that nothing checks, so it passes "
+            "vacuously; add the probe or remove it from the flow's probe_ids"
+        ),
+    },
+    {
         "category": "unexplained_verdict",
         "severity": "warning",
         "conclusion": "a decision came back with a reason nobody can act on",
@@ -1551,6 +1732,114 @@ def collect_blockages(runs: Sequence[FlowRun]) -> list[Blockage]:
 
 # ---------------------------------------------------------------------------
 # Comparing two environments
+
+
+# ---------------------------------------------------------------------------
+# Completeness: the other axis
+# ---------------------------------------------------------------------------
+
+
+def capability_report(runs: Sequence[FlowRun] | None = None) -> dict[str, Any]:
+    """Grade every declared part of the backend, from evidence.
+
+    The thin wrapper that keeps the dependency one way. ``capability_audit``
+    cannot import this module -- this module asks it about itself -- so the
+    tables and the outcomes are handed in rather than looked up. That is also
+    why the audit is testable against synthetic flows: it never reaches for
+    ``FLOW_CATALOG`` behind the caller's back.
+    """
+    from app.main import app as fastapi_app  # local: app.main imports this module
+    from app import deps
+
+    features = _feature_endpoints()
+    return capability_audit.assess_capabilities(
+        routes=fastapi_app.routes,
+        flows=FLOW_CATALOG,
+        probes=PROBES,
+        outcomes=[outcome for run in (runs or ()) for outcome in run.outcomes],
+        features=features,
+    )
+
+
+def _feature_endpoints() -> dict[str, str]:
+    """``/meta/features``'s endpoint map, or an empty map if it cannot be read.
+
+    Read through the real route rather than by calling the function, because
+    ``/meta/features`` is the table the *documentation* points at and a
+    completeness check that agrees with the docs but not with the code is
+    checking the wrong thing. An unreadable map degrades to "no declaration
+    found", which can only understate -- and understating a promise is the safe
+    direction, because it moves a capability from ``declared_only`` to
+    ``absent`` and never the other way.
+    """
+    from fastapi.testclient import TestClient  # local, dev/test dependency
+
+    from app.main import app as fastapi_app
+
+    try:
+        payload = TestClient(fastapi_app).get("/meta/features").json()
+    except Exception:  # noqa: BLE001 - a report must not raise
+        return {}
+    endpoints = payload.get("endpoints")
+    return dict(endpoints) if isinstance(endpoints, Mapping) else {}
+
+
+def completeness_blockages(report: Mapping[str, Any]) -> list[Blockage]:
+    """Completeness findings as blockages, one per capability, worst state first.
+
+    Projected into the same shape as a flow finding so they reach the same log
+    with the same conclusion/suggestion discipline and the same dedup -- a gap
+    reported on every run must be recognisable as one finding, or the log fills
+    with the roadmap.
+    """
+    rows: list[Blockage] = []
+    for row in report.get("capabilities") or ():
+        state = str(row.get("state") or "")
+        kind = str(row.get("kind") or "")
+        if state == "complete":
+            continue
+        if row.get("unassessable"):
+            category = "capability_unassessable"
+        elif state in capability_audit.DEFECT_STATES:
+            category = "capability_defect"
+        elif state in capability_audit.UNKNOWN_STATES:
+            category = "capability_untested"
+        elif kind == "surface":
+            category = "surface_not_served"
+        elif kind == "probe":
+            category = "probe_not_registered"
+        else:
+            category = "capability_not_built"
+        policy = BLOCKAGE_POLICY_BY_CATEGORY[category]
+        capability_id = str(row.get("capability_id") or "")
+        rows.append(
+            Blockage(
+                blockage_id=f"capability.{capability_id}",
+                flow_id=str((row.get("flows") or [""])[0]),
+                persona_id="(n/a)",
+                subflow_id=capability_id,
+                severity=str(policy["severity"]),
+                category=category,
+                conclusion=str(policy["conclusion"]),
+                suggestion=str(policy["suggestion"]),
+                evidence={
+                    "state": state,
+                    "kind": kind,
+                    "title": str(row.get("title") or ""),
+                    "detail": str(row.get("detail") or ""),
+                    "evidence": list(row.get("evidence") or ()),
+                },
+                error="",
+            )
+        )
+    return rows
+
+
+def completeness_measurements(
+    report: Mapping[str, Any], *, for_level: str = "l4_live"
+) -> dict[str, Any]:
+    """The level-aware measurements, re-exported so callers need one import."""
+    return capability_audit.capability_gate_measurements(report, for_level=for_level)
 
 
 def compare_runs(
@@ -1970,6 +2259,18 @@ def build_flows_catalog() -> dict[str, Any]:
         ],
         "probes": list(PROBE_IDS),
         "blockage_policy": [dict(row) for row in BLOCKAGE_POLICY],
+        # The completeness vocabulary, published beside the flow one so a reader
+        # of `/kaizen/admin/flows` learns both axes exist rather than finding the
+        # second one by accident.
+        "capability_states": list(capability_audit.CAPABILITY_STATES),
+        "capability_operators": {
+            "capability_report": "app.real_life_flows.capability_report",
+            "completeness_blockages": "app.real_life_flows.completeness_blockages",
+            "completeness_measurements": (
+                "app.real_life_flows.completeness_measurements"
+            ),
+            "audit_catalog": "app.capability_audit.build_capability_catalog",
+        },
         "operators": {
             "run_flow": "app.real_life_flows.run_flow",
             "run_all_flows": "app.real_life_flows.run_all_flows",

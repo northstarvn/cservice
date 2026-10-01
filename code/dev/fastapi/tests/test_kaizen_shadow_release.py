@@ -524,6 +524,7 @@ class TestGates:
         "canary_error_rate": 0.0001,
         "authz_in_sync": True,
         "unlisted_public_writes": 0,
+                "capability_blocking": 0,
     }
 
     def _candidate(self, name, *, level="l0_draft", **measured):
@@ -891,6 +892,7 @@ class TestAuthorizationGate:
             "canary_error_rate": 0.0001,
             "authz_in_sync": True,
             "unlisted_public_writes": 0,
+                "capability_blocking": 0,
         }
 
 
@@ -933,6 +935,7 @@ class TestCodeAndDataAreAPair:
                 "shadow_to_live_writes": 0, "shadow_divergence_ratio": 0.0,
                 "regressions": 0, "rollback_targets": 5, "canary_error_rate": 0.0,
                 "authz_in_sync": True, "unlisted_public_writes": 0,
+                "capability_blocking": 0,
             },
         )
         release_ladder.advance_candidate(candidate)
@@ -1253,6 +1256,7 @@ class TestSafeLevels:
             "shadow_to_live_writes": 0, "shadow_divergence_ratio": 0.0,
             "regressions": 0, "rollback_targets": 5, "canary_error_rate": 0.0,
             "authz_in_sync": True, "unlisted_public_writes": 0,
+                "capability_blocking": 0,
         }
         early = release_ladder.ReleaseCandidate(
             "s1", "code:a", "data:r", maintainer="ana",
@@ -1306,6 +1310,7 @@ class TestSafeLevels:
                     "divergence_tolerance": 0.02, "regressions": 0,
                     "rollback_targets": 5,
                     "authz_in_sync": True, "unlisted_public_writes": 0,
+                "capability_blocking": 0,
                 }
             )
             decision = release_ladder.advance_candidate(candidate)
@@ -2219,7 +2224,7 @@ class TestRoutes:
         paths = [
             route.path for route in kaizen.router.routes
         ]
-        assert len(paths) == 16, paths
+        assert len(paths) == 19, paths
         for path in paths:
             assert path.startswith("/kaizen/admin"), path
 
@@ -2711,9 +2716,10 @@ class TestEndpoints:
             "l0_draft", "l1_verified", "l2_shadow", "l3_canary", "l4_live"
         ]
         assert body["always_on"] == ["maintainer_named"]
-        assert len(body["gates"]) == 11
+        assert len(body["gates"]) == 12
         gate_ids = {row["gate_id"] for row in body["gates"]}
         assert "authorization_complete" in gate_ids
+        assert "backend_completeness_honest" in gate_ids
 
     def test_a_candidate_walks_the_ladder_and_only_then_deploys(self, admin_client):
         """The whole path, over HTTP: draft -> verified -> shadow -> canary -> live.
@@ -2744,6 +2750,7 @@ class TestEndpoints:
             "rollback_targets": 5,
             "authz_in_sync": True,
             "unlisted_public_writes": 0,
+                "capability_blocking": 0,
         }
         for expected in ("l1_verified", "l2_shadow", "l3_canary", "l4_live"):
             admin_client.post(
@@ -2998,6 +3005,12 @@ class TestTheGateRejectsAnonymous:
         ("POST", "/kaizen/admin/candidates/x/measure"),
         ("POST", "/kaizen/admin/candidates/x/advance"),
         ("POST", "/kaizen/admin/deployments/dep-0001/rollback"),
+        ("GET", "/kaizen/admin/completeness"),
+        ("GET", "/kaizen/admin/sweep"),
+        # `sweep` is a POST as well, and it runs a whole sweep. Anonymous refusal
+        # is asserted for it separately: a route that runs 21 flow simulations is
+        # exactly the kind that must not be reachable by anyone who finds the URL.
+        ("POST", "/kaizen/admin/sweep"),
     ]
 
     def test_every_kaizen_route_refuses_an_unauthenticated_caller(self):
@@ -3023,6 +3036,10 @@ class TestTheGateRejectsAnonymous:
             "/kaizen/admin/candidates/{candidate_id}/advance",
         "/kaizen/admin/deployments/dep-0001/rollback":
             "/kaizen/admin/deployments/{event_id}/rollback",
+        # Two paths, three routes: `sweep` is GET and POST. The anonymous-refusal
+        # table is keyed by path, so one entry covers both verbs.
+        "/kaizen/admin/completeness": "/kaizen/admin/completeness",
+        "/kaizen/admin/sweep": "/kaizen/admin/sweep",
     }
 
     def test_the_list_is_the_whole_router(self):

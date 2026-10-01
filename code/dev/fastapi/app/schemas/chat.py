@@ -2560,6 +2560,201 @@ class ComplaintSweepOut(BaseModel):
     results: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+# =============================================================================
+# Complaint learning: system-raised cases, learned weights, improvement proposals
+# =============================================================================
+#
+# Shaped to be readable rather than merely strict. Every model here allows extra
+# fields, because these payloads are the *evidence* behind a judgement and the
+# whole point of the module is that a reviewer can read the reasoning rather than
+# trust a number.
+
+
+class ComplaintSignalWeightOut(BaseModel):
+    signal_id: str
+    label: str = ""
+    direction: str = "neutral"
+    weight: float = 0.0
+    prior_weight: float = 0.0
+    drift_from_prior: float = 0.0
+    # `configured_prior` or `learned`. Never elided, because a reader who cannot
+    # tell a default from a measurement will read a default as a measurement.
+    source: str = "configured_prior"
+    observations: int = 0
+    agreements: int = 0
+    disagreements: int = 0
+    confidence: float = 0.0
+    why: str = ""
+
+
+class ComplaintWeightReportOut(BaseModel):
+    version: str = ""
+    generated_at: datetime
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    authority: Dict[str, Any] = Field(default_factory=dict)
+    table: List[ComplaintSignalWeightOut] = Field(default_factory=list)
+    learned_count: int = 0
+    configured_count: int = 0
+    max_drift: float = 0.0
+    at_bound: List[str] = Field(default_factory=list)
+
+
+class ComplaintSystemCandidateOut(BaseModel):
+    detector_id: str
+    label: str = ""
+    category: str = ""
+    user_id: int
+    trigger_case_id: int
+    trigger_reference: str = ""
+    confidence: float = 0.0
+    min_confidence: float = 0.0
+    enabled: bool = True
+    passes_confidence: bool = False
+    cooldown_hours: float = 0.0
+    cooldown_remaining_hours: float = 0.0
+    dedupe_category: bool = False
+    dedupe_target_id: Optional[int] = None
+    will_raise: bool = False
+    # Which guard stopped it, in the fixed order enabled -> confidence ->
+    # cooldown -> dedupe. Empty means it will be raised.
+    blocked_by: str = ""
+    seed_signals: List[str] = Field(default_factory=list)
+    default_severity: str = ""
+
+
+class ComplaintDetectOut(BaseModel):
+    generated_at: datetime
+    detectors: int = 0
+    cases_scanned: int = 0
+    candidates: List[ComplaintSystemCandidateOut] = Field(default_factory=list)
+    would_raise: int = 0
+    by_detector: Dict[str, int] = Field(default_factory=dict)
+    suppressed: Dict[str, int] = Field(default_factory=dict)
+    # Always true here. This endpoint reads and reports; it never writes.
+    dry_run: bool = True
+    reason: str = ""
+
+
+class ComplaintRaiseOut(ComplaintDetectOut):
+    detected: int = 0
+    eligible: int = 0
+    raised: int = 0
+    cases: List[Dict[str, Any]] = Field(default_factory=list)
+    held_back: List[Dict[str, Any]] = Field(default_factory=list)
+    cap: int = 0
+    cap_reached: bool = False
+
+
+class ComplaintLearningPassOut(BaseModel):
+    generated_at: datetime
+    version: str = ""
+    candidates: int = 0
+    observations_written: int = 0
+    signals_moved: List[str] = Field(default_factory=list)
+    weights: Dict[str, float] = Field(default_factory=dict)
+    skipped: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_gaps: List[str] = Field(default_factory=list)
+    # Always true, and asserted by the service. A learned weight reorders and
+    # explains; it never sets a tier.
+    advisory_only: bool = True
+    note: str = ""
+
+
+class ComplaintStackOut(BaseModel):
+    generated_at: datetime
+    cluster_key: str
+    rule_id: str
+    label: str = ""
+    axis: str = ""
+    value: str = ""
+    window_days: int = 0
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    meets: bool = False
+    checks: Dict[str, bool] = Field(default_factory=dict)
+    short_by: Dict[str, float] = Field(default_factory=dict)
+    case_ids: List[int] = Field(default_factory=list)
+    references: List[str] = Field(default_factory=list)
+    shared_signals: List[str] = Field(default_factory=list)
+
+
+class ComplaintClusterReportOut(BaseModel):
+    generated_at: datetime
+    cases_scanned: int = 0
+    rules: int = 0
+    clusters_considered: int = 0
+    stacks: List[ComplaintStackOut] = Field(default_factory=list)
+    # Reported so a rule that is *nearly* firing can be tuned deliberately,
+    # rather than a threshold being lowered by guesswork when the real signal
+    # never appears.
+    near_misses: List[ComplaintStackOut] = Field(default_factory=list)
+    stack_count: int = 0
+    dry_run: bool = True
+
+
+class ComplaintProposalOut(BaseModel):
+    proposal_id: str
+    id: str = ""
+    code: str = ""
+    cluster_key: str = ""
+    rule_id: str = ""
+    title: str = ""
+    component: str = ""
+    owner_hint: str = ""
+    priority: str = "medium"
+    impact: str = "medium"
+    effort: str = "medium"
+    rationale: List[str] = Field(default_factory=list)
+    recommended_action: str = ""
+    signals: List[str] = Field(default_factory=list)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    status: str = "detected"
+    candidate_id: str = ""
+
+
+class ComplaintProposalReportOut(BaseModel):
+    generated_at: datetime
+    stacks: int = 0
+    created: int = 0
+    updated: int = 0
+    proposals: List[ComplaintProposalOut] = Field(default_factory=list)
+    # Stacks that stopped meeting thresholds. Reported rather than deleted: a
+    # proposal vanishing because a window slid would leave a reviewer who was
+    # mid-decision with no record.
+    no_longer_stacking: List[str] = Field(default_factory=list)
+    near_misses: List[ComplaintStackOut] = Field(default_factory=list)
+
+
+class ComplaintPublishOut(BaseModel):
+    generated_at: datetime
+    published: List[Dict[str, Any]] = Field(default_factory=list)
+    published_count: int = 0
+    skipped: List[Dict[str, Any]] = Field(default_factory=list)
+    ladder_level: str = "l0_draft"
+    note: str = ""
+
+
+class ComplaintBlockagesOut(BaseModel):
+    generated_at: datetime
+    rendered: str = ""
+    already_present: List[str] = Field(default_factory=list)
+    new: List[str] = Field(default_factory=list)
+    would_add: int = 0
+    # Always false. This endpoint renders and reports a diff; it does not write
+    # the file. See complaint_learning.render_blockages_section.
+    writes: bool = False
+    note: str = ""
+
+
+class ComplaintLearningCatalogOut(BaseModel):
+    version: str = ""
+    generated_at: datetime
+    objective: Dict[str, Any] = Field(default_factory=dict)
+    learning: Dict[str, Any] = Field(default_factory=dict)
+    system_complaints: Dict[str, Any] = Field(default_factory=dict)
+    improvements: Dict[str, Any] = Field(default_factory=dict)
+    validation: Dict[str, Any] = Field(default_factory=dict)
+
+
 class ComplaintCatalogOut(BaseModel):
     version: str = ""
     escalation_pack_version: str = ""

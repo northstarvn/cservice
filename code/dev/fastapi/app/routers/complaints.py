@@ -47,18 +47,28 @@ from app.schemas.chat import (
     ComplaintAcknowledgeIn,
     ComplaintApplyOut,
     ComplaintAssignIn,
+    ComplaintBlockagesOut,
     ComplaintCaseOut,
     ComplaintCatalogOut,
+    ComplaintClusterReportOut,
     ComplaintDecisionSupportOut,
+    ComplaintDetectOut,
+    ComplaintLearningCatalogOut,
+    ComplaintLearningPassOut,
     ComplaintNoteIn,
     ComplaintOpenIn,
     ComplaintOverrideIn,
+    ComplaintProposalReportOut,
+    ComplaintPublishOut,
     ComplaintQueueOut,
+    ComplaintRaiseOut,
     ComplaintReopenIn,
     ComplaintResolveIn,
     ComplaintSlaReportOut,
     ComplaintSweepOut,
+    ComplaintWeightReportOut,
 )
+from app.services import complaint_learning as learning_service
 from app.services import complaints as complaints_service
 
 logger = logging.getLogger(__name__)
@@ -69,6 +79,25 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _learning_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rename the service's ``ran_at`` to the schema's ``generated_at``.
+
+    The services say ``ran_at`` because they also say ``opened_at``, ``closed_at``
+    and ``observed_at``, and collapsing those into one word would be a small lie
+    about when a thing happened. The response schemas say ``generated_at`` because
+    that is the convention every other read surface in this API uses. Rather than
+    make either side give up its vocabulary, the rename happens here, once.
+
+    It is also the single place a future service field can be mapped onto a
+    response shape, so a new endpoint inherits the behaviour rather than
+    rediscovering that a name mismatch is a 500.
+    """
+    result = dict(payload)
+    if "generated_at" not in result and result.get("ran_at"):
+        result["generated_at"] = result["ran_at"]
+    return result
 
 
 def _actor_role(user: Any) -> str:
@@ -526,3 +555,263 @@ async def complaint_decision_audit(
         "contradicted_only": contradicted_only,
         "decisions": rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# Complaint learning: system-raised cases, learned weights, stacked complaints
+# ---------------------------------------------------------------------------
+#
+# All admin-gated, and all under `/complaints/admin/*` so they land under the
+# existing `complaints_admin` authz rule rather than needing a new one. Three
+# things about this group are worth stating, because each is a deliberate
+# asymmetry rather than an oversight.
+#
+# `detect` and `learn` never write. `raise` and `publish` do. That split is the
+# point: an operator should be able to see what the system *would* do, and what it
+# *did*, from two different calls, and the second one should never be a
+# side effect of reading the first.
+#
+# The learning pass is `POST` rather than `GET` even though it is a scheduled
+# sweep with no parameters worth varying. It moves weights, and a `GET` that
+# changes state is a caching bug waiting to happen.
+#
+# `blockages` renders and reports. It does not write the file, and there is no
+# endpoint that does. `BLOCKAGES.md` is hand-authored governance prose; the
+# suggestions are made pasteable and the diff is reported, which is the strongest
+# thing this module can do without a human deciding that a machine's opinion
+# belongs in a document whose whole purpose is human ones.
+
+
+@router.get("/complaints/admin/learning/catalog", response_model=ComplaintLearningCatalogOut)
+async def complaint_learning_catalog(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """The objective, the signals, the detectors, and the cluster rules.
+
+    The catalog is the document a reviewer reads to disagree with the module. It
+    states what is *not* being optimised (contact frequency, time-on-service) as
+    prominently as what is, and it reports the detector that ships inert, so a
+    deliberately-disabled row cannot read as a missing feature.
+    """
+    return {
+        "version": learning_service.COMPLAINT_LEARNING_VERSION,
+        "generated_at": complaints_service._now().isoformat(),
+        **learning_service.build_complaint_learning_catalog(),
+        "validation": learning_service.validate_complaint_learning(),
+    }
+
+
+@router.get("/complaints/admin/learning/weights", response_model=ComplaintWeightReportOut)
+async def complaint_learned_weights(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Every signal, its learned weight, its prior, and the drift between them.
+
+    Every signal appears, learned or not, and each row carries its `source`. A
+    table listing only the learned entries would make the configured priors
+    invisible, and a reviewer would then believe a number is a measurement when
+    it is a default.
+    """
+    return _learning_payload(await learning_service.build_weight_report(db))
+
+
+@router.post("/complaints/admin/learning/observe", response_model=ComplaintLearningPassOut)
+async def complaint_learning_pass(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Observe what happened to customers, and move the weights accordingly.
+
+    Writes `complaint_signal_observations` rows and updates
+    `complaint_signal_weights`. `advisory_only` is `true` in the response and is
+    asserted by the service: a learned weight reorders and explains
+    recommendations, and it never moves a tier or triggers an escalation. A case
+    opened yesterday is not judged at all -- `neutral` teaches nothing, because
+    counting "not yet known" as agreement is how a learner concludes that doing
+    nothing is correct.
+    """
+    return _learning_payload(await learning_service.run_learning_pass(db, limit=limit))
+
+
+@router.get("/complaints/admin/learning/detect", response_model=ComplaintDetectOut)
+async def complaint_detect_system(
+    user_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Run the detectors and report what *would* be raised. Writes nothing.
+
+    Read-only by construction, and this is the call to make first. Every
+    candidate carries which of the three guards -- confidence, cooldown, dedupe --
+    stopped it, so a detector that starts misbehaving is diagnosable from this
+    payload rather than from a queue that mysteriously filled up.
+    """
+    return _learning_payload(await learning_service.detect_system_complaints(
+        db, user_ids=[user_id] if user_id is not None else None, limit=limit
+    ))
+
+
+@router.post("/complaints/admin/learning/raise", response_model=ComplaintRaiseOut)
+async def complaint_raise_system(
+    user_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    max_raise: int = Query(default=25, ge=0, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Open system-raised cases for customers who never complained.
+
+    A complaint the system raises is a real record with real consequences, so
+    three guards apply and all three are reported: each detector's own confidence
+    against its gate, a per-(detector, customer) cooldown, and dedupe against a
+    genuinely separate live case. `max_raise` is a per-call ceiling on top of
+    those -- the failure it exists for is a corrupt snapshot making every case
+    look overdue, which without a cap would open a case for every customer at
+    once.
+
+    `held_back` and `suppressed` say why anything was not raised, so "nothing
+    happened" is never the whole answer.
+    """
+    return _learning_payload(await learning_service.raise_system_complaints(
+        db,
+        user_ids=[user_id] if user_id is not None else None,
+        limit=limit,
+        max_raise=max_raise,
+    ))
+
+
+@router.get("/complaints/admin/learning/system-raised")
+async def complaint_system_raised(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Which cases the system opened, broken down by detector.
+
+    "The system opened 40 cases" is not actionable. "The billing detector opened
+    39 of them" is.
+    """
+    return await learning_service.list_system_raised(db, limit=limit)
+
+
+@router.get("/complaints/admin/learning/clusters", response_model=ComplaintClusterReportOut)
+async def complaint_stacked_clusters(
+    limit: int = Query(default=2000, ge=1, le=10000),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Group recent complaints and report which ones have stacked up. Writes nothing.
+
+    Every threshold is multi-axis, and the one that matters is the reopen rate: a
+    cluster of cases that were closed and never reopened is the system working,
+    and a cluster that keeps coming back is the system not working. `near_misses`
+    reports clusters that fell short and by how much, so a rule can be tuned
+    deliberately rather than a threshold being lowered by guesswork.
+    """
+    return _learning_payload(await learning_service.detect_stacked_complaints(db, limit=limit))
+
+
+@router.post("/complaints/admin/learning/proposals", response_model=ComplaintProposalReportOut)
+async def complaint_build_proposals(
+    limit: int = Query(default=2000, ge=1, le=10000),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Detect stacks, render suggestions, and persist them idempotently.
+
+    Re-running on unchanged evidence updates the existing row's evidence and
+    leaves its `status` alone, so a proposal a human has acknowledged or
+    dismissed is not silently reset by the next sweep. Stacks that stop meeting
+    their thresholds are reported in `no_longer_stacking` and never deleted: a
+    proposal vanishing because a window slid would leave a reviewer who was
+    mid-decision with no record.
+
+    Priority is not case count. A large cluster nobody reopened is a capacity
+    problem and caps at medium; a small one that keeps reopening is a correctness
+    problem and outranks it.
+    """
+    return _learning_payload(await learning_service.build_and_store_proposals(db, limit=limit))
+
+
+@router.get("/complaints/admin/learning/proposals")
+async def complaint_list_proposals(
+    status_filter: str = Query(default="", alias="status"),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Stored suggestions, with their evidence and their current state."""
+    return await learning_service.list_proposals(db, status=status_filter, limit=limit)
+
+
+@router.post("/complaints/admin/learning/proposals/{proposal_id}/status")
+async def complaint_set_proposal_status(
+    proposal_id: str,
+    new_status: str = Query(
+        alias="status",
+        description="detected | published | acknowledged | dismissed",
+    ),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Record a human's decision about a suggestion.
+
+    The parameter is aliased to `status` on the wire but named `new_status` in
+    code, because a local named `status` shadows the imported `fastapi.status`
+    and every error raised from this function would fail with a `NameError`
+    instead of the 422 it was written to return.
+
+    An unknown status is a 422 rather than a stored string, because this is a
+    write path and a typo that silently becomes a state nothing else reads is
+    worse than a rejection.
+    """
+    try:
+        return await learning_service.set_proposal_status(db, proposal_id, new_status)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+
+@router.post("/complaints/admin/learning/publish", response_model=ComplaintPublishOut)
+async def complaint_publish_proposals(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Register stored suggestions on the release ladder at `l0_draft`.
+
+    Only `detected` proposals are published, and only ever at draft. A dismissed
+    proposal that got re-published would be a human's decision silently reversed
+    by a scheduled job. Nothing here advances a candidate: promotion runs through
+    the ladder's own gates, which is why suggestions go to the ladder rather than
+    straight into a file.
+    """
+    return _learning_payload(await learning_service.publish_proposals(db))
+
+
+@router.get("/complaints/admin/learning/blockages", response_model=ComplaintBlockagesOut)
+async def complaint_blockages_preview(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Render a pasteable BLOCKAGES.md section and report what a paste would add.
+
+    `writes` is always `false` and there is no endpoint that writes the file. The
+    diff reports only additions; a heading already present is left alone, and
+    nothing in the file is ever parsed for removal. This is allowed to add a
+    suggestion to a human's document and is structurally incapable of taking one
+    of their lines out.
+    """
+    import pathlib
+
+    listing = await learning_service.list_proposals(db, status="", limit=200)
+    root = pathlib.Path(__file__).resolve().parents[2]
+    target = root / "BLOCKAGES.md"
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    return _learning_payload(
+        learning_service.diff_against_rendered(listing["proposals"], existing)
+    )

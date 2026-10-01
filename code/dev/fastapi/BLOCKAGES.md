@@ -37,6 +37,17 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   `user_consent_events.purpose` vocabulary in `ENUM_FIELD_SPECS` and in
   `CONSENT_PURPOSES`). A duplicate table can drift; a cycle cannot be repaired
   without breaking the import graph.
+- **`untested` is deliberately not `complete`.** A part that exists and that no
+  probe exercises is reported as unmeasured rather than counted as health, and
+  `blind_probes` is published for the same reason: a probe every persona answers
+  alike cannot distinguish a working engine from a constant one. Both are limits
+  of the *simulation*, and stating them is how a reader knows which rows are
+  resting on a question that cannot fail.
+- **A deferred subflow is not a pass.** `FlowRun.passed` is true when every
+  deferred subflow was skipped, which is why `flow_gate_measurements` publishes
+  `subflows_deferred` and `subflows_exercised` beside `flows_failed`. `0`
+  failures is also what an *empty* backend reports, and a gate reading only that
+  would be satisfied by a backend that has built nothing.
 - **A promotion gate failing is not a reason to add a bypass.** The ladder has
   no override flag, and the fix for "this candidate cannot pass
   `authorization_complete`" is to close the route or document the exception in
@@ -47,6 +58,49 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   configuration. `TestPinningOracle` pins the deltas as literals precisely so
   that editing the table to satisfy a broken expectation fails there instead of
   quietly making a probe pass.
+
+### Complaint-learning keep-as-is decisions (do not "fix")
+
+These four are not oversights. Each one reads like a bug to someone who has not
+read the argument, and "fixing" any of them produces a system that looks
+healthier and is measurably worse.
+
+- **A learned weight must never reach a case's tier, and the guarantee is
+  structural rather than documented.** `LEARNED_WEIGHT_AUTHORITY` is a dict, so
+  it constrains nothing by itself; the guarantee is that no learned number enters
+  the `context` dict the escalation triggers are evaluated against. The weight
+  reaches the dossier only as `loyalty_contribution`, the eleventh feed, marked
+  `required: false`. Do not "improve" this by letting a high-confidence weight
+  nudge a severity or an escalation. The reason is in the `why` field: cases that
+  get escalated produce the evidence that raises the weight, which escalates more
+  cases. Within one quarter that loop decides the policy on its own, and it
+  decides it in favour of whatever was escalated first.
+
+- **`LOYALTY_OUTCOMES` is deliberately *not* complaint-lifecycle vocabulary.**
+  `complaint_decisions.outcome_observed` answers "was it resolved";
+  `complaint_signal_observations.loyalty_outcome` answers "did the customer
+  stay". They come apart constantly — a refund issued, the case closed, the
+  customer never returns — and a system that learns on the first while believing
+  it is learning the second becomes confident about resolutions people walked away
+  from. Do not unify the two vocabularies to reduce the number of concepts.
+
+- **`billing_dispute_unresolved` ships inert on purpose.** Its `confidence`
+  (0.65) is deliberately below its own `min_confidence` (0.70), so it can never
+  fire. An arrears balance plus an open complaint describes most of the customer
+  base, and a detector that opened a case for every one would be an accusation
+  rather than a service. The row documents the shape a detector needs without
+  acting. `validate_complaint_learning` emits a *warning* for it — do not silence
+  that warning; it is the only thing marking the row as deliberate.
+
+- **`billing_dispute_unresolved` also has no dedupe, and
+  `unowned_stale_case` has no dedupe either — both are deliberate and for
+  different reasons.** The first would fold a distinct money problem into an
+  unrelated open case. The second is about *this* case having no owner, so
+  deduping it into another case would hide the fact that nobody is on it.
+  Everything else dedupes, and the dedupe lookup must keep passing
+  `exclude_id=<the trigger case>`: without it a detector blocks against the very
+  case that woke it up, which is the bug that made five of the six shipped
+  detectors unable to ever fire.
 
 ### Complaints keep-as-is decisions (do not "fix")
 
@@ -235,6 +289,251 @@ All resolved. Working log of keep-as-is decisions and expansion progress.
   Postgres-only DDL" is the kind of fact that gets rediscovered the hard way.
 
 ## Expansion log
+
+### Completeness grading, one command, and the self-check timer (2026-09-30)
+
+The flow simulator answers *does it behave*. It could not answer *is it there* —
+which is the question that matters while the backend is immature. A probe against
+an engine that was never written raises `AttributeError`, the harness records
+`probe_raised`, and the report says *the subflow could not be exercised at all*.
+True, and useless: "not built yet" and "broken" want opposite responses, and
+putting the roadmap on the incident page trains people to ignore the page.
+
+#### Six states, because a boolean cannot carry this
+
+`absent` · `declared_only` · `stub` · `partial` · `untested` · `complete`
+
+- **`declared_only`** is the most deceptive state and the one this repo is most
+  likely to produce, because it has a governance layer that writes declarations
+  by hand. A flow names a route, or `AUTHZ_RULES` describes a path, and nothing
+  implements it.
+- **`untested`** is its own state rather than a flag on `complete`. "We found
+  nothing wrong" and "we looked at nothing" are different sentences, and merging
+  them is how an unmeasured part ships on the strength of silence. The topics
+  engine is fully built and completely unexercised — only a per-capability count
+  could see that.
+- **`stub`** is detected the only way that survives a rename: run the engine for
+  two personas whose *expectations differ* and see whether it answers alike. A
+  real engine branches; a stub returns one answer.
+
+#### The rule that keeps this from becoming an escape hatch
+
+**Absence is evidence, never a caught exception.** A probe that raised is equally
+consistent with a typo, a renamed argument and a regression, so
+`resolve_engine` distinguishes *absent* (the module is there and the name is not)
+from *unknown* (I could not tell), `unknown` never degrades to `absent`, and a
+probe is deferred **only** when its target positively failed to resolve. An audit
+that guessed "not built yet" from a traceback would shrink every report it was
+pointed at — and would report a healthy backend as empty and an incident as a
+to-do item. `may_defer` returning `None` is the common and important answer.
+
+#### What is fatal depends on the maturity rung
+
+This is the requirement behind the whole thing. An immature backend is the
+*starting state* of this project, so one absolute threshold is wrong at every
+level: too permissive to catch a gap before launch, too strict to let work begin.
+
+| state | blocks at |
+|---|---|
+| `stub`, `partial` | **every** rung — a part that exists and lies is worse than one honestly absent, at every rung, because it consumes the attention of whoever is triaging |
+| `absent`, `declared_only` | from `l3_canary` — a canary routes a real person through the change, so discovering there that a flow cannot complete is too late |
+| `untested` | only at `l4_live` — canarying an unmeasured part is how you measure it; shipping one as the everyday path is not |
+
+So at `l0_draft` and `l1_verified` an empty backend **passes**, which is exactly
+right: "not built yet" must not block the first commit of every feature. The
+level-dependence lives in `capability_gate_measurements`, not in the gate's rule,
+because a rule that has to be true for two rungs at once is a rule nobody can
+read. `backend_completeness_honest` is one comparison at `l3_canary` and
+`l4_live`.
+
+#### Three real defects, each found by checking rather than by writing
+
+**1. Naive route introspection reported 29 of 30 surfaces absent.** This
+FastAPI release keeps included routers as lazy `_IncludedRouter` wrappers, so
+`app.routes` lists 39 entries where **274** effective paths are served — and 26
+of those 29 were false. Correctness of the entire completeness report depended on
+noticing, so the resolution goes through `deps.iter_authz_routes`. Pinned by
+`test_app_routes_alone_under_reports_the_served_surface`. Same failure mode as
+the harness's original twelve false blockages, arrived at from the other
+direction: wrong while looking rigorous.
+
+**2. The stub detector compared different probes to each other.** It grouped
+every outcome a capability produced and asked whether personas disagreed, which
+compared `complaint_is_routed` against `complaint_verdict_is_explained` — two
+different questions with different observation shapes — and declared a healthy
+complaint engine a stub. Personas only mean anything against *the same question
+asked of each of them*.
+
+**3. Then it inverted, and reported three healthy engines as stubs.** Identical
+*expectations* were being read as disagreement. The honest answer is neither
+stub nor complete: every persona was asked the same question, so a constant
+engine would satisfy the probe. That is a hole in the *probe*, not the part, and
+it is now published as **`blind_probes`** rather than swallowed.
+
+#### Real findings on this tree, none of which a probe could have found
+
+- **`regulatory_complaint_deadline` names `/complaints/admin/sla-report`; the
+  served path is `/complaints/admin/sla`.** Graded `declared_only` — the rule
+  table describes it and no route serves it. Either the flow's inventory is stale
+  or the route is unbuilt, and a rename is not a working surface.
+- **4 engines graded `untested`**: `topics`, `rule_engine`, `release_ladder`,
+  `blockage_log`. Built, callable, and unexercised.
+- **2 orphan probes**: `posture_adjustment_is_effective` and `rule_pack_selects`
+  are registered and classified but invoked by **no flow** — written, wired, and
+  dead. The mirror image of an unprobed capability, and equally misleading,
+  because the registry counts them as coverage.
+- **11 blind probes**, so the completeness rows for three engines rest on a
+  question that cannot fail.
+
+#### One command, or one timer
+
+Three subsystems each grew its own script, which is the standard way a codebase
+ends up with a check nobody runs — and the ladder had no script at all, reachable
+only over HTTP by an admin holding a token. `python3 scripts/run_kaizen.py` runs
+flows, completeness, shadow isolation, authorization and the promotion gates, and
+`scripts/run_kaizen.py --daemon` is the same function on a loop.
+`CSERVICE_KAIZEN_AUTORUN=1` starts it as a background task on the same idiom as
+the three existing workers, and it runs **immediately** rather than after the
+first interval — a worker that first sleeps leaves no evidence it ever ran, and
+the failure looks like health.
+
+**Three exit codes**, because two of them must never be confused: `0` nothing
+measured is wrong, `1` something measured is wrong, `2` the sweep could not
+complete so the answer is unknown. Relatedly, **a gate that was never measured is
+not a failed gate** — on a checkout there is no canary and no ledger, so most
+gates are unmeasured by definition, and a sweep that said "no" every day would be
+a sweep people learned to ignore. Only measured failures change the status; the
+unmeasured ones are listed so their absence stays visible.
+
+**The timer never writes to `BLOCKAGES.md`** unless `CSERVICE_KAIZEN_APPEND=1`.
+An automatic writer fills the log with dated sections nobody wrote, and the
+duplicate-section guard refuses every one of them — so it is either a no-op or a
+flood, and neither is useful. Automatic means *measured on a schedule and
+readable at an endpoint*; appending stays an act a person performs. `POST
+/kaizen/admin/sweep` refuses `append` outright rather than discouraging it, since
+an endpoint a dashboard can poll should not be able to write the log.
+
+#### Other fixes on the way
+
+- **Four invented engine targets.** `build_policy_tier`,
+  `booking_status_flow`, `apply_preference_change`, `classify_topics` and
+  `build_recovery_playbooks` were all guesses; none exists. The audit caught every
+  one, which is the argument for resolving by import rather than trusting a
+  hand-written list. Four phantom probe ids in `PROBE_CAPABILITY` likewise.
+- **`assess_capabilities` read `ENGINE_BY_ID`, not `ENGINES`.** A derived index is
+  a second copy that can disagree with the table it came from, and a caller who
+  edits the table has no way to tell which one the assessor is reading. Same
+  reason `validate_authz` reads tables rather than import-time indexes — and it
+  is what makes the inventory testable at all.
+- **`sweep_forever` could not be told to skip the shadow checks**, so the timer
+  and the CLI could not both be configurable. Found by a test.
+
+#### Verification
+
+- `python3 -m pytest tests/ -q` → **2514 passed** (57 new in
+  `tests/test_kaizen_completeness.py`).
+- `python3 scripts/run_kaizen.py` → one command, exit `1`: 21 runs / 41 subflows
+  exercised, 42 parts at share `0.881`, 0 blockers, 5 warnings, shadow failing
+  closed (unconfigured), `in_sync: true`, and the ladder blocked at `l3_canary`
+  by `backend_completeness_honest` **with evidence** while naming the three
+  gates it could not measure.
+- Completeness graded at each rung on the live tree →
+  `0, 0, 1, 5` blocking for `l0_draft, l2_shadow, l3_canary, l4_live`.
+  Monotonically non-decreasing, and asserted as such: promoting must never loosen
+  the bar.
+- `authz_drift_report(app.routes)` → 277 pairs, **0 unclassified, 0 mismatched,
+  6 public writes on the record, `in_sync: true`**; `validate_authz()` valid.
+- `scripts/build_code_map.py` → `leaves=763 internal_nodes=68`; revision stays
+  **`r6`** (leaf-level additions only, maintenance rule 6) with a second r6
+  addendum; `scripts/sync_code_map_md.py --check` → in sync.
+
+Code map: `/meta/` `kaizen_release_surface` (+`kaizen_completeness`,
+`kaizen_sweep`; ecosystem `config_tables` gains `CAPABILITY_STATES`,
+`PROBE_CAPABILITY`, `ENGINES`), and `CODE_MAP.md` r6 second addendum ·
+`/meta/ecosystem`, `/meta/features`, `/meta/authz` · Tests:
+`tests/test_kaizen_completeness.py`, `tests/test_kaizen_shadow_release.py`
+
+### Complaint learning: system-raised complaints, learned weights, and stacked-complaint suggestions (2026-09-30)
+
+A complaint can now be a **system event**. Six detectors watch live cases and can
+open a complaint attributed to a customer who never complained — a booking that
+failed repeatedly, a payment that did not settle, a first response that never came,
+a customer already at critical churn risk. The customer experiences all of these
+before they are willing to write to us, and a system that only listens when spoken
+to is blind to exactly the cases that matter most.
+
+Three guards make unattended operation defensible, and all three are config
+rather than code, so a misbehaving detector is dialled down without touching the
+module: the detector's own confidence against its own gate, a per-`(detector,
+customer)` cooldown, and dedupe against a genuinely separate live case. A fourth,
+a per-call cap, is the guard against one corrupt snapshot becoming one case per
+customer.
+
+**Each contributing factor now carries a learned weight, and the objective is
+customer retention.** Seventeen signals are read against a case and combined, each
+with a learned weight that is bounded, decayed toward its configured prior, and
+persisted in a table rather than module state — so it survives a deploy and a
+reviewer can answer "why does `sentiment_cliff` weigh 1.8" by reading rows. The
+training signal is what happened to the customer *afterwards*, not whether the
+complaint was closed, and those two come apart constantly.
+
+The direction inversion is the part worth stating, because getting it backwards
+produces a system that looks like it is learning: a **damage** signal attached to
+a case the customer *stayed* was overstating its damage, so it gets **lighter**.
+A **protection** signal that did not translate into retention was overstated too.
+A `neutral` outcome — a complaint three days old, no verdict yet — teaches
+nothing at all, because counting "not yet known" as agreement is how a learner
+concludes that doing nothing is correct.
+
+**"Loyalty" here means retention and habitual return**, which is measurable from
+data the schema already has: churn risk, reactivation, repeat booking, points
+accrual, complaint-free lifetime. It explicitly does **not** mean contact
+frequency or time-on-service. A complaint system that rewards more contact is
+inverting its own purpose — the customer contacting us *is* the failure signal, and
+treating it as the goal makes the angriest customer the most valued one. The
+catalog states this in `objective.not_optimised` so a later change that adds
+"engagement" as a positive signal has to argue with it rather than quietly
+adding it.
+
+**When complaints stack up, they become a suggestion.** Five cluster rules group
+recent cases by category, owner team, origin and severity, each meeting a
+multi-axis threshold. The number that matters is the **reopen rate**: a cluster of
+cases that were closed and never reopened is the system working, and a cluster
+that keeps coming back is the system not working. So priority is not case count —
+a large stable cluster is a capacity problem and caps at medium, and a small one
+that keeps reopening outranks it.
+
+A suggestion is shaped like `efficiency_audit.EnhancementProposal` and is
+registered on the release ladder at `l0_draft`, the level whose own config
+describes it as "written but unexamined... where it is safe to be wrong". It must
+earn promotion through the existing gates like anything else. `proposal_id` is a
+hash of the cluster key rather than of the evidence, so a cluster that grows from
+5 cases to 50 updates the same row and a suggestion a human has dismissed does
+not reappear on the next sweep.
+
+**`BLOCKAGES.md` is not written to.** The suggestions are made *renderable*
+instead: `GET /complaints/admin/learning/blockages` returns a pasteable markdown
+section and a diff of what a paste would add. The diff can only ever propose
+additions — a heading already present is left alone and nothing in this file is
+ever parsed for removal. That asymmetry is the safety property: this module is
+allowed to add a suggestion to a human's document and is structurally incapable
+of taking one of their lines out. There is no write path to this file anywhere in
+`services/complaint_learning.py`, and a test asserts both the absence of the
+call and the absence of a non-`GET` route.
+
+**Two pre-existing defects found on the way.**
+
+`ReleaseCandidate.pair()` raised `AttributeError` on every call — it passed the
+dataclass to `split_version_pair`, which reads with `.get`. That is the method the
+rollback path uses to name the versions it must return to, so a rollback that
+tried to resolve its own version pair could not. Fixed in `app/release_ladder.py`.
+
+`CHAIN` in `tests/test_migration_chain.py` is hand-maintained and nothing compared
+it to the directory. My first migration applied cleanly in isolation and reported
+itself verified while being absent from the list the chain actually runs, so all
+three new tables would have shipped with no migration — the exact failure that let
+ten tables ship that way before.
+`test_the_chain_lists_every_migration_file_on_disk` now closes it.
 
 ### Kaizen: simulated flows, a one-way shadow, and a graded ladder (2026-09-30)
 

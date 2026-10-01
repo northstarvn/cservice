@@ -176,6 +176,22 @@ TREE = _node(
                   "levels", "gates", "gate_evaluator", "candidates",
                   "candidate_registry", "ledger", "rollback_window", "rollback",
                   "safe_levels", "measurements", "validation", "catalog"),
+            # The other axis to the simulation: not "does it behave" but "is it
+            # there". Six graded states rather than a boolean, because a gap, a
+            # defect and a part nobody has tested want different responses -- and
+            # an immature backend is the starting state, so what counts as fatal
+            # depends on the maturity rung being entered.
+            _node("capability_audit",
+                  "states", "inventory", "engine_resolution", "surface_resolution",
+                  "stub_detector", "blind_probes", "orphan_probes",
+                  "deferral", "level_measurements", "validation", "catalog"),
+            # One entry point for all three subsystems, plus the timer. The CLI
+            # and the background worker call the same function, so a check that
+            # only runs when somebody remembers it cannot hide.
+            _node("kaizen_sweep",
+                  "run_sweep", "sections", "summarize", "exit_code",
+                  "result_store", "sweep_history", "autostatus", "worker",
+                  "async_sweep", "json"),
         ),
         _node(  # Stage 1: business-rule hyper-flexibility
             "business_rules",
@@ -248,7 +264,18 @@ TREE = _node(
               "acknowledge", "resolve", "close",
               "decision_support", "apply", "customer_visibility",
               "queue", "sla_report", "auto_escalation_sweep", "decision_audit",
-              "governance"),
+              "governance",
+              # Complaint learning, under the complaints router because these
+              # are `/complaints/admin/learning/*` and share the
+              # `complaints_admin` authz rule. Grouped by surface rather than one
+              # leaf per endpoint: the read half (catalog, weights, detect,
+              # clusters, system-raised, blockages) and the write half (observe,
+              # raise, proposals, publish) are two different risk profiles and
+              # the split is the thing worth being able to see.
+              "learning_catalog", "learning_weights", "learning_observe",
+              "learning_detect", "learning_raise", "learning_system_raised",
+              "learning_clusters", "learning_proposals", "learning_publish",
+              "learning_blockages"),
         # The release surface. Its own router node rather than leaves under
         # `main`: every other node here is a business surface a customer or an
         # operator uses, and this one is the set of acts that change what the
@@ -257,6 +284,7 @@ TREE = _node(
         _node("kaizen",
               "catalog", "flow_catalog", "flow_simulation", "flow_sweep",
               "blockage_report", "blockage_log",
+              "completeness_report", "sweep_status", "sweep_now",
               "shadow_report", "shadow_verification",
               "maturity_levels", "candidate_registry", "candidate_measurement",
               "promotion", "safe_levels", "deployment_ledger", "rollback"),
@@ -332,7 +360,26 @@ TREE = _node(
               "authority_floor", "routing", "sla_matrix", "regulatory_deadline",
               "decision_feeds", "decision_dossier", "precedent_retrieval",
               "decision_history", "auto_escalation_sweep", "sla_report",
-              "admin_rollup", "case_linkage", "validation", "catalog"),
+              "admin_rollup", "case_linkage", "validation", "catalog",
+              # The eleventh dossier feed, contributed by complaint_learning
+              # rather than by this module. Declared here because a feed is a
+              # property of the dossier it appears in, and leaving it undeclared
+              # would make the feed list and the context keys disagree.
+              "loyalty_contribution_feed"),
+        # Complaint learning. Its own service node because it is a different
+        # mechanism from `complaints` -- a detector that opens cases, a learner
+        # that reweights signals, and a clusterer that proposes work -- and
+        # folding it into the complaints node would hide that the authority
+        # boundary between them is the design.
+        _node("complaint_learning",
+              "loyalty_objective", "loyalty_signals", "learning_parameters",
+              "weight_authority", "signal_readers", "contribution_scoring",
+              "weight_update", "confidence", "weight_report",
+              "loyalty_facts", "learning_pass", "weight_store",
+              "system_detectors", "detector_gates", "system_raise",
+              "system_raised_listing", "cluster_detection", "cluster_thresholds",
+              "proposal_rendering", "proposal_store", "proposal_publishing",
+              "blockages_render", "validation", "catalog"),
         _node("audit_log",
               "record", "list", "summary", "action_catalog",
               "governed_record", "action_aliases", "action_specs",

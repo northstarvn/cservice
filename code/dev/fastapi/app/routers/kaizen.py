@@ -44,7 +44,15 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import deps, models, real_life_flows, release_ladder, shadow_env
+from app import (
+    capability_audit,
+    deps,
+    kaizen_runner,
+    models,
+    real_life_flows,
+    release_ladder,
+    shadow_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +142,32 @@ class RollbackIn(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+class SweepIn(BaseModel):
+    """Run every kaizen check once, now.
+
+    ``for_level`` is the field with real content: it decides what the
+    completeness grading treats as fatal, so it is a `Literal` rather than a
+    free string. ``"l3"`` should be a 422 rather than a silently unrecognised
+    level that grades as though nothing were at stake.
+    """
+
+    for_level: Literal[
+        "l0_draft", "l1_verified", "l2_shadow", "l3_canary", "l4_live"
+    ] = Field(
+        default="l3_canary",
+        description="grade completeness and promotion gates for this maturity level",
+    )
+    environment: str = Field(default="offline", max_length=40)
+    include_shadow: bool = Field(
+        default=True,
+        description="run the six isolation checks; they are cheap and fail closed",
+    )
+    append: bool = Field(
+        default=False,
+        description="refused -- see the endpoint docstring; the CLI is the writer",
+    )
+
+
 class AppendBlockagesIn(BaseModel):
     allow_repeat: bool = Field(
         default=False,
@@ -202,6 +236,112 @@ async def kaizen_catalog(
             "release_ladder": release_ladder.validate_release_ladder(),
         },
         "measurement_sources": dict(_MEASUREMENT_SOURCES),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Completeness, and the sweep
+# ---------------------------------------------------------------------------
+
+
+@router.get("/kaizen/admin/completeness")
+async def list_completeness(
+    level: Optional[str] = None,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """What is built, how far, and what that means at ``level``.
+
+    The second axis to ``/flows``. Flow findings say *does it behave*; this says
+    *is it there*, which is the question that matters while the backend is still
+    immature -- and it grades rather than answering yes or no, because a gap, a
+    defect and a part nobody has tested want different responses from the same
+    person on the same day.
+
+    ``level`` decides which findings are fatal, and the default is to filter
+    nothing rather than assume a level: you get the whole picture, which is what
+    a dashboard wants, plus the grading for the level you name.
+    """
+    from app.main import app as fastapi_app  # local: app.main imports this router
+
+    runs = real_life_flows.run_all_flows()
+    report = real_life_flows.capability_report(runs)
+    payload: dict[str, Any] = {
+        "total": report["total"],
+        "counts": report["counts"],
+        "states": list(capability_audit.CAPABILITY_STATES),
+        "complete_share": report["complete_share"],
+        "capabilities": report["capabilities"],
+        "orphan_probes": report["orphan_probes"],
+        "blind_probes": report["blind_probes"],
+        "untested": report["untested"],
+        "unassessable": report["unassessable"],
+        "flows_measurements": real_life_flows.flow_gate_measurements(runs),
+        "blockages": [
+            row.as_dict() for row in real_life_flows.completeness_blockages(report)
+        ],
+        "note": report["note"],
+        "route_table_note": (
+            "surfaces are resolved through deps.iter_authz_routes, not app.routes: "
+            "included routers are lazy in this FastAPI release, so app.routes "
+            "under-reports the served surface sevenfold and would declare 29 of the "
+            "30 surfaces the flows name as absent"
+        ),
+    }
+    if level is not None:
+        payload["for_level"] = level
+        payload["measurements"] = real_life_flows.completeness_measurements(
+            report, for_level=level
+        )
+    _ = fastapi_app  # force the local import, so the cycle is explicit
+    return payload
+
+
+@router.get("/kaizen/admin/sweep")
+async def sweep_status(
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """What the automatic trigger has been doing, and whether it is even on.
+
+    The useful question here is not "did it pass" but "is it running" -- a worker
+    that silently never started looks exactly like a healthy one, and publishing
+    the configuration beside the result is what tells the two apart.
+    """
+    return kaizen_runner.autostatus()
+
+
+@router.post("/kaizen/admin/sweep")
+async def run_sweep_now(
+    payload: SweepIn,
+    current_user: models.User = Depends(deps.get_current_admin_user),
+):
+    """Run the whole sweep now, in this request.
+
+    Separate from the timer on purpose: an operator asking "what does it say?"
+    should not wait for the next tick, and should not have to enable a timer to
+    get an answer.
+
+    **Read-only. ``append`` is refused outright** rather than merely
+    discouraged, because this endpoint exists so a human can look and the dated
+    -section guard would reject a repeat anyway. Writing the log is
+    ``scripts/run_kaizen.py --append``, where the act shows up in a shell
+    history.
+    """
+    if payload.append:
+        raise _bad_request(
+            "append is not available here: it writes BLOCKAGES.md, and an endpoint "
+            "a dashboard can poll should not be able to. Use "
+            "`python3 scripts/run_kaizen.py --append`"
+        )
+    result = await kaizen_runner.run_sweep_async(
+        environment=payload.environment,
+        include_shadow=payload.include_shadow,
+        for_level=payload.for_level,
+        append=False,
+    )
+    return {
+        "summary": kaizen_runner.summarize(result),
+        "exit_code": result["exit_code"],
+        "sweep": result,
     }
 
 
