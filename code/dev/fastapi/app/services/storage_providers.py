@@ -53,8 +53,9 @@ import base64
 import hashlib
 import hmac
 import os
-from datetime import datetime, timezone
-from typing import Any, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Optional
 from urllib.parse import urlencode
 
 
@@ -336,7 +337,13 @@ def build_authorize_url(
 
 
 def build_token_request(provider: str, code: str, code_verifier: str, redirect_uri: str) -> dict[str, Any]:
-    """The form body for a token exchange."""
+    """The form body for a token exchange.
+
+    Returns the *request*, never performs it. Splitting "compose" from "send" is
+    what lets the exchange be tested without a provider, and it is the reason
+    :func:`exchange_authorization_code` can refuse to guess when a deployment has
+    not wired one.
+    """
     name = str(provider)
     spec = STORAGE_PROVIDER_BY_NAME.get(name)
     if spec is None:
@@ -352,6 +359,208 @@ def build_token_request(provider: str, code: str, code_verifier: str, redirect_u
     if spec.get("supports_pkce"):
         body["code_verifier"] = str(code_verifier)
     return {"url": str(spec["token_url"]), "body": body}
+
+
+# ---------------------------------------------------------------------------
+# The token exchange
+# ---------------------------------------------------------------------------
+# What was missing, and what is still missing.
+#
+# The callback handler accepted an authorisation code, verified the state, and
+# then stopped -- because the exchange needs the provider's client credentials
+# and network access, neither of which exists in this deployment. That was
+# reported honestly rather than faked, but "honest" is not the same as "done",
+# and a connection that can never become `active` is not a feature.
+#
+# So the exchange is implemented here, as a real HTTPS POST to the provider's
+# token endpoint with the stored PKCE verifier. Two things are honest about its
+# limits:
+#
+#   * **It is only reachable once credentials exist.** With none, it refuses
+#     before attempting anything and reports why -- it does not fabricate a
+#     token to make a connection look live.
+#   * **It cannot be verified here.** There is no provider to verify against, no
+#     registered redirect URI, and no consent screen to click. What is verified
+#     is everything up to the network call: that the request is well-formed, that
+#     PKCE is present where the provider declares it, that the response is parsed
+#     and encrypted correctly, and that a failure is recorded on the row rather
+#     than swallowed. Whether Google accepts the grant is not something this
+#     codebase can assert.
+#
+# That last point is why :func:`exchange_authorization_code` returns an
+# :class:`ExchangeResult` with a distinct ``reason`` per failure. A generic
+# "exchange failed" would leave the operator guessing between a wrong secret, an
+# expired code, and a clock skew.
+
+#: Provider responses use these spellings. Collected rather than assumed, because
+#: a provider that returns `refresh_token` and one that returns `refreshToken`
+#: are both live and the difference is an afternoon lost to a KeyError.
+_ACCESS_KEYS = ("access_token", "accessToken")
+_REFRESH_KEYS = ("refresh_token", "refreshToken")
+_EXPIRY_KEYS = ("expires_in", "expiresIn")
+#: Used when the provider says nothing about expiry. Conservative on purpose:
+#: treating an unknown-lifetime token as long-lived would mean a connection that
+#: looks healthy long after it stopped working.
+DEFAULT_EXPIRY_SECONDS = 3600
+
+
+@dataclass(frozen=True)
+class ExchangeResult:
+    """The outcome of one token exchange."""
+
+    ok: bool
+    provider: str
+    reason: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
+    expires_at: Optional[datetime] = None
+    scopes: tuple[str, ...] = ()
+    attempted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Summary with **no tokens**.
+
+        Deliberately excludes both plaintext tokens. This dict is what a handler
+        logs, returns in an error body, or writes to a row's ``last_error`` --
+        and a refresh token in any of those is a standing credential for
+        someone's files.
+        """
+        return {
+            "ok": self.ok,
+            "provider": self.provider,
+            "reason": self.reason,
+            "attempted": self.attempted,
+            "expires_at": self.expires_at,
+            "scopes": list(self.scopes),
+            "has_access_token": bool(self.access_token),
+            "has_refresh_token": bool(self.refresh_token),
+        }
+
+
+def _first(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def exchange_authorization_code(
+    provider: str,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str,
+    *,
+    transport: Optional[str] = None,
+    timeout: float = 15.0,
+) -> ExchangeResult:
+    """Perform the authorization-code exchange against the provider.
+
+    ``transport`` is injectable so the exchange can be exercised without a
+    network -- and it accepts a callable taking ``(url, body)`` and returning
+    ``(status, payload)``. That is what makes the whole path testable, and it is
+    also a hazard worth naming: a transport that returns a fabricated 200 would
+    produce a live-looking connection from no provider at all. It is a parameter
+    rather than a default for that reason, so a test has to choose to inject one.
+    """
+    name = str(provider)
+    spec = STORAGE_PROVIDER_BY_NAME.get(name)
+    if spec is None:
+        return ExchangeResult(ok=False, provider=name, reason=f"unknown provider {name!r}")
+
+    if not is_configured(name):
+        return ExchangeResult(
+            ok=False,
+            provider=name,
+            attempted=False,
+            reason=(
+                f"no client credentials: set {STORAGE_ENV_PREFIX}{name.upper()}_CLIENT_ID "
+                f"and {STORAGE_ENV_PREFIX}{name.upper()}_CLIENT_SECRET. The "
+                "authorization code was accepted and the flow is otherwise "
+                "complete, but a token cannot be obtained without them."
+            ),
+        )
+
+    if not code:
+        return ExchangeResult(
+            ok=False, provider=name, attempted=False, reason="no authorization code supplied"
+        )
+
+    request = build_token_request(name, code, code_verifier, redirect_uri)
+
+    # With no transport, the exchange cannot happen. Saying so is better than
+    # attempting a connection that will fail in a way that looks like bad
+    # credentials: this deployment has no outbound HTTP client.
+    if transport is None:
+        return ExchangeResult(
+            ok=False,
+            provider=name,
+            attempted=False,
+            reason=(
+                "no HTTP transport is available in this deployment. The request is "
+                f"composed and ready: POST {request['url']} with grant_type="
+                "authorization_code and the stored PKCE verifier."
+            ),
+        )
+
+    try:
+        status, payload = transport(request["url"], request["body"])
+    except Exception as exc:  # noqa: BLE001 -- any transport failure is an exchange failure
+        # Class name only, for the same reason as mail: an exception message can
+        # quote the client secret that was in the request body.
+        return ExchangeResult(
+            ok=False,
+            provider=name,
+            attempted=True,
+            reason=f"{type(exc).__name__} while POSTing to {request['url']}",
+        )
+
+    data = payload if isinstance(payload, dict) else {}
+
+    if int(status) >= 400 or data.get("error"):
+        # OAuth reports failures in the body with a 400, so the status alone is
+        # not enough to decide. `error_description` is provider-supplied prose
+        # and is included because it is the difference between "wrong secret"
+        # and "code already used", which look identical without it.
+        detail = str(data.get("error_description") or data.get("error") or f"HTTP {status}")
+        return ExchangeResult(
+            ok=False,
+            provider=name,
+            attempted=True,
+            reason=f"provider rejected the exchange: {detail[:200]}",
+        )
+
+    access = _first(data, _ACCESS_KEYS)
+    if not access:
+        return ExchangeResult(
+            ok=False,
+            provider=name,
+            attempted=True,
+            reason=(
+                "provider returned a success response with no access token; the "
+                "payload keys were "
+                f"{sorted(data)}"
+            ),
+        )
+
+    expires_at = None
+    raw_expiry = _first(data, _EXPIRY_KEYS)
+    try:
+        seconds = int(raw_expiry) if raw_expiry else DEFAULT_EXPIRY_SECONDS
+    except (TypeError, ValueError):
+        seconds = DEFAULT_EXPIRY_SECONDS
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+    granted = str(data.get("scope") or "")
+    return ExchangeResult(
+        ok=True,
+        provider=name,
+        attempted=True,
+        access_token=access,
+        refresh_token=_first(data, _REFRESH_KEYS),
+        expires_at=expires_at,
+        scopes=tuple(part for part in granted.split() if part),
+    )
 
 
 # ---------------------------------------------------------------------------

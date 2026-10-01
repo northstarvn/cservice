@@ -291,10 +291,34 @@ curl -s -X POST localhost:8000/users/auth/email-otp/request \
   -H 'Content-Type: application/json' -d '{"username":"ana","device_id":"my-laptop"}'
 ```
 
-There is **no mail sender in this deployment**. The code is generated, hashed
-and stored; nothing delivers it. That is the honest failure mode — an
-integration has to send it, and a deployment that has not wired a sender will
-see a correct-shaped response and no inbox.
+Mail is real, and the default transport cannot deliver. `CSERVICE_MAIL_TRANSPORT`
+is `simulated`, `file` or `smtp`; see `app/services/mail.py`.
+
+```bash
+# have codes actually written to disk, so you can read them:
+CSERVICE_MAIL_TRANSPORT=file CSERVICE_MAIL_DIR=./var/mail uvicorn app.main:app
+cat ./var/mail/*.json          # each file has the code in plain text
+
+# or a real server:
+CSERVICE_MAIL_TRANSPORT=smtp CSERVICE_SMTP_HOST=... CSERVICE_SMTP_USER=... \
+  CSERVICE_SMTP_PASSWORD=... uvicorn app.main:app
+```
+
+The response tells you which happened:
+
+```json
+{"sent": true, "delivered": false, "delivery_transport": "simulated", ...}
+```
+
+`accepted` and `delivered` are separate on purpose. `sent: true` means a code was
+issued; `delivered: false` means nothing reached anyone. Without that split, a
+deployment with no mail server answers "check your email" on every request while
+the code is generated, hashed, stored and dropped — which looks like a mail
+outage and gets debugged in the wrong place for a long time.
+
+Both fields describe *the deployment*, not the account, so they are identical for
+a real username and an invented one. That is what keeps the route from becoming
+an account-enumeration oracle now that it says more than it used to.
 
 **Device recognition does not sign anyone in.** It scores a login from the
 device digest, a network /24, user-agent, language, a declared UTC offset and
@@ -343,11 +367,41 @@ credentials. `POST /users/me/storage/connect` returns an authorisation URL;
 the broadest scope grants read/write/delete over the whole account, is never the
 default, and needs `confirm_broad_scope: true` plus a message stating so.
 
-**The token exchange is not implemented here.** A connection stays `pending`
-with no tokens stored and says so, rather than being reported live. Setting
-`CSERVICE_STORAGE_REDIRECT_URI` is required — without it the connect endpoint
-answers 503 instead of sending someone to a URL that cannot match what the
-provider has registered.
+**The token exchange is implemented; this deployment cannot reach a provider.**
+The callback verifies the state, decrypts the PKCE verifier, POSTs to the
+provider's token endpoint, and encrypts what comes back. Three conditions have to
+hold for a connection to reach `active`, and `/meta/ecosystem` reports all three
+as `storage_providers.can_complete`:
+
+| requirement | env / hook |
+|---|---|
+| a registered callback | `CSERVICE_STORAGE_REDIRECT_URI` |
+| client credentials | `STORAGE_<PROVIDER>_CLIENT_ID` + `_CLIENT_SECRET` |
+| an outbound HTTP transport | `identity.set_transport_hook("storage_token_exchange", fn)` |
+
+Without them the callback returns 503, leaves the connection `pending` with the
+reason in `last_error`, and stores no token. It never fabricates one — a
+fabricated token makes a connection look live while every file operation behind
+it fails.
+
+The transport hook is the one place a deployment plugs in an HTTP client:
+
+```python
+from app.routers import identity
+
+def transport(url, form_body):
+    # url is the provider's token endpoint, form_body carries client_secret and
+    # the PKCE verifier. Must not follow redirects to another host -- the
+    # secret is in the body.
+    return status, parsed_json
+
+identity.set_transport_hook("storage_token_exchange", transport)
+```
+
+Note the flow is single-use even when it fails: the state is cleared before the
+exchange, so a retry has to re-run `connect`. That is deliberate — the
+authorization code is single-use at the provider too, so a second callback could
+only ever fail more confusingly.
 
 Revoking overwrites the stored ciphertext and keeps the row, so the record of
 what was once granted survives for an investigation while the credential does

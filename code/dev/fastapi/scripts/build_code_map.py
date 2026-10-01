@@ -426,8 +426,16 @@ TREE = _node(
         # the broadest one grants deletion -- the reason the broad end needs an
         # explicit confirmation rather than being the default.
         _node("storage_providers",
-              "provider_registry", "scope_ladders", "pkce", "token_encryption",
-              "connection_health", "revocation", "validation", "catalog"),
+              "provider_registry", "scope_ladders", "pkce", "token_exchange",
+              "token_encryption", "connection_health", "revocation",
+              "validation", "catalog"),
+        # Mail. `delivery_boundary` is the leaf that matters: three transports
+        # behind one interface, and the split between *accepted* and *delivered*
+        # that stops an unconfigured deployment from claiming a code is on its
+        # way when nothing was sent.
+        _node("mail",
+              "delivery_boundary", "transport_registry", "otp_message",
+              "simulated_outbox", "validation", "catalog"),
     ),
     _node(  # schemas ----------------------------------------------------------
         "schemas",

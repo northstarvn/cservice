@@ -34,7 +34,7 @@ from app.routers import (
     webhooks,
 )
 from app import kaizen_runner
-from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers
+from app.services import audit_log, chat_analytics, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers, mail
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
 from app import (
@@ -300,6 +300,11 @@ async def app_metadata():
             "auth_methods",
             "device_recognition",
             "storage_providers",
+            # Mail is listed separately because the one-time-code path's
+            # trustworthiness is conditional on it: a deployment that cannot
+            # deliver must be able to discover that from /meta rather than from a
+            # customer reporting they never received a code.
+            "mail",
         ],
     }
 
@@ -368,11 +373,42 @@ async def app_ecosystem():
                     for name in storage_providers.STORAGE_PROVIDER_BY_NAME
                     if storage_providers.is_configured(name)
                 ],
-                "token_exchange_implemented": False,
+                # Whether a connection can actually reach `active`, decided the
+                # same way the handler decides it rather than being asserted.
+                # `implemented` alone would read as "this works" while a
+                # deployment still holds at `pending`.
+                "token_exchange_implemented": True,
+                "outbound_http_transport": bool(
+                    identity.transport_hook_is_installed()
+                ),
+                "can_complete": (
+                    bool(
+                        [
+                            name
+                            for name in storage_providers.STORAGE_PROVIDER_BY_NAME
+                            if storage_providers.is_configured(name)
+                        ]
+                    )
+                    and identity.transport_hook_is_installed()
+                    and bool(os.getenv("CSERVICE_STORAGE_REDIRECT_URI", ""))
+                ),
                 "note": (
-                    "no provider ships with credentials, and the token exchange is not "
-                    "implemented in this deployment -- a connection stays 'pending' with "
-                    "its tokens unset rather than being reported as live"
+                    "the authorization-code exchange is implemented and verified up to "
+                    "the network call, but this deployment has no outbound HTTP client, "
+                    "so the callback reports 503 and leaves the connection 'pending' "
+                    "with the reason recorded rather than reporting a connection live "
+                    "that cannot reach the provider"
+                ),
+            },
+            "outbound_mail": {
+                "transport": mail.configured_transport(),
+                "reports_delivery": mail.transport_reports_delivery(),
+                "smtp_configured": bool(os.getenv("CSERVICE_SMTP_HOST", "")),
+                "note": (
+                    "the simulated transport is the default and cannot deliver. It "
+                    "exists so the one-time-code path works end to end without a mail "
+                    "server; POST /users/auth/email-otp/request reports delivered=false "
+                    "in that configuration instead of claiming a code is on its way."
                 ),
             },
             "booking_core": {
@@ -1366,6 +1402,10 @@ async def scoring_catalog():
         "auth_methods": auth_methods.build_auth_methods_catalog(),
         "device_recognition": device_recognition.build_recognition_catalog(),
         "storage_providers": storage_providers.build_storage_catalog(),
+        # Mail is published because the OTP endpoint's honesty depends on it: a
+        # deployment whose transport cannot deliver needs to be able to see that
+        # without reading the source.
+        "mail": mail.build_mail_catalog(),
         "database_ops": db_infra.build_db_ops_catalog(),
         "customer_360": {
             "sections": list(customer_360.CUSTOMER_360_SECTIONS),

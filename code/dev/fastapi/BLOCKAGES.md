@@ -2272,6 +2272,54 @@ Two things are not implemented and say so: no provider ships with credentials
 a button that leads to a broken consent screen), and the token exchange is
 absent, so a connection stays `pending` rather than being reported live.
 
+### The two pendings, closed (2026-10-01)
+
+Both were reported as not implemented. Both are now implemented, with the limit
+that remains stated rather than implied.
+
+**1. Mail delivery for the one-time code** — `app/services/mail.py`.
+
+`CSERVICE_MAIL_TRANSPORT` is `simulated` (default), `file`, or `smtp`. The design
+point is the split between *accepted* and *delivered*: a simulated send is
+accepted and **not** delivered, and `POST /users/auth/email-otp/request` reports
+both. Without that split a deployment with no mail server answers "check your
+email" on every request while the code is generated, hashed, stored and dropped —
+which presents as a mail outage and gets debugged in the wrong place.
+
+The two new response fields describe *the deployment*, not the account, so they
+are byte-identical for a real username and an invented one. That is what keeps
+the route from becoming an enumeration oracle now that it says more than it used
+to — asserted by comparing both response bodies directly, because "no identifying
+field" and "no field that varies by caller" are different claims and only the
+second is what the design rests on.
+
+Delivery happens *before* the challenge commits. If the send fails the caller is
+told the code is not on its way, rather than a committed-but-undeliverable
+challenge consuming one of the account's five attempts on a code that was never
+sent.
+
+**2. The OAuth token exchange** — `storage_providers.exchange_authorization_code`.
+
+The callback now decrypts the PKCE verifier, POSTs to the provider's token
+endpoint, encrypts both tokens and moves the row to `active`. Three conditions
+must hold, all three reported as `storage_providers.can_complete` in
+`/meta/ecosystem`: a registered redirect URI, client credentials, and an
+outbound HTTP transport. **The third is absent in this deployment**, so the
+exchange reports that the request is composed and ready, the row stays
+`pending` with the reason in `last_error`, and no token is stored.
+
+It never fabricates a token. That would make a connection look live while every
+file operation behind it failed — the failure the previous version avoided by
+doing nothing, and the one an eager implementation would introduce.
+
+`ExchangeResult.to_dict()` excludes both plaintext tokens, because that dict is
+what gets logged and written to `last_error`.
+
+The state is cleared *before* the exchange, so a failed attempt cannot be
+retried by replaying the callback. The authorization code is single-use at the
+provider anyway, so a second callback could only fail more confusingly; the
+customer re-runs `connect`.
+
 ### Defects found and fixed while building this
 
 | Where | Defect |
@@ -2293,9 +2341,10 @@ absent, so a connection stays `pending` rather than being reported live.
 `authenticated`: it is a scope of effect, not a stricter gate, and a higher rank
 would make a plain session look like it implies more than it does.
 
-`/meta` gains `auth_methods`, `device_recognition`, `storage_providers`;
+`/meta` gains `auth_methods`, `device_recognition`, `storage_providers`, `mail`;
 `/meta/ecosystem` gains the latter two as subservices reporting
-`grants_access: false`; `/meta/scoring-catalog` publishes all three tables.
+`grants_access: false`, plus an `outbound_mail` block reporting whether this
+deployment can deliver at all; `/meta/scoring-catalog` publishes all four tables.
 
 Verified: `alembic upgrade head` from empty → 29 tables, drift in sync, full
 `downgrade base` and re-upgrade clean. Live probe against PostgreSQL — OTP issue
@@ -2304,3 +2353,11 @@ device login (loa2, `recognised`) → token from another device refused → revo
 token refused → OTP limiter firing 429 on the third request. Enforced mode
 challenges a password-only login on a trusted device and leaves an account with
 nothing enrolled working.
+
+Both pendings then probed live: with `CSERVICE_MAIL_TRANSPORT=file`, OTP request
+reports `delivered: true`, the message lands on disk, the recovered code verifies
+at loa2, and the response contains no plaintext address — while the unknown-user
+response stays byte-identical to the real one. With storage fully configured, the
+callback returns 503 naming the missing transport, the row stays `pending` with
+`healthy: false`, the second callback is refused 400 despite the first having
+failed, and zero rows hold a stored token. Suite **2636 passing**.

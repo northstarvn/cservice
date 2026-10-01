@@ -916,8 +916,11 @@ AUTHZ_RULES: list[dict[str, Any]] = [
      "note": (
          "OAuth providers redirect with GET, so this is a GET that mutates -- the standard "
          "shape, and the reason the state digest is the control rather than method-based "
-         "CSRF defence. The state and PKCE verifier are cleared whether or not the exchange "
-         "succeeds, so a second callback cannot replay the first."
+         "CSRF defence. The state and PKCE verifier are cleared before the exchange, so a "
+         "second callback cannot replay the first even when the first exchange failed. "
+         "Now that the exchange runs here, this route is where an unconfigured deployment's "
+         "503 comes from, and it is the only route in the tree that can store a "
+         "third-party credential."
      )},
     {"rule_id": "storage_revoke_one", "methods": ("DELETE",),
      "path": "/users/me/storage/{connection_id}", "exposure": "self_service",

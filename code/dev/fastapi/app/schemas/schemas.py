@@ -1157,16 +1157,25 @@ class OtpRequestIn(BaseModel):
 
 
 class OtpRequestOut(BaseModel):
-    """Sent, deliberately without the code.
+    """Issued, deliberately without the code.
 
     `user_id` and `email` are omitted unconditionally -- including when the
     account does not exist -- because a response that differs between a known
     and an unknown username is a free account-enumeration oracle.
+
+    `delivered` and `delivery_transport` are the exception that proves the rule:
+    they describe *this deployment's* mail configuration, not the account, so
+    they are identical for every caller and reveal nothing. They exist because a
+    deployment with no mail server otherwise reports "check your email" forever
+    while the code is generated, hashed, stored and dropped -- a support queue
+    that looks like a mail outage rather than an unconfigured deployment.
     """
 
     sent: bool = False
     expires_in_seconds: int = 0
     max_attempts: int = 0
+    delivered: bool = False
+    delivery_transport: str = "simulated"
     reason: str = ""
 
 

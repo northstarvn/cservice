@@ -348,10 +348,25 @@ class TestUnauthenticatedRoutesDoNotEnumerate:
         assert "OtpRequestOut" not in json.dumps(am.build_auth_methods_catalog())
 
     def test_the_otp_response_schema_declares_no_user_identifying_field(self):
+        # The two delivery fields are in here deliberately and are the exception
+        # that proves the rule: they describe *this deployment's* mail
+        # configuration, not the account, so they are identical for every caller.
+        # Asserted separately below, because "no identifying field" and "no field
+        # that varies by caller" are different claims and only the second is what
+        # the design rests on.
         from app.schemas import schemas
 
         fields = set(schemas.OtpRequestOut.model_fields)
-        assert fields == {"sent", "expires_in_seconds", "max_attempts", "reason"}, fields
+        assert fields == {
+            "sent",
+            "expires_in_seconds",
+            "max_attempts",
+            "delivered",
+            "delivery_transport",
+            "reason",
+        }, fields
+        for forbidden in ("user_id", "email", "identifier", "username", "code", "exists"):
+            assert forbidden not in fields, forbidden
 
     def test_recognition_answers_the_same_for_a_user_with_no_devices(self):
         # Both an unknown username and a known user with no recognised device
@@ -799,6 +814,31 @@ class Mounted:
         return self._send(lambda c: c.delete(path, **kw), client_ip)
 
 
+def _code_in(sent):
+    """The six-digit code out of a recorded message.
+
+    The body is prose -- "Your code is 481902." -- so the digit run is extracted
+    rather than assumed. ``len == 6`` rather than ``isdigit()`` alone, because the
+    message also contains the TTL, which is a two-digit number and would satisfy
+    the weaker test.
+    """
+    assert sent is not None, "no message was recorded"
+    for token in str(sent["body"]).replace(".", " ").split():
+        if token.isdigit() and len(token) == 6:
+            return token
+    raise AssertionError(f"no six-digit code in {sent['body']!r}")
+
+
+async def _first_storage(session, user_id: int):
+    """The account's one storage row, for asserting on after a request."""
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(models.StorageConnection).where(models.StorageConnection.user_id == user_id)
+    )
+    return result.scalars().first()
+
+
 def _the_app():
     from app.main import app
 
@@ -1098,6 +1138,211 @@ class TestSelfServiceSurface:
             assert response.json()["detail"]["error"] == "broad_scope_requires_confirmation"
             assert "delete" in response.json()["detail"]["grants"].lower()
 
+    # --- The token exchange, with an injected transport ---------------------
+    #
+    # The whole path up to the network call is what can be verified here: that
+    # the state gate holds, that the verifier is decrypted and used, that both
+    # tokens land encrypted and neither is returned, and that every failure is
+    # recorded rather than swallowed. Whether a provider accepts the grant is
+    # not something this codebase can assert, so no test claims it.
+
+    def _connected(self, harness, *, response=(200, {"access_token": "at-1"}), **env):
+        """Run connect -> callback with a fake provider, return the callback body."""
+        os.environ["CSERVICE_STORAGE_REDIRECT_URI"] = "https://example.test/cb"
+        os.environ["STORAGE_GOOGLE_DRIVE_CLIENT_ID"] = "cid"
+        os.environ["STORAGE_GOOGLE_DRIVE_CLIENT_SECRET"] = "secret"
+        seen: dict[str, Any] = {}
+
+        def transport(url, body):
+            seen["url"] = url
+            seen["body"] = body
+            return response
+
+        from app.routers import identity as identity_router
+
+        identity_router.set_transport_hook("storage_token_exchange", transport)
+        user = harness.user(1)
+        try:
+            connect = Mounted(harness, user).post(
+                "/users/me/storage/connect",
+                json={"provider": "google_drive", "scope": "https://www.googleapis.com/auth/drive.file"},
+            )
+            assert connect.status_code == 200, connect.text
+            state = connect.json()["state"]
+            callback = Mounted(harness, user).get(
+                "/users/me/storage/callback",
+                params={"provider": "google_drive", "code": "auth-code", "state": state},
+            )
+            return callback, seen, user
+        finally:
+            identity_router.set_transport_hook("storage_token_exchange", None)
+            for key in (
+                "CSERVICE_STORAGE_REDIRECT_URI",
+                "STORAGE_GOOGLE_DRIVE_CLIENT_ID",
+                "STORAGE_GOOGLE_DRIVE_CLIENT_SECRET",
+            ):
+                os.environ.pop(key, None)
+
+    def test_a_successful_exchange_activates_the_connection(self, harness):
+        callback, _, _ = self._connected(
+            harness,
+            response=(
+                200,
+                {
+                    "access_token": "at-1",
+                    "refresh_token": "rt-1",
+                    "expires_in": 3600,
+                    "scope": "https://www.googleapis.com/auth/drive.file",
+                },
+            ),
+        )
+        assert callback.status_code == 200, callback.text
+        body = callback.json()
+        assert body["status"] == "active"
+        assert body["connected"] is True
+        assert body["granted_scopes"] == ["https://www.googleapis.com/auth/drive.file"]
+
+    def test_the_exchange_posts_pkce_and_the_client_secret(self, harness):
+        _, seen, _ = self._connected(harness)
+        assert seen["url"] == "https://oauth2.googleapis.com/token"
+        body = seen["body"]
+        assert body["grant_type"] == "authorization_code"
+        assert body["code"] == "auth-code"
+        assert body["code_verifier"], "the stored PKCE verifier must be sent"
+        assert body["redirect_uri"] == "https://example.test/cb"
+
+    def test_the_tokens_are_stored_encrypted_and_never_returned(self, harness):
+        callback, _, user = self._connected(
+            harness,
+            response=(200, {"access_token": "at-secret", "refresh_token": "rt-secret"}),
+        )
+        assert callback.status_code == 200
+        assert "at-secret" not in callback.text
+        assert "rt-secret" not in callback.text
+
+        row = harness.run(
+            _first_storage(harness.session, user.id)
+        )
+        assert row is not None
+        assert "at-secret" not in row.access_token_encrypted
+        assert row.access_token_encrypted.startswith("enc:")
+        assert sp.decrypt_token(row.access_token_encrypted) == "at-secret"
+        assert row.status == "active"
+        assert row.connected_at is not None
+
+    def test_a_narrower_grant_is_recorded_rather_than_the_request(self, harness):
+        # A user can approve less than was asked for. Recording the request
+        # would overstate what the connection can do.
+        callback, _, _ = self._connected(
+            harness,
+            response=(
+                200,
+                {
+                    "access_token": "at",
+                    "scope": "https://www.googleapis.com/auth/drive.file",
+                },
+            ),
+        )
+        assert callback.json()["granted_scopes"] == [
+            "https://www.googleapis.com/auth/drive.file"
+        ]
+
+    def test_a_provider_rejection_is_a_503_with_the_reason_on_the_row(self, harness):
+        callback, _, user = self._connected(
+            harness,
+            response=(400, {"error": "invalid_grant", "error_description": "code already used"}),
+        )
+        assert callback.status_code == 503, callback.text
+        detail = callback.json()["detail"]
+        assert detail["error"] == "token_exchange_unavailable"
+        assert "code already used" in detail["reason"]
+        assert detail["attempted"] is True
+        assert detail["state_consumed"] is True
+
+        row = harness.run(_first_storage(harness.session, user.id))
+        assert row.status == "pending", "a failed exchange must not read as active"
+        assert "code already used" in row.last_error
+        assert row.access_token_encrypted == "", "a partial token was stored"
+
+    def test_a_transport_exception_never_echoes_the_secret(self, harness):
+        def exploding(url, body):
+            raise RuntimeError(f"connection to {url} failed with secret={body['client_secret']}")
+
+        os.environ["CSERVICE_STORAGE_REDIRECT_URI"] = "https://example.test/cb"
+        os.environ["STORAGE_GOOGLE_DRIVE_CLIENT_ID"] = "cid"
+        os.environ["STORAGE_GOOGLE_DRIVE_CLIENT_SECRET"] = "super-secret-value"
+        from app.routers import identity as identity_router
+
+        identity_router.set_transport_hook("storage_token_exchange", exploding)
+        user = harness.user(1)
+        try:
+            connect = Mounted(harness, user).post(
+                "/users/me/storage/connect", json={"provider": "google_drive"}
+            )
+            state = connect.json()["state"]
+            callback = Mounted(harness, user).get(
+                "/users/me/storage/callback",
+                params={"provider": "google_drive", "code": "c", "state": state},
+            )
+        finally:
+            identity_router.set_transport_hook("storage_token_exchange", None)
+            for key in (
+                "CSERVICE_STORAGE_REDIRECT_URI",
+                "STORAGE_GOOGLE_DRIVE_CLIENT_ID",
+                "STORAGE_GOOGLE_DRIVE_CLIENT_SECRET",
+            ):
+                os.environ.pop(key, None)
+
+        assert callback.status_code == 503
+        assert "super-secret-value" not in callback.text, (
+            "an exception message reached the client and can quote the secret it "
+            "was handed"
+        )
+        assert "RuntimeError" in callback.json()["detail"]["reason"]
+
+    def test_the_callback_still_refuses_a_forged_state(self, harness):
+        # The state gate is unchanged by any of this and must stay first: it is
+        # what makes the callback endpoint safe to expose at all.
+        os.environ["CSERVICE_STORAGE_REDIRECT_URI"] = "https://example.test/cb"
+        os.environ["STORAGE_GOOGLE_DRIVE_CLIENT_ID"] = "cid"
+        os.environ["STORAGE_GOOGLE_DRIVE_CLIENT_SECRET"] = "secret"
+        user = harness.user(1)
+        harness.add(
+            models.StorageConnection(
+                user_id=user.id,
+                provider="google_drive",
+                status="pending",
+                state_hash=dr.digest_signal("the-real-state", "device"),
+                code_verifier_encrypted=sp.encrypt_token("verifier"),
+            )
+        )
+        harness.commit()
+        try:
+            response = Mounted(harness, user).get(
+                "/users/me/storage/callback",
+                params={"provider": "google_drive", "code": "x", "state": "forged"},
+            )
+        finally:
+            for key in (
+                "CSERVICE_STORAGE_REDIRECT_URI",
+                "STORAGE_GOOGLE_DRIVE_CLIENT_ID",
+                "STORAGE_GOOGLE_DRIVE_CLIENT_SECRET",
+            ):
+                os.environ.pop(key, None)
+        assert response.status_code == 400, response.text
+
+    def test_the_exchange_refuses_without_credentials_and_says_which(self, harness):
+        # No credentials must be a refusal, never a fabricated token.
+        for key in ("STORAGE_GOOGLE_DRIVE_CLIENT_ID", "STORAGE_GOOGLE_DRIVE_CLIENT_SECRET"):
+            os.environ.pop(key, None)
+        result = sp.exchange_authorization_code(
+            "google_drive", "code", "verifier", "https://example.test/cb"
+        )
+        assert result.ok is False
+        assert result.attempted is False
+        assert result.access_token == ""
+        assert "STORAGE_GOOGLE_DRIVE_CLIENT_ID" in result.reason
+
     def test_a_callback_with_the_wrong_state_is_refused(self, harness):
         os.environ["CSERVICE_STORAGE_REDIRECT_URI"] = "https://example.test/cb"
         try:
@@ -1149,9 +1394,14 @@ class TestSelfServiceSurface:
         finally:
             os.environ.pop("CSERVICE_STORAGE_REDIRECT_URI", None)
 
-        assert first.status_code == 200, first.text
+        # 503 is the honest answer with no provider credentials and no transport.
+        # Asserted specifically because "consumed" is the property under test and
+        # it holds on both paths: the second call must be refused whether the
+        # first succeeded or failed.
+        assert first.status_code == 503, first.text
         assert second.status_code == 400, "the state was reusable"
-        assert first.json()["connected"] is False, "a token was claimed without one"
+        assert "access_token" not in first.text
+        assert first.json()["detail"]["state_consumed"] is True
 
 
 # ===========================================================================
@@ -1547,3 +1797,216 @@ class TestTrustedDeviceCountsAsEnrolled:
         assert verdict.policy_id == "trusted"
         assert decision["challenge"] is False, "enforcement would lock the account out"
         assert decision["downgraded"] is True
+
+
+# ===========================================================================
+# Mail: the delivery half of the one-time code
+# ===========================================================================
+#
+# The OTP path was a complete credential and an incomplete feature -- the code
+# was generated, hashed and stored, with nothing to deliver the plaintext. These
+# tests pin the two things that had to be true for adding delivery to not make
+# things worse:
+#
+#   * **Uniformity survives.** The response gains `delivered` and
+#     `delivery_transport`, which describe the deployment rather than the
+#     account. If either varied by caller, the response is an enumeration oracle
+#     again -- and it is the one field most likely to, since "was this account's
+#     mail sent" is exactly the question an attacker asks.
+#   * **A non-delivering deployment says so.** The default transport is
+#     `simulated`, which cannot deliver. The endpoint has to report that, or the
+#     failure presents as a mail outage and is debugged for a long time in the
+#     wrong place.
+
+
+@pytest.fixture
+def outbox():
+    from app.services import mail
+
+    mail.SimulatedOutbox.clear()
+    yield mail.SimulatedOutbox
+    mail.SimulatedOutbox.clear()
+
+
+class TestMailTransportIsHonestAboutDelivering:
+    def test_the_default_transport_cannot_deliver(self):
+        from app.services import mail
+
+        assert mail.configured_transport() == "simulated"
+        assert mail.transport_reports_delivery() is False, (
+            "the default transport claims it can deliver, which is the whole "
+            "failure this module exists to prevent"
+        )
+
+    def test_a_simulated_send_is_accepted_but_not_delivered(self):
+        # The accepted/delivered split is the design. Collapsing them is how a
+        # deployment with no mail server ends up telling people to check their
+        # inbox for a message that was never sent.
+        from app.services import mail
+
+        result = mail.deliver(mail.build_otp_message(to="a@example.com", code="123456"))
+        assert result.accepted is True
+        assert result.delivered is False
+        assert "no mail was sent" in result.detail
+
+    def test_only_smoke_and_file_claim_delivery(self):
+        from app.services import mail
+
+        for transport in mail.MAIL_TRANSPORTS:
+            expected = transport in {"smtp", "file"}
+            assert mail.transport_reports_delivery(transport) is expected, transport
+
+    def test_an_unrecognised_transport_falls_back_to_simulated(self):
+        # Falling back to `smtp` or `file` would be worse than falling back at
+        # all; falling back to `off` would make a typo look like an outage.
+        os.environ["CSERVICE_MAIL_TRANSPORT"] = "carrier-pigeon"
+        try:
+            from app.services import mail
+
+            assert mail.configured_transport() == "simulated"
+        finally:
+            os.environ.pop("CSERVICE_MAIL_TRANSPORT", None)
+
+    def test_smtp_without_a_host_fails_rather_than_hanging(self):
+        os.environ["CSERVICE_MAIL_TRANSPORT"] = "smtp"
+        os.environ.pop("CSERVICE_SMTP_HOST", None)
+        try:
+            from app.services import mail
+
+            result = mail.deliver(mail.build_otp_message(to="a@example.com", code="1"))
+            assert result.accepted is False
+            assert result.delivered is False
+            assert "CSERVICE_SMTP_HOST" in result.detail
+        finally:
+            os.environ.pop("CSERVICE_MAIL_TRANSPORT", None)
+
+    def test_the_validator_reports_the_non_delivering_default(self):
+        from app.services import mail
+
+        report = mail.validate_mail()
+        assert report["ok"] is True, "an unconfigured deployment is not a code defect"
+        codes = {f["code"] for f in report["findings"]}
+        assert "default_cannot_deliver" in codes
+        assert report["reports_delivery"] is False
+
+    def test_a_result_never_carries_the_code(self, outbox):
+        # A code in a result is a code in whatever the result is serialised
+        # into -- a response body, a log line, a metrics label.
+        from app.services import mail
+
+        result = mail.deliver(mail.build_otp_message(to="a@example.com", code="987654"))
+        assert "987654" not in str(result.to_dict())
+
+    def test_a_result_never_carries_the_recipient_in_full(self, outbox):
+        # A delivery log carrying whole addresses is a log of who was sent a
+        # sign-in credential, which is a different and worse artifact.
+        from app.services import mail
+
+        result = mail.deliver(
+            mail.build_otp_message(to="real.person@example.com", code="987654")
+        )
+        assert result.recipient_masked == "r***@example.com"
+        assert "real.person" not in str(result.to_dict())
+
+    def test_the_simulated_outbox_is_bounded(self):
+        # The default transport holds plaintext codes, so it must not be able to
+        # grow without limit in a long-running process.
+        from app.services import mail
+
+        assert 0 < mail.SimulatedOutbox.limit <= 4096
+
+    def test_the_file_transport_writes_a_message(self, tmp_path):
+        os.environ["CSERVICE_MAIL_TRANSPORT"] = "file"
+        os.environ["CSERVICE_MAIL_DIR"] = str(tmp_path / "outbox")
+        try:
+            from app.services import mail
+
+            result = mail.deliver(
+                mail.build_otp_message(to="a@example.com", code="555111")
+            )
+            assert result.delivered is True, result.detail
+            written = list((tmp_path / "outbox").glob("*.json"))
+            assert len(written) == 1
+            assert "555111" in written[0].read_text()
+        finally:
+            os.environ.pop("CSERVICE_MAIL_TRANSPORT", None)
+            os.environ.pop("CSERVICE_MAIL_DIR", None)
+
+    def test_a_file_write_failure_is_a_failure_not_a_silent_success(self, tmp_path):
+        os.environ["CSERVICE_MAIL_TRANSPORT"] = "file"
+        # A path under a regular file cannot be created, so the write fails.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        os.environ["CSERVICE_MAIL_DIR"] = str(blocker / "outbox")
+        try:
+            from app.services import mail
+
+            result = mail.deliver(
+                mail.build_otp_message(to="a@example.com", code="555111")
+            )
+            assert result.accepted is False
+            assert result.delivered is False
+        finally:
+            os.environ.pop("CSERVICE_MAIL_TRANSPORT", None)
+            os.environ.pop("CSERVICE_MAIL_DIR", None)
+
+
+class TestOtpDeliveryDoesNotBreakUniformity:
+    def _request(self, harness, username):
+        return Mounted(harness).post(
+            "/users/auth/email-otp/request", json={"username": username}
+        ).json()
+
+    def test_a_real_and_an_unknown_account_return_the_same_body(self, harness, outbox):
+        harness.user(1)
+        # `harness.user(1)` is username u1; request it by that name.
+        known = self._request(harness, "u1")
+        unknown = self._request(harness, "nobody-at-all")
+        assert known == unknown, (
+            "the delivery fields made the response depend on whether the account "
+            "exists, which is the enumeration oracle the whole route avoids"
+        )
+
+    def test_the_response_reports_that_nothing_was_delivered(self, harness, outbox):
+        harness.user(1)
+        body = self._request(harness, "u1")
+        assert body["sent"] is True
+        assert body["delivered"] is False
+        assert body["delivery_transport"] == "simulated"
+
+    def test_a_code_reaches_the_outbox_and_verifies_end_to_end(self, harness, outbox):
+        # The whole point of the module: the plaintext exists somewhere a person
+        # could receive it, and the stored hash accepts it.
+        user = harness.user(1)
+        self._request(harness, "u1")
+
+        code = _code_in(outbox.last())
+
+        response = Mounted(harness).post(
+            "/users/auth/email-otp/verify", json={"username": "u1", "code": code}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["access_token"]
+        assert response.json()["assurance"] == "loa2"
+
+    def test_re_requesting_replaces_the_code_rather_than_adding_one(self, harness, outbox):
+        # Otherwise repeated requests widen the set of codes in circulation; they
+        # only invalidate codes the caller already had.
+        harness.user(1)
+        self._request(harness, "u1")
+        old = _code_in(outbox.last())
+        self._request(harness, "u1")
+        new = _code_in(outbox.last())
+
+        assert old != new
+        assert (
+            Mounted(harness)
+            .post("/users/auth/email-otp/verify", json={"username": "u1", "code": old})
+            .status_code
+            == 401
+        ), "the superseded code still verified"
+
+    def test_a_undeliverable_transport_does_not_leak_via_the_reason(self, harness, outbox):
+        harness.user(1)
+        body = self._request(harness, "u1")
+        assert "nobody-at-all" not in body["reason"]

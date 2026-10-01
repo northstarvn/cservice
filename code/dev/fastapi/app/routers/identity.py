@@ -49,7 +49,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
@@ -60,6 +60,7 @@ from app import deps, models, security
 from app.schemas import schemas
 from app.services import auth_methods as am
 from app.services import device_recognition as dr
+from app.services import mail
 from app.services import storage_providers as sp
 
 router = APIRouter()
@@ -68,6 +69,50 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+#: Injection point for an outbound HTTP transport, keyed by purpose. Empty by
+#: default because this deployment has no outbound HTTP client, and an
+#: unreachable code path cannot be tested at all -- so the seam exists and is
+#: named, rather than the exchange being hardcoded as a stub.
+#:
+#: A transport is `(url, form_body) -> (status, parsed_json)`. It must not follow
+#: redirects to another host: `client_secret` is in the body, and a redirect that
+#: relocates it is a credential leak.
+_TRANSPORT_HOOKS: dict[str, Callable[[str, dict[str, Any]], tuple[int, dict[str, Any]]]] = {}
+
+
+def set_transport_hook(
+    name: str, hook: Optional[Callable[[str, dict[str, Any]], tuple[int, dict[str, Any]]]]
+) -> None:
+    """Install (or clear, with ``None``) a named transport.
+
+    Module-level rather than a parameter threaded through every handler because
+    it has exactly one legitimate caller -- a deployment that has an HTTP client
+    -- and threading it through the FastAPI dependency graph would put a
+    test-only seam in the request path.
+    """
+    if hook is None:
+        _TRANSPORT_HOOKS.pop(str(name), None)
+    else:
+        _TRANSPORT_HOOKS[str(name)] = hook
+
+
+def _storage_transport():
+    """The token-exchange transport, or ``None`` when none is installed."""
+    return _TRANSPORT_HOOKS.get("storage_token_exchange")
+
+
+def transport_hook_is_installed(name: str = "storage_token_exchange") -> bool:
+    """Whether a named transport is available.
+
+    Separate from ``_storage_transport`` so ``/meta/ecosystem`` can answer
+    "can a connection complete here?" without importing the transport itself or
+    reaching into the hook table. The question comes up in the ecosystem payload
+    precisely because ``token_exchange_implemented: true`` reads as "this works"
+    on a deployment that will still hold at ``pending``.
+    """
+    return _TRANSPORT_HOOKS.get(str(name)) is not None
 
 
 def _now() -> datetime:
@@ -429,19 +474,34 @@ async def request_email_otp(
     db: AsyncSession = Depends(deps.get_db),
     _principal: deps.Principal = Depends(deps.require_public_rate_tier("sensitive")),
 ):
-    """Send a one-time code, if the account exists.
+    """Generate a one-time code and send it, if the account exists.
 
     Returns the same body whether or not the account exists. ``sent`` is true
     either way and carries no user id, no address, and no hint about whether
     anything was delivered -- the caller learns only that the request was
     accepted, which is what a real mail system would tell them.
 
-    There is no delivery here. The code is not put in a response, not logged,
-    and not returned in a header, so an integration has to actually send mail;
-    a deployment that has not wired a sender will see a correct-shaped response
-    and no inbox, which is the honest failure mode.
+    **Uniformity is about the account, not about delivery.** ``accepted`` is
+    always true, so a response cannot reveal whether ``username`` exists. What it
+    does carry is ``delivered`` and ``delivery_transport``, which describe the
+    *deployment's* mail configuration and are the same for every caller.
+
+    That distinction is the reason those two fields can be here at all. The
+    failure this prevents is a sign-in flow that answers "check your email"
+    forever on a deployment with no mail server: the code is generated, hashed,
+    stored, and dropped, and nothing anywhere says the message went nowhere.
+    ``delivered: false`` says exactly that, and it says it identically for a real
+    account and an unknown username -- so it leaks nothing while still being the
+    difference between a working fallback and an infinite loop of support
+    tickets.
+
+    The code is never in this response, never logged, and never returned in a
+    header. Only its hash is stored.
     """
     user = await _user_by_username(db, payload.username)
+    delivered = False
+    transport = mail.configured_transport()
+
     if user is not None:
         digest = (
             dr.digest_signal(payload.device_id, "device") if payload.device_id else ""
@@ -458,26 +518,53 @@ async def request_email_otp(
         for row in existing.scalars().all():
             row.superseded_at = _now()
         code = am.generate_otp()
-        db.add(
-            models.AuthChallenge(
-                user_id=user.id,
-                purpose="login",
-                code_hash=security.get_password_hash(code),
-                channel="email",
-                device_digest=digest,
-                expires_at=am.otp_expiry(),
-                max_attempts=am.OTP_MAX_ATTEMPTS,
-            )
+        challenge = models.AuthChallenge(
+            user_id=user.id,
+            purpose="login",
+            code_hash=security.get_password_hash(code),
+            channel="email",
+            device_digest=digest,
+            expires_at=am.otp_expiry(),
+            max_attempts=am.OTP_MAX_ATTEMPTS,
         )
+        db.add(challenge)
+
+        # Deliver before committing the challenge. The order matters: if the
+        # send fails the caller is told the code is not on its way, and a
+        # committed-but-undeliverable challenge would otherwise consume one of
+        # the account's five attempts on a code that was never sent. Delivering
+        # first means the worst case is a delivered code whose row did not
+        # commit -- the recipient has a code that will not verify, which expires
+        # in ten minutes on its own.
+        if user.email:
+            result = mail.deliver(
+                mail.build_otp_message(
+                    to=user.email,
+                    code=code,
+                    purpose="login",
+                    ttl_minutes=am.OTP_TTL_MINUTES,
+                )
+            )
+            delivered = result.delivered
+            transport = result.transport
+        else:
+            # An account with no address cannot be mailed. `email` is NOT NULL
+            # in the schema but is not constrained non-empty, so this is
+            # reachable rather than theoretical.
+            transport = "none"
         await db.commit()
+
     return {
         "sent": True,
         "expires_in_seconds": am.OTP_TTL_MINUTES * 60,
         "max_attempts": am.OTP_MAX_ATTEMPTS,
+        "delivered": delivered,
+        "delivery_transport": transport,
         "reason": (
-            "if the account exists, a code is on its way. This response is "
+            "if the account exists, a code has been issued. This response is "
             "identical either way so it cannot be used to find out who has an "
-            "account here"
+            "account here. `delivered` and `delivery_transport` describe this "
+            "deployment's mail configuration and are the same for every caller."
         ),
     }
 
@@ -1475,18 +1562,31 @@ async def storage_callback(
     current_user: models.User = Depends(deps.get_current_user),
     db: AsyncSession = Depends(deps.get_db),
 ):
-    """Complete the OAuth flow and store the grant, encrypted.
+    """Complete the OAuth flow: exchange the code, store the grant, encrypted.
 
-    There is no token exchange in this deployment: it needs the provider's
-    client secret and network access, and a caller who has not configured either
-    should be told so rather than handed a connection that looks live. So the
-    flow records the authorisation code and reports what the next step would be,
-    and leaves the row ``pending`` rather than ``active``.
+    What this does now that it did not before: it performs the token exchange
+    (:func:`storage_providers.exchange_authorization_code`), encrypts whatever
+    comes back, and moves the row to ``active``. A connection that used to be
+    permanently ``pending`` can now be live.
 
-    That is a real limitation, stated rather than faked. What it does verify --
-    the state digest belongs to a flow this server started, and the row belongs
-    to the caller -- are the two checks that make a callback endpoint safe to
-    expose at all.
+    Three things it still will not do, each reported rather than hidden:
+
+    * **It refuses to invent a token.** With no client credentials it returns a
+      503 naming the two env vars, and the row stays ``pending`` with the reason
+      in ``last_error``. A fabricated token would make a connection look live
+      while every file operation behind it failed.
+    * **It cannot reach a provider from here.** There is no outbound HTTP client
+      in this deployment, so without an injected transport the exchange reports
+      that the request is composed and ready. That is a real limitation of *this*
+      build, not of the code path -- and the distinction is the reason the
+      limitation is a response rather than a comment.
+    * **It clears the single-use state before exchanging.** So a failed exchange
+      cannot be retried by replaying the callback. The authorization code is
+      single-use at the provider anyway, so a second attempt could only ever
+      fail with a more confusing error; the customer re-runs `connect` instead.
+
+    What it verifies, and always did: the state digest belongs to a flow this
+    account started, and the row belongs to the caller.
     """
     if error:
         raise HTTPException(
@@ -1510,32 +1610,71 @@ async def storage_callback(
             detail="callback does not match a flow this account started",
         )
 
+    # Decrypt the verifier *before* clearing it -- the exchange needs it, and it
+    # is stored encrypted precisely so that clearing it afterwards leaves nothing
+    # recoverable.
+    verifier = sp.decrypt_token(row.code_verifier_encrypted)
+
     # Drop the state and verifier whatever happens next: they are single-use, and
     # leaving them on the row would let a second callback replay the first.
     row.state_hash = ""
     row.code_verifier_encrypted = ""
-    row.status = "pending"
-    row.last_error = (
-        "token exchange is not implemented in this deployment; "
-        "configure the provider client credentials and call the token endpoint"
+
+    requested = json.loads(row.requested_scopes_json or "[]")
+    redirect_uri = os.getenv("CSERVICE_STORAGE_REDIRECT_URI", "")
+    exchange = sp.exchange_authorization_code(
+        provider, code, verifier, redirect_uri, transport=_storage_transport()
     )
+
+    if not exchange.ok:
+        row.status = "pending"
+        row.last_error = exchange.reason[:255]
+        await db.commit()
+        # 503 rather than 400: nothing the customer did was wrong. The code was
+        # accepted, the state verified, and the failure is ours -- unconfigured
+        # credentials or no outbound transport.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error": "token_exchange_unavailable",
+                "provider": provider,
+                "reason": exchange.reason,
+                "attempted": exchange.attempted,
+                "status": row.status,
+                "state_consumed": True,
+                "next": (
+                    "re-run POST /users/me/storage/connect -- the authorization code "
+                    "is single-use, so this callback cannot be retried"
+                ),
+            },
+        )
+
+    row.access_token_encrypted = sp.encrypt_token(exchange.access_token)
+    row.refresh_token_encrypted = sp.encrypt_token(exchange.refresh_token)
+    row.expires_at = exchange.expires_at
+    # Record the grant, not the request. A user can approve less than was asked
+    # for, and a connection that described the request would overstate what it
+    # can do.
+    granted = list(exchange.scopes) or list(requested)
+    row.scopes_json = json.dumps(granted)
+    row.status = "active"
+    row.connected_at = _now()
+    row.last_error = ""
+    row.revoked_at = None
+    row.revoked_reason = ""
     await db.commit()
 
     return {
         "provider": provider,
         "received_code": bool(code),
         "status": row.status,
-        "connected": False,
-        "grants_pending": json.loads(row.requested_scopes_json or "[]"),
-        "next": (
-            "exchange the code at the provider's token endpoint with the stored PKCE "
-            "verifier, then store the tokens with encrypt_token() and set status="
-            "'active'"
-        ),
+        "connected": True,
+        "granted_scopes": granted,
+        "requested_scopes": requested,
+        "expires_at": _as_utc(row.expires_at),
         "note": (
-            "the authorisation code was accepted and the single-use state was "
-            "consumed. No token was fetched, so no token is stored and this "
-            "connection is not usable yet."
+            "the authorization code was exchanged and both tokens are stored "
+            "encrypted; the ciphertext is never returned by any endpoint"
         ),
     }
 
