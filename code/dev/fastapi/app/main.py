@@ -31,11 +31,17 @@ from app.routers import (
     kaizen,
     offers,
     topics,
+    transfers,
     users,
     webhooks,
 )
 from app import kaizen_runner
-from app.services import audit_log, chat_analytics, customer_offers, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers, mail
+from app.services import audit_log, chat_analytics, customer_offers, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers, mail, brain_router
+# `transfers` names both a router and a service, and the router arrives in the
+# `app.routers` import above. Aliasing the service follows the existing
+# `preferences as preferences_service` convention rather than leaving a bare
+# `transfers` for whichever import ran last to define it.
+from app.services import transfers as transfers_service
 from app.services.efficiency_audit import build_efficiency_audit_catalog
 from app import security
 from app import (
@@ -245,6 +251,11 @@ app.include_router(users.router, prefix="/users", tags=["users"])
 # the sign-in surface lives somewhere else. Two routers on one prefix is fine --
 # every path here is a distinct literal, so nothing shadows anything above.
 app.include_router(identity.router, prefix="/users", tags=["identity"])
+# Credit transfers and third-party debt settlement. Its own prefix, not
+# folded into /chat or /users: these are the only routes where one
+# authenticated customer moves value out of their own account on behalf of
+# another, which is a different exposure and gets its own authz rule.
+app.include_router(transfers.router, prefix="/transfers", tags=["transfers"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
 app.include_router(chat.router, tags=["chat"])
 app.include_router(topics.router, tags=["topics"])
@@ -319,6 +330,10 @@ async def app_metadata():
             # deliver must be able to discover that from /meta rather than from a
             # customer reporting they never received a code.
             "mail",
+            # Which brain answers a customer, and the budgets that keep
+            # that decision from being the slow part of a reply.
+            "brain_router",
+            "customer_transfers",
         ],
     }
 
@@ -1656,6 +1671,8 @@ async def scoring_catalog():
         # deployment whose transport cannot deliver needs to be able to see that
         # without reading the source.
         "mail": mail.build_mail_catalog(),
+        "brain_router": brain_router.build_brain_catalog(),
+        "transfers": transfers_service.build_transfers_catalog(),
         "database_ops": db_infra.build_db_ops_catalog(),
         "customer_360": {
             "sections": list(customer_360.CUSTOMER_360_SECTIONS),

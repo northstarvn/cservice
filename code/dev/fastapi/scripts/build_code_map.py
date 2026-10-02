@@ -249,6 +249,13 @@ TREE = _node(
         _node("identity",
               "sign_in_methods", "device_recognition_report",
               "trusted_devices", "linked_identities", "storage_connections"),
+        # Customer-to-customer value. Its own node because these are the only
+        # routes where one authenticated customer moves something out of their
+        # own account on behalf of another -- a different exposure from
+        # everything else in the tree, with its own authz rules.
+        _node("transfers",
+              "credit_transfer", "transfer_quote", "transfer_history",
+              "third_party_settlement", "transfer_refusals"),
         _node("bookings",
               "lifecycle_crud", "analytics", "assignment_report", "audit_history", "export"),
         _node("chat",
@@ -515,6 +522,23 @@ TREE = _node(
         # that reweights signals, and a clusterer that proposes work -- and
         # folding it into the complaints node would hide that the authority
         # boundary between them is the design.
+        # Which brain answers. `credential_vocabulary` and `demand_resolution`
+        # are the leaves that stop a confidence score becoming access: the first
+        # is closed and validated, the second refuses to demand a credential an
+        # account cannot produce.
+        _node("brain_router",
+              "signal_scoring", "policy_bands", "credential_vocabulary",
+              "demand_resolution", "enforcement_modes", "operator_handoff",
+              "data_egress", "validation", "catalog"),
+        # Customer-to-customer value. The asymmetry is the design: a credit
+        # moving between holders cannot create value, so points move freely; a
+        # debt moving can, so it does not move at all. `refused_operations` is a
+        # leaf rather than an absence so the reason is answerable from the
+        # running service.
+        _node("transfers",
+              "credit_transfer", "transfer_idempotency", "transfer_limits",
+              "third_party_settlement", "refused_operations",
+              "validation", "catalog"),
         _node("complaint_learning",
               "loyalty_objective", "loyalty_signals", "learning_parameters",
               "weight_authority", "signal_readers", "contribution_scoring",

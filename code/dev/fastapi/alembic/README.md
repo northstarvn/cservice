@@ -229,3 +229,41 @@ It is still worth removing, and the order matters: decide the baseline for any
 database already deployed first, then drop `create_all` from the lifespan, then
 let `alembic upgrade` be the only path. Doing it the other way round would
 leave every existing deployment with a schema no migration recorded.
+
+## Server defaults are compared too, and why that was missing
+
+`scripts/schema_drift_report.py` originally compared table names, column names
+and indexes. It did **not** compare server defaults, and the gap hid a
+live-only defect for the life of the chain:
+
+    chat_history.timestamp   model: server_default=func.now(), nullable=False
+                             chain: NOT NULL, no default
+
+Every INSERT relying on the default — which is how the application writes chat
+rows — failed on a migrated database:
+
+    null value in column "timestamp" of relation "chat_history" violates not-null constraint
+
+and succeeded on a `create_all` one. Nothing caught it:
+
+* the suite builds its schema from `Base.metadata`, which *has* the default, so
+  2997 tests were green;
+* the drift report compared names and reported "in sync".
+
+Fixed in two places, because they fix different problems:
+
+* `0001_initial_schema` now declares the default, so a database built from base
+  is right at the source.
+* `0012_chat_history_default` repairs the ones already deployed. Fixing the base
+  alone would only help fresh installs — which is the same "the migration ran
+  everywhere" problem that makes an in-place edit insufficient.
+
+The report now compares defaults too, in **one direction only**: a column the
+*model* gives a default and the *database* does not. That is the direction that
+fails inserts. The other direction (database has a default the model omits) is
+harmless — SQLAlchemy sends the value explicitly — and there are 156 of them in
+this schema. Reporting both would drown a real finding in noise and train people
+to ignore the report.
+
+Only *presence* is compared, not the expression text: `now()` and
+`CURRENT_TIMESTAMP` are one default written two ways.

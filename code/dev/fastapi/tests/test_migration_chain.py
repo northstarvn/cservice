@@ -42,6 +42,8 @@ CHAIN = (
     "20260930_03_add_complaint_learning.py",
     "20261001_01_add_identity_and_storage.py",
     "20261001_02_add_customer_offers.py",
+    "20261002_01_add_transfers.py",
+    "20261002_02_chat_history_timestamp_default.py",
 )
 
 #: The tables the *first* migration creates, before any delta runs. Used to
@@ -251,7 +253,7 @@ def test_no_migration_converts_a_column_type_on_the_way_up(chain_db):
             # Every alter_column call in upgrade() must be a server-default
             # change, i.e. its only keyword argument besides the column name.
             for call in _calls_named(upgrade_body, alter):
-                keywords = re.findall(r"(\w+)\s*=", call)
+                keywords = _top_level_keywords(call)
                 allowed = {"existing_type", "existing_nullable",
                            "existing_server_default", "server_default", "type_"}
                 unexpected = [k for k in keywords if k not in allowed]
@@ -259,6 +261,39 @@ def test_no_migration_converts_a_column_type_on_the_way_up(chain_db):
                     f"{Path(module.__file__).name} alters a column in a way this "
                     f"project does not intend: {unexpected} in {call!r}"
                 )
+
+
+def _top_level_keywords(call: str) -> list[str]:
+    """Keyword names in a call, ignoring anything inside a nested call.
+
+    A flat regex over the call text reads `timezone=True` out of
+    ``existing_type=sa.DateTime(timezone=True)`` and reports it as an
+    ``alter_column`` keyword, which rejects every legitimate server-default
+    change that names a timezone-aware type. The permission this project grants
+    is "alter_column for a server default", and ``DateTime(timezone=True)`` is
+    how that is spelled for half the schema -- so the guard rejected exactly the
+    calls it exists to allow.
+
+    Nested parenthesised groups are blanked before the keyword scan, so only the
+    outer call's arguments are read.
+    """
+    depth = 0
+    out: list[str] = []
+    current = ""
+    for char in call:
+        if char == "(":
+            depth += 1
+            if depth > 1:
+                continue
+        elif char == ")":
+            depth -= 1
+            if depth > 0:
+                continue
+        if depth > 1:
+            continue
+        current += char
+    out.extend(re.findall(r"(\w+)\s*=", current))
+    return out
 
 
 def _calls_named(body: str, function_name: str) -> list[str]:

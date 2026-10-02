@@ -502,7 +502,9 @@ def _entry_dict(row: Any, username: Optional[str] = None, as_of: Optional[dateti
     late_fee_charged = bool(getattr(row, "late_fee_charged", False))
     fees_waived = bool(getattr(row, "fees_waived", False))
     waived_fees = float(getattr(row, "waived_fees", 0.0) or 0.0)
-    now = as_of or datetime.now(timezone.utc)
+    now = _as_utc(as_of) or datetime.now(timezone.utc)
+    opened_at = _as_utc(opened_at)
+    due_at = _as_utc(due_at)
     days_elapsed = max(0, (now - opened_at).days) if opened_at else 0
     past_due = bool(due_at and due_at < now and status == "open")
     if status == "open":
@@ -579,6 +581,29 @@ async def _username_map(db: AsyncSession) -> dict[int, str]:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Normalise a stored timestamp to aware UTC.
+
+    SQLite returns naive datetimes for `DateTime(timezone=True)` columns and
+    PostgreSQL returns aware ones, for the same column and the same row. Every
+    arithmetic here therefore subtracts a value that came out of the database
+    from a value that came out of `datetime.now(timezone.utc)`, and on SQLite that
+    is naive-minus-aware:
+
+        TypeError: can't subtract offset-naive and offset-aware datetimes
+
+    which means *every* arrears endpoint raised on SQLite while working perfectly
+    on PostgreSQL -- the kind of defect that only appears once the suite runs
+    against a second database. Assumed UTC rather than localised: the values were
+    written by `_now()`, which is UTC, so the naive reading is the correct one.
+    """
+    if value is None:
+        return None
+    if getattr(value, "tzinfo", None) is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +783,7 @@ async def settle_arrears_entry(
     status = str(getattr(row, "status", "open") or "open")
     if status == "settled":
         raise ValueError("Arrears entry is already settled.")
-    now = as_of or _now()
+    now = _as_utc(as_of) or _now()
     principal = float(getattr(row, "principal", 0.0) or 0.0)
     interest_waived = bool(getattr(row, "interest_waived", False))
     if interest_waived:
@@ -767,12 +792,15 @@ async def settle_arrears_entry(
         interest_due = compute_arrears_interest(
             principal,
             float(getattr(row, "annual_rate", 0.0) or 0.0),
-            max(0, (now - getattr(row, "opened_at", now)).days) if getattr(row, "opened_at", None) else 0,
+            max(0, (now - _as_utc(getattr(row, "opened_at", None))).days)
+            if _as_utc(getattr(row, "opened_at", None))
+            else 0,
             grace_days=int(getattr(row, "grace_days", 0) or 0),
             compounding=str(getattr(row, "compounding", "simple") or "simple"),
             cap_pct=float(getattr(row, "interest_cap_pct", 100.0) or 100.0),
         )["interest"]
-    past_due = bool(getattr(row, "due_at", None)) and bool(getattr(row, "due_at", now) < now)
+    due_at = _as_utc(getattr(row, "due_at", None))
+    past_due = bool(due_at is not None and due_at < now)
     fees_waived = bool(getattr(row, "fees_waived", False))
     fee_terms = {
         "late_fee_amount": float(getattr(row, "late_fee_amount", 0.0) or 0.0),

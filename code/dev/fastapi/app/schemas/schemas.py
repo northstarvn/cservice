@@ -1350,3 +1350,109 @@ class StorageConnectionListOut(BaseModel):
     healthy_count: int = 0
     unhealthy_count: int = 0
     note: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Credit transfers and third-party debt settlement
+# ---------------------------------------------------------------------------
+#
+# One request field is mandatory across both families and for the same reason:
+# `idempotency_key`. A balance is spent twice by a retry, and a client that
+# times out cannot tell whether its transfer landed. Without a key the only safe
+# client behaviour is to refuse to retry, which turns every network blip into a
+# lost transfer and teaches people not to use the feature.
+
+class PointsTransferIn(BaseModel):
+    """Move loyalty credit to another customer.
+
+    ``to_user_id`` rather than a username or email on purpose: resolving an
+    identifier to an account is the step where "send 500 points to
+    my-friend@example.com" becomes a transfer to whoever most recently registered
+    that address. Making the caller supply the id keeps the targeting decision
+    with them.
+    """
+
+    to_user_id: int
+    points: float
+    point_type: str = "loyalty"
+    reason: str = "points_gift"
+    note: str = ""
+    idempotency_key: str
+    #: Explicit, because a transfer the sender cannot undo and did not intend is
+    #: the case worth recording as such. Defaults to False.
+    consent_confirmed: bool = False
+
+
+class PointsTransferOut(BaseModel):
+    generated_at: datetime
+    transfer_id: int
+    points: float
+    point_type: str = "loyalty"
+    from_user_id: int
+    to_user_id: int
+    status: str = "completed"
+    sender_balance_after: float = 0.0
+    receiver_balance_after: float = 0.0
+    idempotent_replay: bool = False
+    consent_confirmed: bool = False
+    note: str = ""
+
+
+class TransferQuoteOut(BaseModel):
+    generated_at: datetime
+    allowed: bool = False
+    points: float = 0.0
+    point_type: str = "loyalty"
+    sender_balance: float = 0.0
+    remaining_after: float = 0.0
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    limits: Dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+
+
+class TransferHistoryOut(BaseModel):
+    generated_at: datetime
+    sent: List[Dict[str, Any]] = Field(default_factory=list)
+    received: List[Dict[str, Any]] = Field(default_factory=list)
+    transferred_today: float = 0.0
+    transfers_today: int = 0
+    note: str = ""
+
+
+class ThirdPartySettlementIn(BaseModel):
+    """Pay someone else's arrears.
+
+    ``debtor_user_id`` is required and is *verified against the entry* by the
+    service. The caller cannot nominate a debtor; the entry names one. Taking the
+    caller's word for it would let a payer settle one person's debt while the row
+    records it against another.
+    """
+
+    arrears_entry_id: int
+    debtor_user_id: int
+    amount: Optional[float] = None
+    idempotency_key: str
+    payer_consent_confirmed: bool = False
+    note: str = ""
+
+
+class SettlementOut(BaseModel):
+    generated_at: datetime
+    settlement_id: int
+    entry_id: int
+    debtor_user_id: int
+    payer_user_id: int
+    amount: float
+    interest_charged: float = 0.0
+    late_fee_charged: float = 0.0
+    total_paid: float = 0.0
+    is_third_party: bool = False
+    #: Always False. Present in the response because "did my debt move?" is the
+    #: question a payer needs answered, and answering it by omission would leave
+    #: them unsure.
+    debt_transferred: bool = False
+    debt_remains_with: int = 0
+    #: Always 0. See the laundering-loop note in the service.
+    credit_awarded_to_payer: float = 0.0
+    idempotent_replay: bool = False
+    note: str = ""

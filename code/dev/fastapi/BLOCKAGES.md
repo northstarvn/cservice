@@ -3260,3 +3260,93 @@ response stays byte-identical to the real one. With storage fully configured, th
 callback returns 503 naming the missing transport, the row stays `pending` with
 `healthy: false`, the second callback is refused 400 despite the first having
 failed, and zero rows hold a stored token. Suite **2636 passing**.
+
+---
+
+## Brain routing and customer transfers (2026-10-02)
+
+Two features. Suite green at **2997 passing**, including the twelve failures that
+were live in `tests/test_e2e_certainty_flows.py` when this started.
+
+### 1. Choosing which brain answers (`app/services/brain_router.py`)
+
+`system` (this service's engines), `external_ai` (a general-purpose model), or
+`human` (an operator must take over). First-match-wins over a config table, so
+row order is the semantics: operator pins and legal holds come first, then
+availability and egress refusals, then any preference for the external brain.
+
+**The performance requirement drove the architecture rather than being checked
+after it.** One invariant: *deciding is free, answering is not.* `decide()` is a
+pure function over an in-memory table and signals the caller already loaded — no
+database, no HTTP, no clock-dependent read — and is bounded by `DECIDE_BUDGET_MS`
+(5ms). Everything expensive happens after it behind `EXTERNAL_BUDGET_MS`
+(1200ms) and degrades to system knowledge on any failure, so the slowest
+permitted outcome is the fallback, which is in-process and free. There is a test
+that poisons `socket.socket` and asserts `decide()` still returns: "add a lookup
+to the router" is exactly the change that would add a query to every customer's
+message.
+
+Three refusals, each enforced somewhere a rule cannot be forgotten:
+
+* **A customer's own record never leaves.** `EGRESS_ALLOWED_FIELDS` is a short
+  allow-list; `EGRESS_NEVER` is a second list, because the failure it guards
+  against is a field being *added* to the first by someone who did not notice.
+* **Consent and control posture.** `egress_allowed()` is derived inside
+  `decide()` rather than expected in the context, so a caller that forgets to
+  evaluate it cannot reach the external rule.
+* **No rule escalates on an absent signal.** Sentiment scoring calls an external
+  service, so it is `None` offline; if absence matched, every conversation in an
+  offline deployment would route to a human and the operator queue would quietly
+  become the product.
+
+Routing to a person is not silence: the customer is answered immediately and the
+operator gets a draft. A queue failure is recorded rather than swallowed.
+
+Enforcement is `advisory` by default. Turning on an unconfigured feature that
+changes who a customer talks to should not happen by deployment.
+
+### 2. Credit transfers and third-party debt payment
+
+Points transfer is built: two ledger legs under one reference, a required
+idempotency key, wallet rows locked **in user-id order** (two concurrent debits
+otherwise both read a balance neither leaves behind), and per-transfer plus
+per-day caps.
+
+**Arrears "transfer" is answered differently, and the reason is recorded rather
+than left as a missing feature.** Moving a debt to another person is not a
+transfer of value; it is how people buy their way out of one, and it is refused
+in `transfers.REFUSED_OPERATIONS`. What is built instead is third-party
+settlement — someone else pays, and the named debtor stays liable — which is
+useful (family, employer, a good-faith payer) and leaves no route to shedding a
+liability.
+
+The payer earns **zero** loyalty credit, as a CHECK constraint
+(`payout_credit_points = 0`). Settling a friend's arrears for points is a closed
+loop: settle, collect, send back, and the debt has become spendable value from
+nowhere. Every step is individually reasonable, which is what makes it worth
+blocking in the schema rather than in a handler.
+
+The caller's `debtor_user_id` is verified against the entry. Taking the caller's
+word for it would let a payer settle one person's debt and have the record
+attribute it to another.
+
+### Defects found and fixed
+
+| Where | Defect |
+|---|---|
+| `chat_history.timestamp` | `NOT NULL` with **no** default in the chain while the model declared `server_default=func.now()`. Every chat insert failed on a migrated database and worked on a `create_all` one — so the suite (2997 green) and the drift report (name comparison only) both missed it. Fixed in `0001` and by `0012_chat_history_default`; the drift report now compares defaults in the one direction that breaks inserts. |
+| `test_migration_chain` guard | read `timezone=True` out of `existing_type=sa.DateTime(timezone=True)` as an `alter_column` keyword, rejecting exactly the server-default changes the guard exists to allow. |
+| `tests/_e2e_world.Mounted` | `get_current_customer_policy_score` was not overridden, so `upsert_customer_policy_score` recomputed and **overwrote** every seeded persona. All five resolved to `restricted` (access 29.07) regardless of their declared tier, and every booking route returned 403 — the personas could not describe anything at HTTP level, and the pure-function tests disagreed with the written-down flows about the same five people. |
+| the cast | `ana` declared `customer-premium` and resolved to `system-premium`; `dmitri` declared `standard` and resolved to `restricted`. No member reached `customer-premium` at all, leaving a published tier unexercised. |
+| `_e2e_world.assert_monotonic` | hardcoded *non-increasing*, so the interest-accrual flow could only be expressed by writing the series backwards. Now takes `increasing=`. |
+| `arrears_payments` | `_entry_dict` and `settle_arrears_entry` subtracted a column value from `datetime.now(timezone.utc)`. SQLite returns naive datetimes and PostgreSQL aware ones, so **every** arrears endpoint raised `TypeError` on SQLite while working on PostgreSQL. |
+| `policy_scoring.resolve_access_band` | clamped off-scale scores into `limited`. A 0-1 score handed to a 0-100 resolver is `0.8 -> limited` — the worst band, silently. Now refuses, which `test_kaizen_shadow_release.py`'s clamp assertion contradicted; that pinned contract was changed deliberately, and both in-scale cases it exists for (54 and 0 → `limited`) are unaffected. |
+
+### Six test expectations that were themselves wrong
+
+Fixed as tests, not by weakening the product: a cut point is a band's *floor*, so
+a hair above it is still that band; `NOW` and `LATER` are seven days apart at
+the **same time of day**, so the wall-clock test could never pass; a campaign is
+legitimately active on 2026-07-15, so 100 points bought $1.05; $50 is *on* the
+daily cap, not over it; `resolve_personalization` returns `refusal_reasons`, not
+`refusals`; and `app.__file__` is `None` because `app` has no `__init__.py`.

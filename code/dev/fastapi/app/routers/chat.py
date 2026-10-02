@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func, desc, case
 from app import deps, models
+from app.services import brain_router
+import os
 from app.schemas.chat import (
     ChatMessageIn,
     ChatMessageOut,
@@ -1512,7 +1514,32 @@ async def chat_message(
 
     ai_response = f"You said: '{user_message}'. How else can I help you?"
 
+    # Sentiment first: the router reads it. It was already the first thing this
+    # handler did, so the order is unchanged from the caller's perspective.
     sentiment = analyze_sentiment(user_message)
+
+    # --- Which brain answers, and why the decision cannot be the slow part ---
+    #
+    # `decide()` is a pure function over an in-memory table and the signals this
+    # handler has already loaded, so it costs microseconds and performs no I/O.
+    # `respond()` answers within a budget and degrades to system knowledge on any
+    # external failure, so the worst case is the in-process answer rather than a
+    # timeout.
+    #
+    # Additive rather than replacing: with no external brain wired,
+    # `respond()` returns the same echo string this handler always produced, so
+    # the default path is behaviourally identical to before.
+    routing: dict[str, Any] = {"enabled": False}
+    if os.getenv("CSERVICE_BRAIN_ROUTER", "1").strip() not in {"0", "false", "no"}:
+        external = _external_brain_for()
+        routed = brain_router.respond(
+            user_message,
+            _brain_context(current_user, sentiment, user_message),
+            system=lambda question, context: ai_response,
+            external=external,
+        )
+        ai_response = routed.text
+        routing = {"enabled": True, **routed.to_dict()}
     chat_rows, bookings = await _load_user_interaction_window(db, current_user.id)
     insights = _build_interaction_insights([row.message for row in chat_rows] + [user_message], bookings, sentiment)
     summary = _build_summary(current_user.id, chat_rows, bookings, sentiment)
@@ -1564,6 +1591,81 @@ async def chat_message(
         summary=summary,
         improvement_pack=improvement_pack,
     )
+
+# ---------------------------------------------------------------------------
+# Which brain answers (app/services/brain_router.py)
+# ---------------------------------------------------------------------------
+# Two small helpers, both here rather than in the service, because both depend on
+# things only this module has: the request, and a loaded customer row.
+
+
+def _brain_context(
+    current_user: models.User,
+    sentiment: Any,
+    message: str,
+) -> dict[str, Any]:
+    """Signals for the routing decision, from what this handler already has.
+
+    Every field here is either already computed above or a direct attribute read.
+    Nothing is fetched -- which is the invariant the router's performance argument
+    rests on, and the reason this is a function over existing values rather than
+    an async loader.
+
+    Note what is deliberately absent: the customer's scores. The router is told
+    *that* a signal is distressed, not the loyalty and churn figures behind it,
+    because a context dict is the thing most likely to end up in a log line or a
+    model payload, and those numbers are the customer's, not the system's.
+    """
+    text = str(message or "").lower()
+    legal_terms = any(
+        term in text
+        for term in (
+            "solicitor", "legal action", "lawyer", "attorney", "court",
+            "small claims", "chargeback", "statutory", "gdpr complaint",
+        )
+    )
+    score = None
+    if isinstance(sentiment, (int, float)):
+        score = float(sentiment)
+    return {
+        # Routing-relevant, cheap, and derived from the message itself.
+        "sentiment_score": score,
+        "legal_terms_detected": legal_terms,
+        "control_posture": _current_control_posture(current_user),
+        "question": message,
+        # A question the customer's own record answers must not be routed to a
+        # model that cannot see the record -- see the rule's note.
+        "has_customer_facts": True,
+    }
+
+
+def _external_brain_for():
+    """The external brain callable, or ``None`` when none is configured.
+
+    ``None`` is the honest answer in this deployment, and :func:`respond` treats
+    it as "route to system" with a reason rather than raising. A deployment that
+    has an HTTP client installs one:
+
+        chat_router.set_external_brain(fn)   # fn(question, context, budget_ms) -> str
+
+    The budget is passed *in*, not just documented: a caller that ignores it can
+    overrun the request, and the only way to make that hard to do by accident is
+    to hand over the remaining time rather than expect the callee to know it.
+    """
+    return _EXTERNAL_BRAIN[0]
+
+
+#: Single-slot registry rather than a FastAPI dependency, for the same reason as
+#: ``identity._TRANSPORT_HOOKS``: it has exactly one legitimate caller (a
+#: deployment with an HTTP client) and threading it through the dependency graph
+#: would put a deployment seam in the request path.
+_EXTERNAL_BRAIN: list[Any] = [None]
+
+
+def set_external_brain(fn: Any) -> None:
+    """Install (or clear, with ``None``) the external brain for chat replies."""
+    _EXTERNAL_BRAIN[0] = fn
+
 
 @router.get("/chat/history", response_model=list[ChatHistoryOut])
 async def get_chat_history(

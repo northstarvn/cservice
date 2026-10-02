@@ -754,7 +754,51 @@ def resolve_control_posture(policy_tier: str, access_score: float, system_score:
     return str(trace["control_posture"])
 
 
+def _validate_score(access_score: Any) -> float:
+    """Refuse a score outside the scale this module publishes.
+
+    ``POLICY_SCORING_OPS`` declares ``score_floor`` / ``score_ceiling`` as the
+    scale every one of these resolvers takes. A caller holding ``-10`` or ``101``
+    has a bug, and this is the cheapest possible moment to find it.
+
+    Why refusing beats clamping: the documented phantom defect is an access-band
+    resolver handed a **0-1** score, where 0.8 becomes ``limited`` -- the worst
+    band in the table -- and does so silently, so an ``elite`` customer is served
+    the bottom-band experience and nothing anywhere says why. Clamping is what
+    makes that invisible; a ``ValueError`` is what makes it a stack trace in the
+    caller's test suite.
+
+    Both edges are checked and both raise, so a score on the wrong *scale*
+    (``0.85``) is caught as readily as one that is merely too large.
+
+    Not applied to the trace helper's *inputs* beyond this one function: the tier
+    and posture resolvers are called from many paths that already clamp
+    deliberately (``apply_posture_adjustment``), and refusing there would turn a
+    documented clamp into a crash on the main scoring path.
+    """
+    try:
+        value = float(access_score)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"access_score must be a number on the "
+            f"{POLICY_SCORING_OPS['score_floor']}-{POLICY_SCORING_OPS['score_ceiling']} "
+            f"scale, got {access_score!r}"
+        ) from exc
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    if not floor <= value <= ceiling:
+        raise ValueError(
+            f"access_score {value} is outside the published "
+            f"{floor}-{ceiling} scale. If this is a score on a different scale "
+            "(0-1 rather than 0-100), convert it before resolving a band -- "
+            "clamping here silently returns the 'limited' band, which is how an "
+            "elite customer ends up served the bottom-band experience."
+        )
+    return value
+
+
 def resolve_access_band_trace(access_score: float) -> dict[str, Any]:
+    access_score = _validate_score(access_score)
     index, rule = _matched_band_rule(access_score)
     matched = rule is not None
     near_miss = None

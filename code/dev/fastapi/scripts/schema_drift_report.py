@@ -29,6 +29,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -57,6 +58,85 @@ def sync_url(async_url: str) -> str:
             url = url.replace(async_driver, sync_driver)
             break
     return url
+
+
+def model_server_default(column: Any) -> str | None:
+    """The default the models declare for a column, as text.
+
+    Three shapes have to be handled, and missing any of them makes the check
+    silently useless rather than wrong-looking:
+
+    * ``TextClause`` -- ``server_default="0"``
+    * ``DefaultClause`` wrapping a SQL function -- ``server_default=func.now()``
+    * ``Computed`` -- also a ``DefaultClause`` subclass, so it falls out of the
+      same branch.
+
+    ``DefaultClause.arg`` is ``None`` for an *explicitly empty* default
+    (``server_default=None`` inside a clause), which is different from "no
+    default at all"; that is why the empty case returns ``"<empty>"`` rather than
+    ``None`` and the comparison below is between "has one" and "has one".
+    """
+    server_default = column.server_default
+    if server_default is None:
+        return None
+    text = getattr(server_default, "text", None)
+    if text is not None:
+        return str(text)
+    arg = getattr(server_default, "arg", None)
+    if arg is None:
+        return "<empty>"
+    try:
+        return str(arg)
+    except Exception:  # pragma: no cover - an unprintable default is still a default
+        return "<unprintable>"
+
+
+def compare_server_defaults(inspector: Any, tables: Any) -> dict[str, dict[str, str]]:
+    """Columns where the *model* declares a default the database lacks.
+
+    Added because comparing *names* is not enough, and the gap it left was a
+    live-only defect that reported "in sync" for as long as it existed:
+    ``chat_history.timestamp`` is ``NOT NULL`` with no default in the migration
+    chain while the model declares ``server_default=func.now()``, so every chat
+    insert failed on a migrated database and succeeded on a ``create_all`` one.
+    The suite cannot see it (its schema comes from the metadata) and the name
+    comparison could not see it, so nothing did.
+
+    **One direction only, and deliberately.** A column where the *database* has
+    a default the model does not declare is the safe direction: SQLAlchemy sends
+    the value explicitly on every insert, so the database default is unused
+    belt-and-braces. There are 156 of those in this schema and they are not
+    drift.
+
+    The unsafe direction is the one checked here. A model that declares
+    ``server_default`` does *not* send a value on insert -- it relies on the
+    database applying the default. So where the model declares one and the
+    database does not, every insert omitting that column fails against a
+    ``NOT NULL`` column, and the failure names the column rather than the
+    migration that dropped its default.
+
+    Only *presence* is compared, not the expression text: ``now()`` and
+    ``CURRENT_TIMESTAMP`` are one default written two ways, and reporting that
+    would teach people to ignore this report.
+
+    Primary keys are skipped: an autoincrement integer key gets a
+    ``nextval(...)`` sequence the metadata does not carry, which is correct
+    rather than drift.
+    """
+    drift: dict[str, dict[str, str]] = {}
+    for name in sorted(tables):
+        live_columns = {column["name"]: column for column in inspector.get_columns(name)}
+        for column in Base.metadata.tables[name].columns:
+            if column.primary_key or column.name not in live_columns:
+                continue
+            wanted = model_server_default(column)
+            if wanted is None:
+                continue  # the safe direction; see the docstring
+            if live_columns[column.name].get("default") is None:
+                drift.setdefault(name, {})[column.name] = (
+                    f"model={wanted!r} live=None"
+                )
+    return drift
 
 
 def compare() -> dict:
@@ -95,6 +175,8 @@ def compare() -> dict:
                     "missing_in_db": sorted(model_indexes - live_indexes),
                 }
 
+        default_drift = compare_server_defaults(inspector, declared & live)
+
         return {
             "live_tables": len(live),
             "declared_tables": len(declared),
@@ -102,7 +184,8 @@ def compare() -> dict:
             "extra_tables": extra,
             "column_drift": column_drift,
             "index_drift": index_drift,
-            "in_sync": not (missing or extra or column_drift),
+            "server_default_drift": default_drift,
+            "in_sync": not (missing or extra or column_drift or default_drift),
         }
     finally:
         engine.dispose()
@@ -143,6 +226,10 @@ def main() -> int:
             print(f"    extra  : {', '.join(drift['extra_in_db'])}")
     for name, drift in report["index_drift"].items():
         print(f"INDEX DRIFT {name}: missing {', '.join(drift['missing_in_db'])}")
+    for name, drift in report.get("server_default_drift", {}).items():
+        print(f"SERVER DEFAULT DRIFT {name}")
+        for column, detail in sorted(drift.items()):
+            print(f"    {column}: {detail}")
     return 1
 
 

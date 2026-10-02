@@ -841,6 +841,144 @@ class ComplaintImprovementProposal(Base, TimestampMixin):
     candidate_id = Column(String(80), nullable=False, default="", index=True)
 
 
+# --- Moving value between customers ----------------------------------------
+#
+# Two tables, and they are separate because the two operations have nothing in
+# common but the word "transfer".
+#
+# `points_transfers` moves a *credit*. The payer receives it, so this is
+# ordinary. `arrears_settlements` records a *debt being paid by someone else*,
+# where the payer gets nothing and the debtor stays liable -- because that is the
+# only defensible reading of "transfer my arrears", and the one that is refused
+# is written down rather than left as a missing feature.
+
+class PointsTransfer(Base, TimestampMixin):
+    """One paired movement of loyalty credit between two customers.
+
+    The two ledger legs live in ``points_transactions`` as ``transfer_out`` and
+    ``transfer_in``; this table holds what a pair of ledger rows cannot, which is
+    that they belong to the same event.
+
+    ``idempotency_key`` is the load-bearing column. Points are a balance and a
+    balance is spent twice by a retry, and a client that times out mid-request
+    has no way to tell whether the first attempt landed. Without a unique key,
+    the only safe client behaviour is to refuse to retry -- which makes every
+    network blip a lost transfer and trains people not to use the feature.
+
+    It is a caller-supplied string rather than a server-generated id for the same
+    reason: the caller is the only party that can make a second attempt carry
+    the *same* key.
+    """
+
+    __tablename__ = "points_transfers"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key", name="uq_points_transfers_idempotency"
+        ),
+        CheckConstraint("points > 0", name="ck_points_transfers_positive"),
+        # Two *different* parties. Both columns are already `nullable=False`, so
+        # this is the only thing left to assert -- and it is the thing that
+        # matters, because a self-transfer creates a ledger pair with no
+        # counterparty.
+        #
+        # The XOR form `(a IS NULL) <> (b IS NULL)` was the first attempt and is
+        # the inverse of what it looks like: it demands *exactly one* party be
+        # NULL, so it rejected every real transfer and permitted only the broken
+        # ones. It failed loudly on the first test, which is the argument for
+        # having written it down rather than shipping it untested.
+        CheckConstraint(
+            "from_user_id <> to_user_id",
+            name="ck_points_transfers_two_distinct_parties",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    idempotency_key = Column(String(120), nullable=False, index=True)
+    from_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    to_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    point_type = Column(String(50), nullable=False, default="loyalty", index=True)
+    # Positive on both sides. The direction is in the column names, not in the
+    # sign, so no arithmetic has to know which way round it is.
+    points = Column(Float, nullable=False, default=0.0)
+    status = Column(String(20), nullable=False, default="completed", index=True)
+    # "points_gift", "points_refund", "points_goodwill". Config-driven, so a
+    # deployment can recognise a reason the business uses without a migration.
+    reason = Column(String(40), nullable=False, default="points_gift", index=True)
+    # The note the sender wrote, and the requester's own words. Not free text
+    # about a third party by default -- see the service, which bounds its length.
+    note = Column(String(200), nullable=False, default="")
+    sender_balance_after = Column(Float, nullable=False, default=0.0)
+    receiver_balance_after = Column(Float, nullable=False, default=0.0)
+    # 1.0 means the sender chose freely. Anything lower means the decision was
+    # coerced or the recipient was not the intended one, which is exactly the
+    # case an operator needs to find later.
+    consent_confirmed = Column(Boolean, nullable=False, default=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    reversed_at = Column(DateTime(timezone=True), nullable=True)
+    reversal_reason = Column(String(60), nullable=False, default="")
+
+
+class ArrearsSettlement(Base, TimestampMixin):
+    """Someone other than the debtor paying down an arrears entry.
+
+    This is **not** a transfer of the debt. The debtor named on
+    ``arrears_entries.user_id`` remains the person who owes it, before and after
+    this row exists, and ``debtor_liability_unchanged`` records that as a fact
+    rather than leaving it to be inferred.
+
+    Why the distinction is the whole design, and not a caveat: moving a debt to
+    another person is how people buy their way out of one. The service refuses it
+    (see ``arrears_settlements.REFUSED_*`` in
+    ``app/services/transfers.py``), and refusing it means this table only ever
+    holds genuine third-party *payments* -- so it can be read as "who helped whom"
+    without anyone inferring that a liability moved.
+
+    ``payout_credit_points`` is fixed at zero by the service and exists as a
+    column so that the reason it is zero is visible in the schema. Paying
+    someone's debt for loyalty credit is a closed laundering loop: settle a
+    friend's arrears, collect the credit, send the credit back. The loop is
+    closed by never opening it.
+    """
+
+    __tablename__ = "arrears_settlements"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key", name="uq_arrears_settlements_idempotency"
+        ),
+        CheckConstraint("amount > 0", name="ck_arrears_settlements_positive"),
+        CheckConstraint(
+            "payout_credit_points = 0",
+            name="ck_arrears_settlements_no_payout",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    idempotency_key = Column(String(120), nullable=False, index=True)
+    # The debtor. Unchanged by this row -- see the class docstring.
+    debtor_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # The person who actually paid. May equal the debtor (a normal payment).
+    payer_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    arrears_entry_id = Column(Integer, ForeignKey("arrears_entries.id", ondelete="CASCADE"), nullable=False, index=True)
+    amount = Column(Float, nullable=False, default=0.0)
+    currency = Column(String(8), nullable=False, default="USD")
+    # The split, snapshotted from the entry at payment time. Stored rather than
+    # derived because the entry's terms may be waived afterwards, and what the
+    # payer was told they were paying has to stay recoverable.
+    principal_covered = Column(Float, nullable=False, default=0.0)
+    interest_covered = Column(Float, nullable=False, default=0.0)
+    late_fee_covered = Column(Float, nullable=False, default=0.0)
+    # Always False. A column rather than a docstring so that a query asking
+    # "did anyone move this debt?" is answerable from the data.
+    debt_transferred = Column(Boolean, nullable=False, default=False)
+    # Always False. See the class docstring on the laundering loop.
+    payout_credit_points = Column(Float, nullable=False, default=0.0)
+    is_third_party = Column(Boolean, nullable=False, default=False, index=True)
+    payer_consent_confirmed = Column(Boolean, nullable=False, default=False)
+    settled_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(20), nullable=False, default="settled", index=True)
+    note = Column(String(200), nullable=False, default="")
+
+
 # --- Identity, sign-in methods and connected storage ------------------------
 #
 # These four tables exist because of two questions the ``users`` row cannot

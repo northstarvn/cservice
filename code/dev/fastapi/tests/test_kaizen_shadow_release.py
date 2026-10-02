@@ -1750,8 +1750,24 @@ class TestPinningOracle:
         assert resolve_access_band(55) == "moderate"
         assert resolve_access_band(54) == "limited"
         assert resolve_access_band(0) == "limited"
-        assert resolve_access_band(-10) == "limited"
-        assert resolve_access_band(101) == "elite"
+
+        # Off the published 0-100 scale, this **raises** rather than clamping.
+        #
+        # Changed deliberately. It used to pin `resolve_access_band(-10) ==
+        # "limited"` and `resolve_access_band(101) == "elite"`, which contradicted
+        # `test_e2e_certainty_flows.py`'s off-scale case: two tests, two
+        # opposite contracts for one function, and only one of them load-bearing.
+        #
+        # Refusing wins because clamping is what makes the documented phantom
+        # defect invisible. A 0-1 score handed to a 0-100 resolver is 0.8 ->
+        # `limited`, the *worst* band, silently -- so an `elite` customer is
+        # served the bottom-band experience and nothing says why. The two
+        # in-scale cases that this test actually exists for are unaffected:
+        # `54` is below the lowest cut and still falls back to `limited`, and
+        # `0` is on the scale and still does.
+        for off_scale in (-10, 101, -0.001, 100.001):
+            with pytest.raises(ValueError, match="outside the published"):
+                resolve_access_band(off_scale)
 
     def test_the_band_scale_is_zero_to_one_hundred(self):
         """The mistake that produced twelve false blockages.

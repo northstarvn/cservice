@@ -1261,18 +1261,31 @@ def test_a_route_with_a_gate_the_table_does_not_describe_would_be_drift():
         D.AUTHZ_RULES[:] = original
 
 
-def test_all_six_factories_are_unbound_and_the_report_says_so():
+#: The factories that no route calls. The rest work and are tested, which is why
+#: their requirements live in `hardening` and nowhere else.
+#:
+#: Two are bound, for different and both-correct reasons:
+#:
+#:   * `require_public_rate_limit` -- the four credential-in-the-body sign-in
+#:     routes, which are public and so cannot resolve a principal.
+#:   * `require_rate_limit` -- the customer-transfer routes, which *are*
+#:     authenticated (`self_service`) and therefore rate-limit by subject like
+#:     any other authenticated route.
+#:
+#: The distinction is the point: the same-named-looking limiter is chosen per
+#: route by whether a principal exists yet, and `can_complete`-style reporting
+#: elsewhere in the tree would be wrong if they were conflated.
+BOUND_RATE_LIMIT_FACTORIES: tuple[str, ...] = (
+    "require_public_rate_limit",
+    "require_rate_limit",
+)
+
+
+def test_the_remaining_factories_are_unbound_and_the_report_says_so():
     # The honest finding, not a bug to fix: the factories work, are tested, and
-    # no route calls them, which is exactly why their requirements live in
-    # `hardening` and nowhere else.
-    #
-    # `require_public_rate_limit` is the exception and is *bound* -- the four
-    # credential-in-the-body sign-in routes use it. It is asserted separately
-    # below rather than folded in here, because "unbound" was previously true of
-    # every factory and a seventh one that is actually used is exactly the sort
-    # of exception that gets quietly forgotten.
+    # no route calls them.
     report = authz_drift_report(main.app.routes)
-    unbound = [name for name in AUTHZ_FACTORY_NAMES if name != "require_public_rate_limit"]
+    unbound = [name for name in AUTHZ_FACTORY_NAMES if name not in BOUND_RATE_LIMIT_FACTORIES]
     assert report["unbound_factories"] == sorted(unbound)
     assert set(report["bound_factories"]) == set(AUTHZ_FACTORY_NAMES)
     for name in unbound:
@@ -1281,21 +1294,35 @@ def test_all_six_factories_are_unbound_and_the_report_says_so():
     assert "unbound" in report["note"]
 
 
-def test_the_public_rate_limit_factory_is_reported_as_bound():
+def test_both_rate_limit_factories_are_reported_as_bound_with_samples():
     # A factory name that resolves but is never counted makes `unbound_factories`
-    # lie about the one factory that is in use, which is the same category of
-    # quiet miscount the exposure and drift sections exist to rule out.
+    # lie about the ones that are in use -- the same category of quiet miscount
+    # the exposure and drift sections exist to rule out.
     report = authz_drift_report(main.app.routes)
-    entry = report["bound_factories"]["require_public_rate_limit"]
-    assert entry["routes"] > 0
-    assert entry["sample"], "a bound factory with no sample route recorded"
-    # The authenticated rate limiter is still unbound, and saying so is the
-    # honest reading: adding a seventh factory does not mean the sixth is used.
-    assert "require_rate_limit" in report["unbound_factories"]
-    # ...and the two must not be conflated. `require_public_rate_limit` does not
-    # share a prefix with `require_rate_limit`, so prefix matching keeps them
-    # apart -- which is what lets the report say one is bound and one is not.
-    assert report["bound_factories"]["require_rate_limit"]["routes"] == 0
+    for name in BOUND_RATE_LIMIT_FACTORIES:
+        entry = report["bound_factories"][name]
+        assert entry["routes"] > 0, name
+        assert entry["sample"], f"{name} is bound but recorded no sample route"
+        assert name not in report["unbound_factories"], name
+
+
+def test_the_two_rate_limit_factories_are_not_conflated():
+    # `require_public_rate_limit` does not share a prefix with
+    # `require_rate_limit`, so prefix matching keeps them apart -- which is what
+    # lets the report count them separately at all. If a name were shortened to
+    # the other, every public credential route would be reported as
+    # authenticated, or the reverse.
+    report = authz_drift_report(main.app.routes)
+    public = set(report["bound_factories"]["require_public_rate_limit"]["sample"])
+    private = set(report["bound_factories"]["require_rate_limit"]["sample"])
+    assert public and private
+    assert public.isdisjoint(private), (
+        f"the same route is attributed to both rate-limit factories: {public & private}"
+    )
+    # The public one serves the credential routes; the authenticated one serves
+    # routes that already resolved a principal.
+    assert any("/users/auth/" in path for path in public), public
+    assert any("/transfers/" in path for path in private), private
 
 
 # ===========================================================================
@@ -2376,10 +2403,11 @@ def test_the_catalog_is_json_serializable():
 def test_the_catalog_carries_the_drift_and_the_backlog():
     catalog = build_authz_catalog(main.app.routes)
     assert catalog["drift"]["in_sync"] is True
-    # Same exception as the drift test: the public rate limiter is bound (four
-    # credential routes), the authenticated one is not.
+    # Same exception as the drift test: both rate-limit factories are bound --
+    # the public one by the credential routes, the authenticated one by the
+    # customer-transfer routes.
     assert catalog["drift"]["unbound_factories"] == sorted(
-        name for name in AUTHZ_FACTORY_NAMES if name != "require_public_rate_limit"
+        name for name in AUTHZ_FACTORY_NAMES if name not in BOUND_RATE_LIMIT_FACTORIES
     )
     assert catalog["coverage"]["method_path_pairs"] == catalog["drift"]["method_path_pairs"]
     assert catalog["backlog"]["requirements"][0]["requirement"] == "scopes"

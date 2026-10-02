@@ -415,3 +415,92 @@ not. The response says plainly that the provider-side grant is unaffected.
 looking at it. Enable one deliberately.
 
 `ENRICHMENT_ENABLED` is also off: it calls real third-party HTTP APIs.
+
+## Which brain answers a customer
+
+`POST /chat` routes every reply through `app/services/brain_router.py`, choosing
+between three destinations:
+
+| target | meaning |
+|---|---|
+| `system` | the engines this service runs — always available, in-process |
+| `external_ai` | a general-purpose model outside this service |
+| `human` | an operator must take over |
+
+```bash
+# what the decision would be, for a given customer
+curl -s "$BASE/meta/scoring-catalog" | python3 -c \
+  "import sys,json;print(json.load(sys.stdin)['brain_router']['rules'])"
+```
+
+**The performance contract: deciding is free, answering is not.** `decide()` is a
+pure function over an in-memory table and signals the handler has already loaded,
+so it performs no I/O and is bounded by `DECIDE_BUDGET_MS` (5ms). Everything
+expensive happens after it, bounded by `EXTERNAL_BUDGET_MS` (1200ms), and any
+external failure — timeout, provider error, circuit open — falls back to system
+knowledge. The slowest permitted outcome is therefore the fallback, which is
+free. There is a test that poisons `socket.socket` and asserts `decide()` still
+returns, because "add a lookup to the router" is the change that would quietly
+add a query to every customer's message.
+
+Enforcement is `advisory` by default (`CSERVICE_RECOGNITION_MODE`-style, set per
+deployment): the verdict is computed, recorded and returned, but does not change
+what a login or a reply requires.
+
+**Two things the router will not do:**
+
+- *Route to a brain the customer has not consented to share with.* Consent
+  withdrawn, or a `constrained` control posture, means system knowledge only —
+  and that refusal is computed rather than expected in the rule table, so a
+  forgotten rule cannot lose it.
+- *Route a question its own record answers.* A message whose answer lives in this
+  customer's record is never sent to a model that cannot see the record.
+
+Routing to a person does not mean silence: the customer is answered immediately
+and the operator gets a draft composed from what the system already knows.
+
+To wire an external brain:
+
+```python
+from app.routers import chat_router
+chat_router.set_external_brain(fn)   # fn(question, context, budget_ms) -> str
+```
+
+Without one, the router answers from `system` and says so in the verdict.
+
+## Moving value between customers
+
+```bash
+BASE=http://localhost:8000
+TOKEN=$(curl -s -X POST $BASE/users/login -H 'Content-Type: application/json' \
+  -d '{"username":"ana","password":"SamplePassw0rd!"}' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+
+# what would stop this, before committing to it
+curl -s "$BASE/transfers/quote?points=250" -H "Authorization: Bearer $TOKEN"
+
+# move it (idempotency_key is required, and a retry returns the first result)
+curl -s -X POST $BASE/transfers/points -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"to_user_id":2,"points":250,"idempotency_key":"order-1234"}'
+```
+
+Points move freely. Arrears do not — see below. `GET /transfers/refusals`
+publishes the reason with no authentication, because a customer who has been
+refused something is owed the explanation.
+
+**Paying someone else's arrears is allowed; moving your debt is not.** One
+customer can settle another's entry and the named debtor stays liable. Both
+`debt_transferred: false` and `credit_awarded_to_payer: 0` appear in the response
+even though the schema cannot represent anything else, because a payer who has
+just spent their own money is entitled to be told plainly that neither their debt
+nor their loyalty balance moved.
+
+The zero payout is a CHECK constraint, not a policy flag: paying a friend's debt
+for points is a closed loop (settle, collect, send back), and a future edit that
+tries to make the reward configurable fails at the database.
+
+Three controls make a balance safe to move: a required `idempotency_key` (a retry
+otherwise spends it twice), wallet rows locked in user-id order (two concurrent
+debits otherwise both read a balance neither leaves behind), and per-transfer
+plus per-day caps.

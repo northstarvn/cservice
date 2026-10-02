@@ -934,7 +934,63 @@ AUTHZ_RULES: list[dict[str, Any]] = [
     {"rule_id": "storage_revoke_all", "methods": ("DELETE",), "path": "/users/me/storage",
      "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
      "note": "Same overwrite semantics as the per-connection revoke, across every provider."},
-    {"rule_id": "token_refresh", "methods": ("POST",), "path": "/users/refresh", "exposure": "public",
+    # --- Credit transfers and third-party debt settlement -----------------------
+#
+# The only place in the tree where one authenticated customer moves something of
+# value *out of* their own account on behalf of another. Classified by its own
+# rules rather than absorbed into a wildcard, because the question worth asking
+# about these routes ("who can move what, and is it reversible") is not the
+# question worth asking about the rest of the tree.
+{"rule_id": "transfers_write", "methods": ("POST",), "path": "/transfers/points",
+     "exposure": "self_service", "enforced_by": ("get_current_user",),
+     "hardening": {"rate_tier": "sensitive"},
+     "note": (
+         "Moves balance out of the caller's account. Three controls, all in the "
+         "service: an idempotency key (a retry otherwise spends the balance twice), "
+         "wallet row locks taken in user-id order (two concurrent debits otherwise "
+         "both read a balance neither leaves behind), and per-transfer plus per-day "
+         "limits (an unbounded transfer between two accounts is a laundering channel "
+         "with extra steps). 409 rather than 400 for a limit, because the request was "
+         "well-formed and the state made it impossible -- a client needs to tell "
+         "'malformed' from 'not now'."
+     )},
+{"rule_id": "transfers_settle_arrears", "methods": ("POST",),
+     "path": "/transfers/settle-arrears", "exposure": "self_service",
+     "enforced_by": ("get_current_user",), "hardening": {"rate_tier": "sensitive"},
+     "note": (
+         "The caller spends their own money to clear someone else's debt, so the "
+         "exposure is on the payer as much as the debtor. It does NOT move the "
+         "liability: the entry's named debtor is verified against the entry rather "
+         "than taken from the request, so a payer cannot settle one person's debt "
+         "and have the record attribute it to another. The payer receives zero "
+         "loyalty credit, blocked by a CHECK constraint rather than by this handler, "
+         "because settle-then-earn-then-return is a closed loop converting debt into "
+         "spendable points."
+     )},
+{"rule_id": "transfers_quote", "methods": ("GET",), "path": "/transfers/quote",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "A read, but it exposes the caller's own balance and headroom, so it is "
+         "authenticated rather than public. Separate from the transfer endpoint "
+         "because the limits change: a client that only discovers them by failing has "
+         "already shown the customer a transfer they cannot make."
+     )},
+{"rule_id": "transfers_history", "methods": ("GET",), "path": "/transfers/history",
+     "exposure": "self_service", "enforced_by": ("get_current_user",), "hardening": {},
+     "note": (
+         "Scoped to the caller's own id on both directions. Includes the daily totals "
+         "because they are what the limit is enforced against -- a customer who has hit "
+         "it is owed to see why."
+     )},
+{"rule_id": "transfers_refusals", "methods": ("GET",), "path": "/transfers/refusals",
+     "exposure": "public", "enforced_by": (), "hardening": {},
+     "note": (
+         "Static policy text. Public because a customer who has been refused something "
+         "is owed the reason, and serving it from the same service that refused them "
+         "means the answer cannot drift into a vague tooltip. Describes the build, not "
+         "any account -- notably that moving a debt is refused and paying one is not."
+     )},
+{"rule_id": "token_refresh", "methods": ("POST",), "path": "/users/refresh", "exposure": "public",
      "enforced_by": (), "hardening": {"rate_tier": "interactive"},
      "note": "Unauthenticated because the refresh token is the credential. Rotation is the control."},
     {"rule_id": "token_logout", "methods": ("POST",), "path": "/users/logout", "exposure": "public",
