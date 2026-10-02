@@ -44,6 +44,7 @@ CHAIN = (
     "20261001_02_add_customer_offers.py",
     "20261002_01_add_transfers.py",
     "20261002_02_chat_history_timestamp_default.py",
+    "20261002_03_score_scale_checks.py",
 )
 
 #: The tables the *first* migration creates, before any delta runs. Used to
@@ -294,6 +295,69 @@ def _top_level_keywords(call: str) -> list[str]:
         current += char
     out.extend(re.findall(r"(\w+)\s*=", current))
     return out
+
+
+def test_the_chain_gives_every_model_server_default_a_database_default(chain_db):
+    """The second comparison this file was missing, added because it kept mattering.
+
+    `alembic/README.md` rule 2 claims this file "runs the same comparison" as
+    `scripts/schema_drift_report.py`, so CI catches drift without a server. That
+    was true of *tables and columns only*, and it was not true of server
+    defaults -- which is precisely the comparison whose absence hid
+    `chat_history.timestamp` having no default on a migrated database while
+    every chat insert failed there.
+
+    A model declaring `server_default` does not send a value on insert; it relies
+    on the database applying the default. So a model default the database lacks
+    means every insert omitting that column fails against a NOT NULL column. The
+    suite cannot see this, because its schema comes from `Base.metadata`, which
+    has the default.
+    """
+    from app.models import Base
+    from scripts.schema_drift_report import compare_server_defaults
+
+    conn, chain = chain_db
+    for module in chain:
+        module.upgrade()
+
+    inspector = sa.inspect(conn)
+    shared = set(Base.metadata.tables) & set(inspector.get_table_names())
+    drift = compare_server_defaults(inspector, shared)
+    assert drift == {}, (
+        "the chain does not produce these server defaults, so a migrated "
+        f"database rejects inserts that rely on them: {drift}"
+    )
+
+
+def test_the_chain_builds_every_named_check_constraint_the_models_declare(chain_db):
+    """The third missing comparison, and the one that found a live defect.
+
+    Same story as the server defaults, one level along. A CHECK the model
+    declares and the chain never created means a `create_all` database is
+    guarded and a migrated one is not -- a difference invisible to the entire
+    suite, which builds from `Base.metadata`.
+
+    This is not hypothetical. `ck_retention_snapshots_loyalty_score_non_negative`
+    was declared in the model and missing from every revision in the chain, so
+    `loyalty_score` -- weight 12 in `customer_score`, one of the eight inputs to
+    `compose_access_score` -- was writable-negative on any migrated database. It
+    was found by adding the same comparison to `scripts/schema_drift_report.py`,
+    which reported it on its first run.
+    """
+    from app.models import Base
+    from scripts.schema_drift_report import compare_check_constraints
+
+    conn, chain = chain_db
+    for module in chain:
+        module.upgrade()
+
+    inspector = sa.inspect(conn)
+    shared = set(Base.metadata.tables) & set(inspector.get_table_names())
+    drift = compare_check_constraints(inspector, shared)
+    assert drift == {}, (
+        "the chain does not create these CHECK constraints, so a migrated "
+        f"database accepts rows the models say it must not: {drift}"
+    )
 
 
 def _calls_named(body: str, function_name: str) -> list[str]:

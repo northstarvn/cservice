@@ -77,6 +77,34 @@ class CustomerPolicyScore(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint("system_score >= 0", name="ck_customer_policy_scores_system_score_non_negative"),
         CheckConstraint("customer_score >= 0", name="ck_customer_policy_scores_customer_score_non_negative"),
+        # The other four scores, which had no check while these two did.
+        #
+        # That asymmetry is the persistence-layer copy of the same defect
+        # `compose_access_score` has: a ceiling on every composite rule and no
+        # floor. Here it is two of six columns guarded, so a negative
+        # `access_score` was storable even though a negative `customer_score`
+        # was not -- and `access_score` is the one every consumer reads, being
+        # what `resolve_access_band`, `resolve_policy_tier` and
+        # `_control_posture` all take.
+        #
+        # Added after `_within_published_scale` began clamping on the snapshot
+        # boundary, so the boundary and the schema now agree on the same
+        # invariant at two levels. Belt and braces is the right posture when the
+        # failing write is one that silently changes what a customer is served.
+        CheckConstraint("access_score >= 0", name="ck_customer_policy_scores_access_score_non_negative"),
+        CheckConstraint("interest_score >= 0", name="ck_customer_policy_scores_interest_score_non_negative"),
+        CheckConstraint("closeness_score >= 0", name="ck_customer_policy_scores_closeness_score_non_negative"),
+        # The one constraint name that does not spell out `non_negative`, and
+        # the reason is a hard limit rather than taste: this one reaches 64
+        # characters and PostgreSQL truncates identifiers at 63, so
+        # `20261002_03_score_scale_checks` failed at runtime with
+        # `IdentifierError: Identifier ... exceeds maximum length of 63
+        # characters`. `ge_0` says the same thing in 5 characters fewer and is
+        # the only such abbreviation in the file.
+        CheckConstraint(
+            "community_closeness_score >= 0",
+            name="ck_customer_policy_scores_community_closeness_ge_0",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -154,6 +182,25 @@ class RecoveryAction(Base, TimestampMixin):
 
 class TopicSelection(Base, TimestampMixin):
     __tablename__ = "topic_selections"
+    __table_args__ = (
+        # Non-negative, which it did not used to be.
+        #
+        # `SIGNED_QUANTITY_COLUMNS` exempted this column with the reason "the
+        # writer clamps instead, so a check here would only disagree with the
+        # code that produced the value". That reason was false: nothing clamped
+        # it. A row with `confidence = -1000.0` was writable, `max(...)` carried
+        # it into `compose_access_score`, and that produced
+        # `access_score = -4444.44` -- which the snapshot boundary now absorbs
+        # but which was reaching the tier, posture and band resolvers.
+        #
+        # So the check was added rather than the declaration kept, and the
+        # exemption removed. A documented exception whose stated justification is
+        # demonstrably untrue is worse than no exemption: it reads as a decision
+        # and stops anyone looking.
+        CheckConstraint(
+            "confidence >= 0", name="ck_topic_selections_confidence_non_negative"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -2219,11 +2266,6 @@ TABLE_LIFECYCLE: dict[str, dict[str, Any]] = {
 #: oversight instead of reporting both.
 SIGNED_QUANTITY_COLUMNS: dict[str, str] = {
     "points_transactions.points_delta": "a ledger needs negative rows for spends",
-    "topic_selections.confidence": (
-        "a confidence in [0,1] would be nicer, but adding a CHECK would change the "
-        "emitted DDL; the writer clamps instead, so a check here would only "
-        "disagree with the code that produced the value"
-    ),
     "security_events.risk_score": (
         "a risk score is not a magnitude -- 0.0 means 'no risk' and is the most "
         "harmless value, so a non-negative check would be the wrong guard"

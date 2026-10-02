@@ -202,8 +202,20 @@ alembic stamp head
 2. **Run `scripts/schema_drift_report.py` after `alembic upgrade head`.** It
    is the only check that compares the chain's *result* against
    `Base.metadata`, and its absence is why ten tables shipped without a
-   migration while the suite stayed green. `test_migration_chain.py` runs the
-   same comparison, so CI catches it without a server.
+   migration while the suite stayed green.
+
+   `test_migration_chain.py` now runs the same comparisons, so CI catches them
+   without a server — tables, columns, **server defaults** and **named CHECK
+   constraints**. That last clause was previously claimed and not true: the chain
+   test compared tables and columns only, so the two comparisons that actually
+   hide live-only defects were in neither place. `chat_history.timestamp` had no
+   server default on a migrated database and every chat insert failed there, and
+   `ck_retention_snapshots_loyalty_score_non_negative` was declared in the model
+   and created by no revision at all. Both were invisible to the suite, which
+   builds its schema from `Base.metadata` and therefore has every constraint the
+   models declare. Each comparison was added only after the previous one had
+   already shipped a defect it would have caught, which is the whole argument for
+   not assuming the next gap is harmless.
 3. **A revision id must fit `alembic_version.version_num` (32 chars).** The
    date and the description belong in the filename.
 4. **`upgrade()` must be additive.** No `drop_table`, no `drop_column`, no
@@ -267,3 +279,58 @@ to ignore the report.
 
 Only *presence* is compared, not the expression text: `now()` and
 `CURRENT_TIMESTAMP` are one default written two ways.
+
+## CHECK constraints are compared too, and the same pattern again
+
+The third gap in this report, and the one with the shortest fuse. The report
+compared table names, then column names, then server defaults — and each missing
+comparison shipped a live-only defect before the next one was added.
+
+`topic_selections.confidence` had no non-negative CHECK, and neither did four of
+the six `customer_policy_scores` score columns (`system_score` and
+`customer_score` had one, which is what made the gap read as deliberate). That
+matters because `compose_access_score` applies a ceiling to every composite rule
+and **no floor**, so a negative input composed `access_score = -4444.44` — and
+`access_score` is what `resolve_access_band`, `resolve_policy_tier` and
+`_control_posture` all read. The three functions that decide what a customer is
+served could be handed a number the published scale does not contain.
+
+`confidence` was exempt in `SIGNED_QUANTITY_COLUMNS` with the reason "the writer
+clamps instead". That reason was false: nothing clamped it, which is why the row
+was writable and the negative composed. A documented exception whose stated
+justification is demonstrably untrue is worse than no exemption — it reads as a
+decision and stops anyone looking.
+
+`20261002_03_score_scale_checks` repairs existing rows to the value
+`_within_published_scale` now produces on the snapshot boundary (0.0, *not* an
+arbitrary number, so the row agrees with its next recompute) and then adds the
+constraints. Repair-before-constrain is required: `ADD CONSTRAINT` validates
+existing rows, so a database holding one of these would fail the migration, which
+is the worst place to discover it.
+
+Adding the comparison found a **sixth** column the chain had never guarded:
+`retention_snapshots.loyalty_score`. That CHECK *is* declared in the model — so
+it was a migration gap, not a modelling one, and the two look identical from the
+application while behaving differently, because a `create_all` database has it
+and a migrated one did not. It is weight 12 in `customer_score`, making the most
+directly-fed input to the composition the least-guarded one.
+
+Constraints are compared **by name**, not by SQL text: `confidence >= 0` and
+`confidence >= 0::double` are one constraint to a human, and text comparison
+would report every rewrite as drift. And in **one direction only**, for the same
+asymmetry as defaults: a CHECK the database has and the model omits is harmless,
+because the database is merely stricter than the models. The unsafe direction is
+a CHECK the *model* declares and the database lacks — the model believing it is
+guarded where it is not.
+
+Unnamed constraints are skipped on both sides. SQLite reflects a check written
+inline in a column definition with no name, so counting those as "declared but
+missing" would flag every table this project builds on SQLite. A named check is a
+deliberate one.
+
+One naming constraint worth knowing: PostgreSQL truncates identifiers at 63
+characters, and `ck_customer_policy_scores_community_closeness_score_non_negative`
+is 64. SQLite does not enforce the limit, so the chain reported this revision as
+working until it was run against a real database, where it failed with
+`IdentifierError`. It is now `..._community_closeness_ge_0`, the only such
+abbreviation in `app/models.py`.

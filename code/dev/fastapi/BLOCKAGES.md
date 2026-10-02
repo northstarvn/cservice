@@ -3401,3 +3401,100 @@ The resolution is three parts:
    the evidence that the clamp is load-bearing rather than decorative.
 
 Suite **3005 passing**.
+
+### Sentiment was on the customer path with a ten-second timeout
+
+`analyze_sentiment` was a blocking HTTP POST to Hugging Face with
+`timeout=10`, no circuit breaker and no cache — reached from **eight** call
+sites, including `POST /chat`, the 360, the retention recompute and the recovery
+playbooks, and more than one of them analyses the *same* message during a single
+request. So provider latency was customer latency, paid repeatedly. This was
+flagged early in the session as a known latency bug and left in place; it is the
+larger of the two performance problems, the brain router being the smaller.
+
+Bounded now, in the order the cost matters: a breaker (3 consecutive failures →
+no attempt for 60s), a 1.5s timeout rather than ten, and a bounded cache keyed by
+a **salted sha256** of the message. The digest is not a convenience — a cache
+keyed by the message itself would be a store of everything customers have typed,
+which is a retention question nobody asked for. Cached `None` is not stored, so a
+provider that recovers is picked up rather than written off for the process
+lifetime. `sentiment_provider_status()` reports state for an operator asking why
+a customer has no sentiment score.
+
+**A near-miss worth recording:** the flag was first defaulted to *off* when no
+token is configured, on the reasoning that you should not pay for a provider you
+did not set up. Two pinned tests caught it — sentiment would have been silently
+disabled for every existing deployment. The breaker already bounds the cost of an
+unconfigured provider, so the flag now only has to say "off".
+
+Introducing process-global breaker state then broke two tests that pass in
+isolation and fail in the full run: earlier tests call `analyze_sentiment` for
+real, the network is unavailable, and three failures open the breaker for
+everything after. Fixed with `tests/conftest.py` and an autouse reset, because
+per-module resets fix today's symptom and leave the next file to rediscover it.
+
+### Five score columns could hold a negative value, and a sixth was never guarded
+
+Follow-on from the `resolve_access_band` conflict, and the same shape as the
+`chat_history.timestamp` defect that came before it — **each gap in the drift
+report shipped a live-only defect before the next comparison was added.**
+
+`compose_access_score` has a ceiling and no floor, so a negative input composed
+`access_score = -4444.44`. The column that let one in was
+`topic_selections.confidence` — exempt in `SIGNED_QUANTITY_COLUMNS` with the
+reason *"the writer clamps instead, so a check here would only disagree with the
+code that produced the value."* **That reason was false.** Nothing clamped it;
+the row was writable; the negative composed. A documented exception whose stated
+justification is demonstrably untrue is worse than no exemption, because it reads
+as a decision and stops anyone looking. Removed, and the CHECK added.
+
+`customer_policy_scores` guarded **two of six** score columns
+(`system_score`, `customer_score`) and not the four that include `access_score`
+— the one `resolve_access_band`, `resolve_policy_tier` and `_control_posture` all
+read. The asymmetry is what made it read as deliberate.
+
+Fixed in `0013_score_scale_checks`, which **repairs before it constrains**:
+`ADD CONSTRAINT` validates existing rows, so a deployed database holding one of
+these would fail the migration. Repaired to `0.0` rather than an arbitrary number
+because that is what `_within_published_scale` now produces on the snapshot
+boundary, so the row agrees with its next recompute instead of silently
+disagreeing with the code. Verified on PostgreSQL: seeded `confidence=-1000`,
+`access_score=-4444.44`, `loyalty_score=-77` at revision `0012`, upgraded, all
+repaired to 0.0, all three now rejecting negatives.
+
+Adding CHECK comparison to the drift report then found a **sixth** column the
+chain had never guarded: `retention_snapshots.loyalty_score`. Its CHECK *is* in
+the model, so this was a migration gap rather than a modelling one — and the two
+are indistinguishable from the application while behaving differently, because a
+`create_all` database has the guard and a migrated one did not. It is weight 12
+in `customer_score`, which made the most directly-fed input to the composition
+the least-guarded one.
+
+Two follow-on corrections:
+
+* **`alembic/README.md` rule 2 was false.** It claimed
+  `test_migration_chain.py` "runs the same comparison" as the drift report. It
+  compared tables and columns only — so the two comparisons that hide live-only
+  defects were in *neither* place. Both are now tested there, and the new
+  CHECK-constraint test was verified to have teeth by removing the constraint it
+  guards and watching it fail naming that constraint.
+* **`ck_customer_policy_scores_community_closeness_score_non_negative` is 64
+  characters** and PostgreSQL truncates identifiers at 63. SQLite does not
+  enforce the limit, so the revision passed the whole SQLite-backed chain test
+  and only failed against a real database. Now `..._community_closeness_ge_0`.
+
+### Checked and not a defect: `users.is_admin`
+
+Found while seeding the above — a raw `INSERT INTO users` failed with `null value
+in column "is_admin"`, because the column is `NOT NULL` with a Python-side
+`default=False` and no server default. It looks exactly like the
+`chat_history.timestamp` defect and is not:
+
+* the model and the chain **agree** there is no server default, so this is a
+  design choice and not drift (`0002` adds the column with a default, then drops
+  it after backfilling — the standard pattern for avoiding a permanent default);
+* every writer names the column explicitly, including the one raw-SQL writer,
+  `scripts/seed_sample_data.py`, which lists `is_admin` in its own INSERT;
+* the ORM sends the value on every insert, so no application path can hit it.
+
+Left alone. The failing INSERT was an incomplete one written by hand.

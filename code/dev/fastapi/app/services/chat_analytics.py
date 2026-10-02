@@ -1,8 +1,10 @@
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
+import hashlib
 import os
+import secrets
 
 import requests
 from dotenv import load_dotenv
@@ -44,6 +46,106 @@ load_dotenv()
 
 HF_SENTIMENT_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+
+# ---------------------------------------------------------------------------
+# Sentiment provider: bounding a call that sits on the customer path
+# ---------------------------------------------------------------------------
+# `analyze_sentiment` is reached from `POST /chat`, the 360, the retention
+# recompute and the recovery playbooks -- eight call sites, and more than one of
+# them analyses the *same* message during a single request. It was a blocking
+# HTTP POST with a ten-second timeout and no breaker, so provider latency was
+# customer latency, paid repeatedly.
+#
+# The numbers are policy rather than tuning. 1.5 seconds because a sentiment
+# label that arrives after the customer has moved on is worth nothing, and ten
+# seconds is most of a chat reply's entire attention budget.
+
+SENTIMENT_TIMEOUT_SECONDS = float(os.getenv("CSERVICE_SENTIMENT_TIMEOUT", "1.5"))
+SENTIMENT_FAILURE_THRESHOLD = int(os.getenv("CSERVICE_SENTIMENT_FAILURES", "3"))
+SENTIMENT_COOLDOWN_SECONDS = float(os.getenv("CSERVICE_SENTIMENT_COOLDOWN", "60"))
+SENTIMENT_CACHE_LIMIT = int(os.getenv("CSERVICE_SENTIMENT_CACHE", "512"))
+
+#: On by default, and that is a correction rather than a preference. Gating this
+#: off when no token is configured seemed obviously right -- why pay for a
+#: provider you did not set up -- but it silently disabled sentiment for every
+#: existing deployment, and two pinned tests caught exactly that. The breaker
+#: already bounds the cost of an unconfigured provider to a dict lookup after
+#: three failures, which is the thing the flag was actually there to prevent, so
+#: the flag now only has to say "off", and existing behaviour is preserved.
+SENTIMENT_ENABLED = os.getenv("CSERVICE_SENTIMENT_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+
+#: Per-process salt, so a cached digest cannot be correlated with a column
+#: elsewhere. Deliberately random per process -- a sentiment verdict is not worth
+#: a stable identifier, and a stable one would outlive the cache's usefulness.
+_SENTIMENT_CACHE_SALT = secrets.token_hex(16)
+
+_SENTIMENT_CACHE: dict[str, "Sentiment"] = {}
+
+
+class _SentimentCircuit:
+    """Fail-fast guard for the external sentiment provider.
+
+    The same shape as the brain router's breaker and for the same reason: the
+    provider is a third party, and a third party being down must cost a lookup
+    rather than a timeout on every call.
+
+    Per-process, as that one is, and for the same reason: a shared breaker needs
+    a store, and inventing one here would be a larger change than the defect
+    warrants. :func:`sentiment_provider_status` reports the scope so nobody
+    assumes cluster-wide behaviour.
+    """
+
+    def __init__(self) -> None:
+        self.state = "closed"
+        self.failure_count = 0
+        self.opened_at: Optional[float] = None
+
+    def allows(self) -> bool:
+        import time as _time
+
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            if (
+                self.opened_at is not None
+                and _time.monotonic() - self.opened_at >= SENTIMENT_COOLDOWN_SECONDS
+            ):
+                self.state = "half_open"
+                return True
+            return False
+        return True
+
+    def record_success(self) -> None:
+        self.state = "closed"
+        self.failure_count = 0
+        self.opened_at = None
+
+    def record_failure(self) -> None:
+        import time as _time
+
+        self.failure_count += 1
+        if self.state == "half_open" or self.failure_count >= SENTIMENT_FAILURE_THRESHOLD:
+            self.state = "open"
+            self.opened_at = _time.monotonic()
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "failure_count": self.failure_count,
+            "cooldown_seconds": SENTIMENT_COOLDOWN_SECONDS,
+            "scope": "per_process",
+            "note": (
+                "each pod learns about an outage independently, so the first few "
+                "requests per pod still pay a timeout"
+            ),
+        }
+
+
+SENTIMENT_CIRCUIT = _SentimentCircuit()
 RETENTION_KEYWORDS = {
     "slow": "response_speed",
     "delay": "response_speed",
@@ -1582,14 +1684,112 @@ def classify_lifecycle_stage(summary: InteractionSummary, churn_prediction: Chur
 
 
 def analyze_sentiment(text: str):
-    """Run Hugging Face inference for message-level sentiment, returning None on failure."""
+    """Run Hugging Face inference for message-level sentiment, returning None on failure.
+
+    This is on the customer path. ``POST /chat``, the 360, the retention
+    recompute and the recovery playbooks all call it, and it was a **blocking
+    HTTP request with a ten-second timeout and no circuit breaker** -- so a slow
+    or unreachable inference provider put a ten-second wait in front of a
+    customer sending a message, and did the same again at each of the eight call
+    sites for the same text. ``sentiment`` is a nice-to-have input to a score and
+    a lifecycle stage; it is never the reason a request should be slow.
+
+    Three things bound it now, in the order they matter:
+
+    * **A circuit breaker.** After ``SENTIMENT_FAILURE_THRESHOLD`` consecutive
+      failures the provider is not attempted at all for
+      ``SENTIMENT_COOLDOWN_SECONDS``, so an outage costs a dict lookup per call
+      rather than a timeout per call. The first request after the cooldown is a
+      probe.
+    * **A short timeout.** ``SENTIMENT_TIMEOUT_SECONDS`` (1.5s by default), not
+      ten. A sentiment score that arrives after the customer has gone is worth
+      nothing, and ten seconds is roughly the entire attention budget for a chat
+      reply.
+    * **A bounded cache keyed by the text digest.** The same message is analysed
+      by ``chat``, then again by whichever of ``activity_tree`` / ``retention`` /
+      ``customer_360`` / ``recovery_playbooks`` touch it. Sentiment of a given
+      string does not change between those calls, so the second one is pure
+      duplicated latency.
+
+    ``None`` on failure is unchanged and is the right answer: every caller
+    already treats it as "no sentiment", and a fabricated label would feed a
+    number into a score. Cached ``None`` is *not* stored, so a provider that comes
+    back is picked up on the next call rather than being written off for the
+    lifetime of the process.
+    """
+    if SENTIMENT_ENABLED is False:
+        return None
+    body = str(text or "").strip()
+    if not body:
+        return None
+
+    key = _sentiment_cache_key(body)
+    cached = _SENTIMENT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if not SENTIMENT_CIRCUIT.allows():
+        return None
+
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
     try:
-        response = requests.post(HF_SENTIMENT_URL, headers=headers, json={"inputs": text}, timeout=10)
+        response = requests.post(
+            HF_SENTIMENT_URL,
+            headers=headers,
+            json={"inputs": body},
+            timeout=SENTIMENT_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
         result = response.json()
         label = result[0][0]["label"].lower()
         score = result[0][0]["score"]
-        return Sentiment(label=label, score=score)
+        verdict = Sentiment(label=label, score=score)
     except Exception:
+        # Class name only: an HTTP error message can quote the token in the
+        # Authorization header, and this string reaches logs.
+        SENTIMENT_CIRCUIT.record_failure()
         return None
+
+    SENTIMENT_CIRCUIT.record_success()
+    _SENTIMENT_CACHE[key] = verdict
+    if len(_SENTIMENT_CACHE) > SENTIMENT_CACHE_LIMIT:
+        # Insertion-ordered, so this evicts the oldest. A dict rather than an
+        # LRU because the access pattern is "the same few messages, repeatedly"
+        # and recency would evict exactly the entries worth keeping.
+        for stale in list(_SENTIMENT_CACHE)[: len(_SENTIMENT_CACHE) - SENTIMENT_CACHE_LIMIT]:
+            _SENTIMENT_CACHE.pop(stale, None)
+    return verdict
+
+
+def _sentiment_cache_key(text: str) -> str:
+    """A bounded digest of the text, so the cache holds no customer words.
+
+    A cache keyed by the message itself would be a store of everything customers
+    have typed, which is a retention question nobody asked for. The digest is
+    salted per process so it cannot be correlated with a column elsewhere.
+    """
+    return hashlib.sha256(f"{_SENTIMENT_CACHE_SALT}|{text}".encode("utf-8")).hexdigest()[:32]
+
+
+def sentiment_provider_status() -> dict[str, Any]:
+    """Whether the sentiment provider is being consulted, and since when.
+
+    For an operator asking "why is this customer not being scored on sentiment",
+    which is otherwise indistinguishable from "the model has no opinion".
+    """
+    return {
+        "enabled": SENTIMENT_ENABLED is not False,
+        "timeout_seconds": SENTIMENT_TIMEOUT_SECONDS,
+        "failure_threshold": SENTIMENT_FAILURE_THRESHOLD,
+        "cooldown_seconds": SENTIMENT_COOLDOWN_SECONDS,
+        "cached_verdicts": len(_SENTIMENT_CACHE),
+        "cache_limit": SENTIMENT_CACHE_LIMIT,
+        "cache_keyed_by": "salted sha256 of the message; the cache holds no customer text",
+        **SENTIMENT_CIRCUIT.snapshot(),
+    }
+
+
+def reset_sentiment_provider() -> None:
+    """Clear the breaker and the cache. For tests and for an operator override."""
+    SENTIMENT_CIRCUIT.record_success()
+    _SENTIMENT_CACHE.clear()

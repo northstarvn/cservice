@@ -34,7 +34,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sqlalchemy import create_engine, inspect  # noqa: E402
+from sqlalchemy import CheckConstraint, create_engine, inspect  # noqa: E402
 
 from app.db import DATABASE_URL  # noqa: E402
 from app.models import Base  # noqa: E402
@@ -139,6 +139,62 @@ def compare_server_defaults(inspector: Any, tables: Any) -> dict[str, dict[str, 
     return drift
 
 
+def compare_check_constraints(inspector: Any, tables: Any) -> dict[str, dict[str, list[str]]]:
+    """Tables where the *model* declares a named CHECK the database lacks.
+
+    The third comparison this report was missing, added for the same reason as
+    the server-default one, and the pattern is now unmistakable: **each gap in
+    this report has hidden a live-only defect for the life of the chain.**
+
+    * names only -> `chat_history.timestamp` had no server default on a migrated
+      database and every chat insert failed there.
+    * now, names plus defaults but not constraints -> five score columns could
+      hold a negative value: `topic_selections.confidence` and four of the six
+      `customer_policy_scores` scores. `compose_access_score` has a ceiling and
+      no floor, so a negative input composed `access_score = -4444.44`, and that
+      number is what `resolve_access_band`, `resolve_policy_tier` and
+      `_control_posture` all read -- the three functions deciding what a customer
+      is served. `customer_policy_scores` guarded *two* of its six score columns,
+      which is the asymmetry that made it look deliberate.
+
+    **Compared by name, not by SQL text.** `confidence >= 0` and
+    `confidence >= 0::double` are one constraint as far as anyone reading this
+    report is concerned, and a text comparison would report every rewritten
+    constraint as drift and teach people to ignore it -- the failure mode that
+    made the original name-only version useless. Naming is also the only thing
+    a migration addresses: `batch.create_check_constraint(name, ...)` and
+    `drop_constraint(name)`.
+
+    **One direction only, for the same asymmetry as server defaults.** A CHECK
+    the *database* has and the model does not declare is harmless -- the database
+    is stricter than the models, so nothing the models do can violate it. A CHECK
+    the *model* declares and the database lacks is the unsafe direction: it is
+    the model believing it is guarded where it is not. Only that direction is
+    reported.
+
+    Unnamed constraints are skipped on both sides. SQLite reflects a check
+    written inline in a column definition with no name, and treating that as
+    "the model declares an unnamed check the database lacks" would flag every
+    table this project builds on SQLite. A named check is a deliberate one.
+    """
+    drift: dict[str, dict[str, list[str]]] = {}
+    for name in sorted(tables):
+        try:
+            live_checks = inspector.get_check_constraints(name)
+        except NotImplementedError:  # pragma: no cover - dialect without support
+            continue
+        live_names = {str(check["name"]) for check in live_checks if check.get("name")}
+        model_names = {
+            constraint.name
+            for constraint in Base.metadata.tables[name].constraints
+            if isinstance(constraint, CheckConstraint) and constraint.name
+        }
+        missing = sorted(model_names - live_names)
+        if missing:
+            drift[name] = {"missing_in_db": missing}
+    return drift
+
+
 def compare() -> dict:
     """Diff live tables against the models. Pure inspection; no writes."""
     engine = create_engine(sync_url(DATABASE_URL))
@@ -176,6 +232,7 @@ def compare() -> dict:
                 }
 
         default_drift = compare_server_defaults(inspector, declared & live)
+        check_drift = compare_check_constraints(inspector, declared & live)
 
         return {
             "live_tables": len(live),
@@ -185,7 +242,10 @@ def compare() -> dict:
             "column_drift": column_drift,
             "index_drift": index_drift,
             "server_default_drift": default_drift,
-            "in_sync": not (missing or extra or column_drift or default_drift),
+            "check_constraint_drift": check_drift,
+            "in_sync": not (
+                missing or extra or column_drift or default_drift or check_drift
+            ),
         }
     finally:
         engine.dispose()
@@ -230,6 +290,8 @@ def main() -> int:
         print(f"SERVER DEFAULT DRIFT {name}")
         for column, detail in sorted(drift.items()):
             print(f"    {column}: {detail}")
+    for name, drift in report.get("check_constraint_drift", {}).items():
+        print(f"CHECK CONSTRAINT DRIFT {name}: missing {', '.join(drift['missing_in_db'])}")
     return 1
 
 
