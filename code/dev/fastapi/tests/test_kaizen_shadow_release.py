@@ -1750,24 +1750,70 @@ class TestPinningOracle:
         assert resolve_access_band(55) == "moderate"
         assert resolve_access_band(54) == "limited"
         assert resolve_access_band(0) == "limited"
+        # Off the published scale the resolver **clamps** rather than raising,
+        # because it sits on the customer path: `POST /chat`, the 360 and every
+        # retention recompute go through it, so a bad number must not become a
+        # failed request for a customer. The validating variant below is the loud
+        # one, and the engine floor is what stops either path being reached.
+        assert resolve_access_band(-10) == "limited"
+        assert resolve_access_band(101) == "elite"
 
-        # Off the published 0-100 scale, this **raises** rather than clamping.
-        #
-        # Changed deliberately. It used to pin `resolve_access_band(-10) ==
-        # "limited"` and `resolve_access_band(101) == "elite"`, which contradicted
-        # `test_e2e_certainty_flows.py`'s off-scale case: two tests, two
-        # opposite contracts for one function, and only one of them load-bearing.
-        #
-        # Refusing wins because clamping is what makes the documented phantom
-        # defect invisible. A 0-1 score handed to a 0-100 resolver is 0.8 ->
-        # `limited`, the *worst* band, silently -- so an `elite` customer is
-        # served the bottom-band experience and nothing says why. The two
-        # in-scale cases that this test actually exists for are unaffected:
-        # `54` is below the lowest cut and still falls back to `limited`, and
-        # `0` is on the scale and still does.
+    def test_the_validating_band_resolver_refuses_what_the_fast_one_clamps(self):
+        """The two halves, and why there are two.
+
+        `resolve_access_band` clamps because it serves customers.
+        `resolve_access_band_validated` raises because an operator surface
+        should be told that a number is wrong rather than shown the band it
+        happened to clamp into.
+        """
+        from app.services.policy_scoring import (
+            resolve_access_band,
+            resolve_access_band_validated,
+        )
+
+        assert resolve_access_band(-10) == "limited"
+        assert resolve_access_band(101) == "elite"
         for off_scale in (-10, 101, -0.001, 100.001):
             with pytest.raises(ValueError, match="outside the published"):
-                resolve_access_band(off_scale)
+                resolve_access_band_validated(off_scale)
+        # In-scale values are identical either way.
+        for score, band in ((0, "limited"), (54, "limited"), (90, "elite")):
+            assert resolve_access_band(score) == band
+            assert resolve_access_band_validated(score) == band
+
+    def test_the_snapshot_boundary_holds_the_published_scale(self):
+        """The invariant that makes the clamp unreachable through any engine path.
+
+        `compose_access_score` applies a ceiling to every composite rule and no
+        floor -- six of the rules declare neither -- so a negative input reaches
+        `access_score = -5388.89`. It is *not* clamped there, because that
+        function is pinned as a faithful extraction of the original inline
+        expression (`test_policy_scoring_expansion` sweeps a grid containing
+        `-8.0` and asserts exact parity), and changing the arithmetic to satisfy
+        an invariant would be changing what that test protects.
+
+        The published-scale invariant is therefore enforced on
+        `build_customer_policy_snapshot`, which is the boundary every consumer
+        reads through: the tier and posture resolvers, the persisted
+        `customer_policy_scores` row, the 360, the self-service reads.
+
+        Asserted here on the helper that does it, because this file is a pure
+        governance oracle; the database-backed snapshot check lives beside the
+        composition parity it defends.
+        """
+        from app.services.policy_scoring import POLICY_SCORING_OPS, _within_published_scale
+
+        floor = float(POLICY_SCORING_OPS["score_floor"])
+        ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+        for raw in (-1000.0, -10.0, -0.001, 0.0, 55.0, 100.0, 100.001, 5388.89):
+            (clamped,) = _within_published_scale(raw)
+            assert floor <= clamped <= ceiling, (raw, clamped)
+        # The identity case matters too: clamping must not move an in-range score.
+        for raw in (0.0, 12.345, 55.0, 99.999, 100.0):
+            (clamped,) = _within_published_scale(raw)
+            assert clamped == float(raw), (raw, clamped)
+        # Non-numeric passthrough, so a missing signal is not turned into a 0.
+        assert _within_published_scale("not-a-number") == ("not-a-number",)
 
     def test_the_band_scale_is_zero_to_one_hundred(self):
         """The mistake that produced twelve false blockages.

@@ -1586,3 +1586,111 @@ def test_an_empty_topic_leaves_the_snapshot_scores_untouched_but_still_scores_te
     # always have.
     assert snapshot.topic_context == "user-1: no active topic"
     assert snapshot.topic_richness == "no_topic_richness"
+
+
+# ---------------------------------------------------------------------------
+# The published scale is enforced at the snapshot boundary
+# ---------------------------------------------------------------------------
+#
+# The differential tests above pin `compose_access_score` as a faithful
+# extraction of the original inline expressions, *including* the two
+# asymmetries and including negative results. That is why the scale is not
+# enforced there: clamping inside the composition would change the arithmetic
+# those tests exist to protect.
+#
+# It matters that the two are kept separate. `compose_access_score` applies a
+# ceiling to every composite rule and no floor -- six of the rules declare
+# neither -- so a negative input reaches `access_score = -5388.89`. Every
+# consumer reads the composed numbers through `build_customer_policy_snapshot`,
+# and that is where the floor belongs.
+
+
+def test_the_snapshot_clamps_every_published_score_into_range():
+    from app.services.policy_scoring import (
+        POLICY_SCORING_OPS,
+        _within_published_scale,
+    )
+
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    # A paired call, because that is how the snapshot uses it.
+    for raw in ((-1000.0, 0.0), (100.001, 50.0), (0.0, 1000.0), (55.0, 55.0)):
+        for clamped in _within_published_scale(*raw):
+            assert floor <= clamped <= ceiling, (raw, clamped)
+
+
+def test_the_composition_is_still_free_to_go_negative_and_that_is_pinned():
+    """The negative is real, reachable, and deliberately left where it is.
+
+    Asserted so this file keeps saying what it means: the composition is a
+    faithful copy and is *not* the place the scale is enforced. If a future
+    change clamps here, this fails and the parity tests above start failing too,
+    which is the intended alarm rather than a silent improvement.
+    """
+    from app.services.policy_scoring import SCORE_INPUTS, compose_access_score
+
+    inputs = [row["input"] for row in SCORE_INPUTS]
+    worst = 0.0
+    for name in inputs:
+        for value in (-1000.0, -50.0, -1.0):
+            composed = compose_access_score({**{n: 0.0 for n in inputs}, name: value})
+            worst = min(worst, float(composed["access_score"]))
+    assert worst < 0.0, (
+        "compose_access_score no longer goes negative; if a floor was added here, "
+        "the differential tests against the original expression are now asserting "
+        "something other than the original expression"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The two band resolvers, and why there are two
+# ---------------------------------------------------------------------------
+#
+# This is the settled form of a conflict that was live for one commit: a
+# governance oracle pinned `resolve_access_band(-10) == "limited"` (clamp) while
+# a newer certainty-flows file pinned a `ValueError` (refuse) for the same call.
+#
+# Refusing in `resolve_access_band` is wrong. It sits on the customer path --
+# `POST /chat`, the 360, every retention recompute -- and off-scale numbers do
+# not only come from caller bugs: `compose_access_score` reaches
+# `access_score = -4444.44` from a negative `topic_confidence`-style input,
+# because six of its rules declare no floor. Raising there turns a scoring
+# defect into a failed customer request.
+#
+# Refusing *anywhere* is right, for operator surfaces. So the two are separated by
+# name, and the validator below asserts they still disagree -- because
+# collapsing them back into one function is the change that reopens this.
+
+
+def test_the_customer_path_resolver_always_returns_a_band():
+    from app.services.policy_scoring import POLICY_SCORING_OPS, resolve_access_band
+
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    for value in (floor - 1.0, ceiling + 1.0, floor - 1000.0, ceiling + 1000.0, -4444.44):
+        band = resolve_access_band(value)
+        assert isinstance(band, str) and band, value
+
+
+def test_the_operator_path_resolver_refuses_an_off_scale_score():
+    from app.services.policy_scoring import POLICY_SCORING_OPS, resolve_access_band_validated
+
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    with pytest.raises(ValueError):
+        resolve_access_band_validated(floor - 1.0)
+    with pytest.raises(ValueError):
+        resolve_access_band_validated(ceiling + 1.0)
+    # In-scale values are identical either way, so the pair is a difference in
+    # handling a bad number and nothing else.
+    for score in (0.0, 54.0, 75.0, 90.0, 100.0):
+        assert resolve_access_band(score) == resolve_access_band_validated(score)
+
+
+def test_the_validator_asserts_the_two_resolvers_still_disagree():
+    """Collapsing the pair back into one function is what reopens the conflict."""
+    from app.services.policy_scoring import validate_policy_scoring
+
+    report = validate_policy_scoring()
+    assert report["errors"] == 0, report.get("error_list")
+    assert report["valid"] is True

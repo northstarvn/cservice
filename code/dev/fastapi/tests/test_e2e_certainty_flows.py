@@ -336,19 +336,45 @@ class TestMonotoneInputsGiveMonotoneOutputs:
         for score in (90.0, 99.999, 100.0):
             assert policy_scoring.resolve_access_band(score) == "elite", score
 
-    def test_a_score_off_the_declared_scale_is_refused_rather_than_clamped(self):
-        """Clamping quietly invents a band for a score that does not exist.
+    def test_a_score_off_the_declared_scale_never_reaches_a_band_resolver(self):
+        """The published scale is an invariant of the *boundary*, not of the resolver.
 
-        A caller holding ``-10`` or ``101`` has a bug, and a band for it is a
-        band nobody wrote a rule for. The simulator's own docstring records a
-        phantom defect from exactly this: an access-band resolver called on a
-        0-1 scale.
+        Written this way after the obvious version of it was wrong. "The band
+        resolver refuses an off-scale score" is not achievable as stated, and
+        insisting on it would have been the bug: off-scale numbers do not only
+        come from a caller's mistake. `compose_access_score` applies a ceiling to
+        every composite rule and no floor, so six of them -- including
+        `access_score` itself -- can emit a negative score, and `-5388.89` is
+        reachable. A band resolver sits on the customer path (`POST /chat`, the
+        360, every retention recompute), so raising there would turn a scoring
+        defect into a failed request for a customer.
+
+        So the composition stays faithful to the original expression (an existing
+        parity test pins that, negatives included) and the invariant is enforced
+        on `build_customer_policy_snapshot`, which every consumer reads through.
+        The resolver then clamps as a last line of defence, and a separate
+        validating entry point refuses loudly for operator surfaces.
+
+        Pure functions only: this file's contract is that it touches no database.
         """
         from app.services import policy_scoring
 
-        for score in (-0.001, 100.001):
-            with pytest.raises(ValueError):
-                policy_scoring.resolve_access_band(score)
+        floor = float(policy_scoring.POLICY_SCORING_OPS["score_floor"])
+        ceiling = float(policy_scoring.POLICY_SCORING_OPS["score_ceiling"])
+        for raw in (-1000.0, -10.0, -0.001, 0.0, 100.0, 100.001, 5388.89):
+            (clamped,) = policy_scoring._within_published_scale(raw)
+            assert floor <= clamped <= ceiling, (raw, clamped)
+
+    def test_an_operator_surface_refuses_an_off_scale_score_the_fast_path_clamps(self):
+        """The loud half exists, and the two do not shadow each other."""
+        from app.services import policy_scoring
+
+        assert policy_scoring.resolve_access_band(-10) == "limited"
+        assert policy_scoring.resolve_access_band(101) == "elite"
+        with pytest.raises(ValueError):
+            policy_scoring.resolve_access_band_validated(-10)
+        with pytest.raises(ValueError):
+            policy_scoring.resolve_access_band_validated(101)
 
     def test_a_longer_forecast_horizon_is_never_more_confident(self):
         from app.services import retention

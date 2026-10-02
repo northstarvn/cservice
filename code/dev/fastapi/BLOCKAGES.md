@@ -3340,7 +3340,8 @@ attribute it to another.
 | the cast | `ana` declared `customer-premium` and resolved to `system-premium`; `dmitri` declared `standard` and resolved to `restricted`. No member reached `customer-premium` at all, leaving a published tier unexercised. |
 | `_e2e_world.assert_monotonic` | hardcoded *non-increasing*, so the interest-accrual flow could only be expressed by writing the series backwards. Now takes `increasing=`. |
 | `arrears_payments` | `_entry_dict` and `settle_arrears_entry` subtracted a column value from `datetime.now(timezone.utc)`. SQLite returns naive datetimes and PostgreSQL aware ones, so **every** arrears endpoint raised `TypeError` on SQLite while working on PostgreSQL. |
-| `policy_scoring.resolve_access_band` | clamped off-scale scores into `limited`. A 0-1 score handed to a 0-100 resolver is `0.8 -> limited` — the worst band, silently. Now refuses, which `test_kaizen_shadow_release.py`'s clamp assertion contradicted; that pinned contract was changed deliberately, and both in-scale cases it exists for (54 and 0 → `limited`) are unaffected. |
+| `compose_access_score` | applied a ceiling to every composite rule and **no floor** — six of the rules declare neither, so `access_score = -4444.44` was reachable from a negative input. Fixed at the snapshot boundary, not in the composition (see below). |
+| `topic_selections.confidence` | the only score column with no non-negative CHECK, and therefore the one writable input that drives the composition negative. Not changed; the boundary clamp makes it harmless. Worth closing for consistency. |
 
 ### Six test expectations that were themselves wrong
 
@@ -3350,3 +3351,53 @@ the **same time of day**, so the wall-clock test could never pass; a campaign is
 legitimately active on 2026-07-15, so 100 points bought $1.05; $50 is *on* the
 daily cap, not over it; `resolve_personalization` returns `refusal_reasons`, not
 `refusals`; and `app.__file__` is `None` because `app` has no `__init__.py`.
+
+### The `resolve_access_band` conflict, resolved
+
+Two tests pinned opposite contracts for one function: the committed governance
+oracle asserted `resolve_access_band(-10) == "limited"` (clamp), and another
+session's certainty-flows file asserted `pytest.raises(ValueError)` (refuse).
+The first fix took "refuse" and changed the committed test. That was wrong, and
+chasing the actual behaviour is what showed why.
+
+**Off-scale scores do not only come from caller bugs.** `compose_access_score`
+applies a ceiling to every composite rule and no floor — six of the rules
+declare neither, and `access_score` is a `scaled_mean` over three unfloored
+terms — so a negative input reached `access_score = -4444.44`. One writable
+input reaches it: `topic_selections.confidence`, the only score column without
+a non-negative CHECK.
+
+`resolve_access_band` sits on the customer path — `POST /chat`, the 360, every
+retention recompute. Raising there converts a *scoring* defect into a **failed
+customer request**, which is strictly worse than a wrong band. So the committed
+clamp contract is the right one, and the change was reverted.
+
+**But refusing is right somewhere**, and that is the part the first fix got for
+the wrong reason. It argued that clamping hides a 0-1 score becoming `limited`,
+which is true and is the documented phantom defect — but the answer is not to
+make the customer path raise. It is to stop producing the bad number.
+
+The resolution is three parts:
+
+1. **The composition stays faithful.** `compose_access_score` is not clamped,
+   because `test_policy_scoring_expansion` sweeps a grid containing `-8.0` and
+   pins exact parity with the original inline expression, negatives included.
+   Changing the arithmetic to satisfy an invariant would change what that test
+   protects — "make the parity test pass by altering what it pins" is worse than
+   the negative it hides.
+
+2. **The snapshot boundary enforces the scale.** `_within_published_scale` runs
+   in `build_customer_policy_snapshot`, which every consumer reads through — the
+   tier and posture resolvers, the persisted `customer_policy_scores` row, the
+   360, the self-service reads. Verified end to end: `-4444.44` in, `0.0` in the
+   snapshot and in the row, band `limited`, tier `restricted`.
+
+3. **Two resolvers, distinguished by name.** `resolve_access_band` clamps,
+   because it serves a customer. `resolve_access_band_validated` refuses, for
+   operator surfaces that should be told a number is wrong rather than shown the
+   band it clamped into. `validate_policy_scoring` asserts they still disagree —
+   because collapsing them back into one function is the change that reopens
+   this — and reports the composition's reachable range (`-12000.0 .. 100.0`) as
+   the evidence that the clamp is load-bearing rather than decorative.
+
+Suite **3005 passing**.

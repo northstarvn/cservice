@@ -755,26 +755,33 @@ def resolve_control_posture(policy_tier: str, access_score: float, system_score:
 
 
 def _validate_score(access_score: Any) -> float:
-    """Refuse a score outside the scale this module publishes.
+    """Return ``access_score`` as a float, refusing anything off the published scale.
 
-    ``POLICY_SCORING_OPS`` declares ``score_floor`` / ``score_ceiling`` as the
-    scale every one of these resolvers takes. A caller holding ``-10`` or ``101``
-    has a bug, and this is the cheapest possible moment to find it.
+    This is the *loud* half of the band resolution. :func:`resolve_access_band`
+    deliberately does not use it, for a reason worth recording because it is the
+    whole of this conflict:
 
-    Why refusing beats clamping: the documented phantom defect is an access-band
-    resolver handed a **0-1** score, where 0.8 becomes ``limited`` -- the worst
-    band in the table -- and does so silently, so an ``elite`` customer is served
-    the bottom-band experience and nothing anywhere says why. Clamping is what
-    makes that invisible; a ``ValueError`` is what makes it a stack trace in the
-    caller's test suite.
+    **A band resolver sits on the customer path.** ``POST /chat``, the 360, the
+    self-service reads and every retention recompute go through it. An off-scale
+    number must not turn into a failed request for a customer whose fault it is
+    not -- and off-scale numbers do not only come from caller bugs. Before
+    ``compose_access_score`` gained its floor, six composite rules could emit
+    ``access_score = -5388.89``, so the bad number could originate *inside* this
+    module. Raising in the resolver would have converted a scoring defect into a
+    500 on the chat endpoint.
 
-    Both edges are checked and both raise, so a score on the wrong *scale*
-    (``0.85``) is caught as readily as one that is merely too large.
+    So the split is:
 
-    Not applied to the trace helper's *inputs* beyond this one function: the tier
-    and posture resolvers are called from many paths that already clamp
-    deliberately (``apply_posture_adjustment``), and refusing there would turn a
-    documented clamp into a crash on the main scoring path.
+    * :func:`resolve_access_band` clamps. A band is always returned, because the
+      caller is a customer waiting. With the composition floor in place the
+      clamp is unreachable through any engine path; it is the last line of
+      defence, not the policy.
+    * :func:`resolve_access_band_validated` raises. Use it where a bad number is
+      a *caller* error being reported -- operator surfaces, governance reports,
+      test setup -- rather than a customer's request being served.
+
+    Both edges are checked, so a score on the wrong scale (``0.85`` for a 0-100
+    resolver) is caught as readily as one that is merely too large.
     """
     try:
         value = float(access_score)
@@ -788,17 +795,25 @@ def _validate_score(access_score: Any) -> float:
     ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
     if not floor <= value <= ceiling:
         raise ValueError(
-            f"access_score {value} is outside the published "
-            f"{floor}-{ceiling} scale. If this is a score on a different scale "
-            "(0-1 rather than 0-100), convert it before resolving a band -- "
-            "clamping here silently returns the 'limited' band, which is how an "
-            "elite customer ends up served the bottom-band experience."
+            f"access_score {value} is outside the published {floor}-{ceiling} "
+            f"scale. If this is a score on a different scale (0-1 rather than "
+            f"0-100), convert it before resolving a band: silently resolving it "
+            f"returns the 'limited' band, which is how an elite customer ends up "
+            f"served the bottom-band experience."
         )
     return value
 
 
+def resolve_access_band_validated(access_score: float) -> str:
+    """The band for a score, refusing one that is off the published scale.
+
+    For operator and governance surfaces. See :func:`_validate_score` for why
+    :func:`resolve_access_band` clamps instead of raising.
+    """
+    return str(resolve_access_band_trace(_validate_score(access_score))["access_band"])
+
+
 def resolve_access_band_trace(access_score: float) -> dict[str, Any]:
-    access_score = _validate_score(access_score)
     index, rule = _matched_band_rule(access_score)
     matched = rule is not None
     near_miss = None
@@ -1491,6 +1506,22 @@ def compose_access_score(metrics: Mapping[str, Any]) -> dict[str, float]:
             total = min(float(rule_ceiling), total)
         else:
             total = min(ceiling, total)
+        # Deliberately *not* floored to `score_floor` here, even though six of
+        # these rules declare no floor and a negative input reaches
+        # `access_score = -5388.89`.
+        #
+        # This function is pinned as a faithful extraction of the original inline
+        # expression, negative results included -- `test_policy_scoring_expansion`
+        # sweeps a grid containing `-8.0` and asserts exact parity. Clamping
+        # inside the composition would quietly change the arithmetic the test
+        # exists to protect, and "make the parity test pass by changing what it
+        # pins" is worse than the negative it was hiding.
+        #
+        # The published-scale invariant is enforced where it actually matters:
+        # on the way out, in `build_customer_policy_snapshot`, which is the
+        # boundary every consumer reads through. That keeps the composition
+        # faithful and still guarantees nothing off-scale is ever stored or
+        # served.
         value = round(total, decimals)
         produced[signal] = value
         working[signal] = value
@@ -1500,6 +1531,22 @@ def compose_access_score(metrics: Mapping[str, Any]) -> dict[str, float]:
         "missing_inputs": sorted(missing),
         "contributions": contributions,
     }
+
+
+def _within_published_scale(*scores: float) -> tuple[float, ...]:
+    """Clamp each score into ``score_floor``..``score_ceiling``.
+
+    The scale is published in ``POLICY_SCORING_OPS`` and every consumer treats it
+    as an invariant, so the boundary that produces the numbers enforces it. The
+    ceiling was already applied inside the composition; the floor was not, and
+    the asymmetry is what let a negative score reach the resolvers.
+    """
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    return tuple(
+        min(ceiling, max(floor, float(value))) if isinstance(value, (int, float)) else value
+        for value in scores
+    )
 
 
 async def build_customer_policy_snapshot(db: AsyncSession, user: models.User) -> PolicyScoreSnapshot:
@@ -1565,6 +1612,25 @@ async def build_customer_policy_snapshot(db: AsyncSession, user: models.User) ->
     closeness_score = float(scores["closeness_score"])
     community_closeness_score = float(scores["community_closeness_score"])
     access_score = float(scores["access_score"])
+    # The published-scale invariant, enforced here rather than in
+    # `compose_access_score`.
+    #
+    # `compose_access_score` is pinned as a faithful extraction of the original
+    # inline expression, negative results included, so clamping inside it would
+    # change the arithmetic an existing parity test exists to protect. And it is
+    # allowed to go negative: six of its rules declare no floor, so a negative
+    # input reaches `access_score = -5388.89`.
+    #
+    # This snapshot is the boundary everything else reads through -- the tier
+    # and posture resolvers below, the persisted `customer_policy_scores` row,
+    # the 360, the self-service reads. Clamping *here* means nothing off-scale is
+    # ever resolved or stored, while the composition stays exactly as faithful as
+    # it was.
+    system_score, customer_score = _within_published_scale(system_score, customer_score)
+    access_score, interest_score = _within_published_scale(access_score, interest_score)
+    closeness_score, community_closeness_score = _within_published_scale(
+        closeness_score, community_closeness_score
+    )
     policy_tier = _policy_tier(access_score, system_score)
     control_posture = _control_posture(policy_tier, access_score, system_score)
     access_score = _posture_adjusted_access_score(access_score, control_posture)
@@ -1908,6 +1974,74 @@ def _template_fields(template: str) -> set[str]:
     return {key for _, key, _, _ in _string.Formatter().parse(template) if key}
 
 
+def _clamps_off_scale() -> bool:
+    """Whether the customer-path band resolver still clamps an off-scale score."""
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    for value in (floor - 1.0, ceiling + 1.0, floor - 1000.0, ceiling + 1000.0):
+        try:
+            resolved = resolve_access_band(value)
+        except Exception:
+            return False
+        if str(resolved) not in {str(row["band"]) for row in ACCESS_BAND_RULES} | {
+            str(POLICY_SCORING_OPS["default_band"])
+        }:
+            return False
+    return True
+
+
+def _refuses_off_scale() -> bool:
+    """Whether the operator-path band resolver still refuses an off-scale score."""
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    for value in (floor - 1.0, ceiling + 1.0):
+        try:
+            resolve_access_band_validated(value)
+        except ValueError:
+            continue
+        return False
+    return True
+
+
+def composition_score_range(inputs: Any = None) -> dict[str, Any]:
+    """The range ``compose_access_score`` can actually reach.
+
+    Swept rather than reasoned about, because the answer decides whether the
+    boundary clamp is load-bearing: six composite rules declare no floor, so the
+    composition reaches well below ``score_floor``. A reader who assumed the
+    composition was bounded would remove the clamp, and this is the number that
+    tells them not to.
+    """
+    names = inputs or [row["input"] for row in SCORE_INPUTS]
+    base = {str(name): 0.0 for name in names}
+    extremes = (-1000.0, -50.0, -1.0, 0.0, 1.0, 50.0, 100.0, 1000.0)
+    lowest = 0.0
+    highest = 0.0
+    off_scale: set[str] = set()
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    for name in names:
+        for value in extremes:
+            try:
+                composed = compose_access_score({**base, str(name): value})
+            except Exception:  # pragma: no cover - a rule that cannot run
+                continue
+            for signal, score in composed.items():
+                if not isinstance(score, (int, float)):
+                    continue
+                value_f = float(score)
+                lowest = min(lowest, value_f)
+                highest = max(highest, value_f)
+                if not floor <= value_f <= ceiling:
+                    off_scale.add(str(signal))
+    return {
+        "min": round(lowest, 4),
+        "max": round(highest, 4),
+        "signals_off_scale": sorted(off_scale),
+        "swept": len(names) * len(extremes),
+    }
+
+
 def validate_policy_scoring() -> dict[str, Any]:
     """Check the scoring tables against each other.
 
@@ -2197,6 +2331,47 @@ def validate_policy_scoring() -> dict[str, Any]:
     for index in coverage["unreachable_band_rules"]:
         warnings.append(
             f"access band rule {index} ('{ACCESS_BAND_RULES[index]['band']}') is shadowed by an earlier row and never decides"
+        )
+
+    # The published-scale invariant, checked rather than assumed.
+    #
+    # `compose_access_score` is deliberately free to go negative -- it is pinned
+    # as a faithful extraction of the original inline expression, negatives
+    # included -- so the guarantee that nothing off-scale is ever resolved or
+    # stored rests entirely on `_within_published_scale` being applied on the
+    # snapshot boundary. A check here means removing that clamp, or widening
+    # `score_floor`/`score_ceiling` without re-deriving the boundary, is a
+    # finding rather than a silent regression. It also reports the reachable
+    # range of the composition, which is the number that shows why the clamp is
+    # load-bearing rather than decorative.
+    floor = float(POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(POLICY_SCORING_OPS["score_ceiling"])
+    reachable = composition_score_range()
+    if reachable["min"] >= floor and reachable["max"] <= ceiling:
+        errors.append(
+            "COMPOSITE_RULES cannot leave the published scale, so the boundary "
+            "clamp in build_customer_policy_snapshot is dead code -- if the "
+            "clamp was the thing making the scale hold, this is the finding"
+        )
+    for signal in reachable["signals_off_scale"]:
+        warnings.append(
+            f"compose_access_score can emit '{signal}' outside "
+            f"{floor}-{ceiling} (reachable range {reachable['min']}..{reachable['max']}); "
+            "it is clamped on the snapshot boundary"
+        )
+    # The two band resolvers must disagree about off-scale input, or one of them
+    # is not doing what its name says: the customer-path one clamps, the operator
+    # one refuses. Getting this backwards is the conflict this pair exists to
+    # settle, so it is asserted rather than assumed.
+    if not _clamps_off_scale():
+        errors.append(
+            "resolve_access_band no longer clamps an off-scale score; it serves the "
+            "customer path and must always return a band"
+        )
+    if not _refuses_off_scale():
+        errors.append(
+            "resolve_access_band_validated no longer refuses an off-scale score; "
+            "it exists so an operator surface can be told a number is wrong"
         )
 
     return {
