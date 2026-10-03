@@ -205,9 +205,9 @@ PERSONAS: tuple[Persona, ...] = (
         display_name="ana",
         summary="loyal, two completed bookings, points balance, an arrears deferral, a stated preference",
         access_score=88.0,
-        system_score=92.0,
+        system_score=80.0,
         churn_risk="low",
-        loyalty_score=78.0,
+        loyalty_score=80.0,
         days_since_last_activity=5,
         booking_states=("completed", "completed"),
         consent_service=True,
@@ -2958,7 +2958,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "personas": ("repeatedly_cancelled",),
         "subflows": ("detect_regulatory", "compute_sla_floor", "auto_escalate", "report_basis"),
         "probe_ids": ("complaint_sla_is_monotonic", "complaint_is_routed"),
-        "surfaces": ("/complaints/admin/sla-report", "/complaints/admin/sweep"),
+        "surfaces": ("/complaints/admin/sla", "/complaints/admin/sweep"),
         "invariant": (
             "only a statutory deadline or a breached clock may act without a human, "
             "and the reported basis is the clock that actually governed"

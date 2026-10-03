@@ -114,6 +114,7 @@ PROBE_CAPABILITY: dict[str, str] = {
     "posture_adjustment_is_effective": "policy_scoring",
     "rule_pack_selects": "rule_engine",
     "booking_states_are_valid": "bookings",
+    "booking_events_are_logged": "bookings",
     "retention_series_builds": "retention",
     "retention_health_bands": "retention",
     "forecast_confidence_decays": "retention",
@@ -132,6 +133,12 @@ PROBE_CAPABILITY: dict[str, str] = {
     "personalization_is_purpose_limited": "care_personalization",
     "trusted_device_never_overreaches": "care_personalization",
     "copilot_is_the_default_pane": "relationship_view",
+    # New probes for formerly single-probe flows and untested capabilities
+    "topic_classification_works": "topics",
+    "release_ladder_gates_evaluate": "release_ladder",
+    "blockage_log_renders": "blockage_log",
+    "points_quote_is_reproducible": "points_exchange",
+    "auth_rate_limit_fires": "topics",
     # Stage F.
     "policy_motion_needs_evidence": "policy_motion",
     "broken_promise_is_visible": "policy_motion",
@@ -233,6 +240,14 @@ ENGINES: tuple[dict[str, Any], ...] = (
         "target": "render_blockages_markdown",
         "declared_by": "file:BLOCKAGES.md",
         "flows": ("admin_governance_review",),
+    },
+    {
+        "capability_id": "points_exchange",
+        "title": "the points exchange rate and quote engine",
+        "root": "app.services.points_exchange",
+        "target": "quote_points_exchange",
+        "declared_by": "meta_feature:points_exchange",
+        "flows": ("points_and_arrears_payment",),
     },
     {
         "capability_id": "authz_governance",

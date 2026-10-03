@@ -131,9 +131,14 @@ THE_CAST: tuple[Person, ...] = (
         # all, leaving a published tier that nothing exercised. Lowering the
         # system score fixes both, because the declared tier is the intent and
         # the score is what drifted.
+        #
+        # loyalty_score=80.0 (was 78.0) -- raised so this persona clears
+        # RECOVERY_STAGE_RULES' 'loyal' threshold (loyalty_score >= 80 +
+        # booking_completed >= 1). The vocabulary_coverage report flagged 'loyal'
+        # as unreached because no persona both completed a booking and cleared 80.
         system_score=80.0,
         customer_score=90.0,
-        loyalty_score=78.0,
+        loyalty_score=80.0,
         interest_score=84.0,
         closeness_score=86.0,
         churn_risk="low",
