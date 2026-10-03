@@ -88,6 +88,15 @@ _NUMERIC_OPS: dict[str, Any] = {
     "ne": operator.ne,
 }
 
+#: The subset of ``_NUMERIC_OPS`` whose threshold must be a number.
+#:
+#: ``eq`` and ``ne`` are excluded on purpose: they are evaluated by
+#: ``operator.eq``/``operator.ne``, which succeed against any pair of objects, so
+#: requiring a float of them rejects working rules. See ``_validate_threshold``,
+#: which is where this split is load-bearing. Kept as a name rather than inlined
+#: so the test that pins the split has something to point at.
+_ORDERING_OPS: tuple[str, ...] = ("gt", "gte", "lt", "lte")
+
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 _DATE_OPS: dict[str, str] = {
@@ -232,7 +241,16 @@ RULE_PACKS: list[dict[str, Any]] = [
                 "priority": 90,
                 "effective_from": "2026-01-01",
                 "effective_to": None,
-                "when": {"churn_risk": "high", "stage": {"in": ["engaged", "at_risk"]}},
+                # `any`, not `{"in": [...]}`. There is no membership operator in
+                # this DSL -- `validate_when` rejects `in` as
+                # `unknown_operator`, and it was rejecting it here too; the
+                # clause just never met the validator, because `validate_when`
+                # runs on tenant-authored rules and nothing ran it over
+                # `RULE_PACKS`. So the rule shipped in the catalog with a clause
+                # the engine cannot evaluate, and could never fire for anybody.
+                # A rule nobody calls, containing an operator nobody implements:
+                # two independent reasons for the same green.
+                "when": {"churn_risk": "high", "any": [{"stage": "engaged"}, {"stage": "at_risk"}]},
                 "params": {"nudge_channel": "email", "discount_pct": "=15 + 5 if stage == 'at_risk' else 0"},
             },
             {
@@ -525,6 +543,24 @@ def evaluate_expression(expr: str, scope: Optional[dict[str, Any]] = None) -> An
     (``== != < <= > >=``), boolean ``and``/``or``, ternary ``x if c else y``,
     list literals, and allow-listed calls are accepted. Anything else raises
     ``ValueError`` — this is a formula calculator, not a Python sandbox.
+
+    **String constants are allowed, and were not, which broke a shipped rule.**
+    The grammar above has always claimed ``==`` and ``!=``; it could only deliver
+    them over numbers, because ``_eval_node`` rejected ``ast.Constant`` unless it
+    was a ``bool``/``int``/``float``. ``loyalty_retention.retention_high_risk``
+    ships ``discount_pct: "=15 + 5 if stage == 'at_risk' else 0"``, which parses
+    fine and then raised ``unsupported constant 'at_risk'`` from
+    ``resolve_params`` -- inside ``select_rules``, on a rule whose ``when`` had
+    already matched. So the pack contained a rule that crashed its own caller
+    the moment it did its job, which is a worse outcome than never firing.
+
+    Allowing the literal does not make this a string language: no string method
+    is reachable, no attribute access is reachable, no indexing is reachable,
+    and the only calls are the numeric allow-list. What it buys is the ability to
+    *name* a vocabulary value, which is what a rule keying off an enum stage
+    needs. ``TypeError`` is translated to ``ValueError`` so the "anything else
+    raises ``ValueError``" promise above holds even when the grammar accepts a
+    combination that has no meaning, such as ``"a" - 1``.
     """
     source = str(expr or "").strip()
     if not source:
@@ -533,14 +569,20 @@ def evaluate_expression(expr: str, scope: Optional[dict[str, Any]] = None) -> An
         tree = ast.parse(source, mode="eval")
     except SyntaxError as exc:  # pragma: no cover - defensive
         raise ValueError(f"invalid rule expression {source!r}: {exc}") from exc
-    return _eval_node(tree, dict(scope or {}))
+    try:
+        return _eval_node(tree, dict(scope or {}))
+    except ValueError:
+        raise
+    except (TypeError, ArithmeticError, IndexError, KeyError) as exc:
+        # Well-formed but meaningless: `"a" - 1`, `round('x')`, `1 / 0`.
+        raise ValueError(f"rule expression {source!r} does not evaluate: {exc}") from exc
 
 
 def _eval_node(node: Any, scope: dict[str, Any]) -> Any:
     if isinstance(node, ast.Expression):
         return _eval_node(node.body, scope)
     if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool) or isinstance(node.value, (int, float)):
+        if isinstance(node.value, (bool, int, float, str)) or node.value is None:
             return node.value
         raise ValueError(f"unsupported constant {node.value!r}")
     if isinstance(node, ast.Name):
@@ -1149,13 +1191,47 @@ def validate_when(
 
 
 def _validate_threshold(op_name: str, threshold: Any) -> list[dict[str, str]]:
-    """Shape checks per operator; a wrong-shaped threshold is a silent False."""
+    """Shape checks per operator; a wrong-shaped threshold is a silent False.
+
+    **Only the ordering operators get the numeric check, and that split is the
+    fix for a false positive that shipped.** ``_NUMERIC_OPS`` groups ``eq``/``ne``
+    with ``lt``/``lte``/``gt``/``gte`` because ``matches_field`` applies them all
+    through ``operator``, so ``if op in _NUMERIC_OPS: float(threshold)`` looked
+    correct. It is not: ``matches_field`` evaluates ``ne(context_value,
+    threshold)`` and only a ``TypeError`` turns that into a False, so
+    ``{"churn_risk": {"ne": "low"}}`` evaluates exactly as written. The
+    validator rejected it as ``'ne' needs a number, got 'low'`` -- an error, so
+    ``validate_when`` said ``valid: False`` about a rule that works.
+
+    That is the worse direction for this function to be wrong in. Its job is to
+    stop a tenant saving a rule that will silently never match; calling a working
+    rule invalid trains people to ignore it, and a warning nobody reads is the
+    same as no check. ``communication_suppression.suppress_negative_sentiment``
+    carried that clause, so the one pack with a production caller held a rule its
+    own validator disowned.
+
+    Equality comparisons are left entirely alone: ``==`` and ``!=`` succeed
+    against any value, so there is no wrong-shaped threshold to reject.
+    Ordering against a string threshold still errors, because
+    ``{"days_since_login": {"lt": "45"}}`` succeeding lexicographically is
+    almost never what the author meant.
+    """
     problems: list[dict[str, str]] = []
-    if op_name in _NUMERIC_OPS:
+    if op_name in _ORDERING_OPS:
         try:
             float(threshold)
         except (TypeError, ValueError):
-            problems.append({"code": "bad_threshold", "message": f"{op_name!r} needs a number, got {threshold!r}"})
+            problems.append(
+                {
+                    "code": "bad_threshold",
+                    "message": (
+                        f"{op_name!r} orders against a number, got {threshold!r}. "
+                        "Equality comparisons accept any value, so use "
+                        f"{{{op_name!r}: ...}} with eq/ne, or compare against a "
+                        "number if this really is an ordering test."
+                    ),
+                }
+            )
     if op_name in ("between_dates", "length_between"):
         bounds = _as_list(threshold)
         if len(bounds) != 2:
@@ -1330,6 +1406,20 @@ def select_rules(
     the first entry is the one a caller should act on. Each fired rule carries
     its resolved ``params`` and an explanation, which is what makes a pack
     reviewable rather than a black box.
+
+    **A rule whose ``when`` matches but whose ``params`` will not resolve is
+    skipped, not raised.** ``params`` are resolved *after* the match, so a rule
+    carrying an unevaluable ``=expr`` used to raise out of the middle of this
+    function -- taking the whole selection down with it, including the rules that
+    had already been decided. Every caller of ``select_rules`` in this tree sits
+    inside a request or a playbook: one tenant's typo in one ``params`` value took
+    out a complaint escalation and a recovery outreach at the same time.
+
+    The failure lands in ``skipped`` with its own reason, so it is still visible
+    in the payload a caller already reads, and it is distinguishable from a rule
+    that did not match. Note which direction that is: the rule is *not* fired
+    with partial or empty params. A rule that cannot compute its own discount
+    must not quietly fire and apply nothing.
     """
     resolved = pack if isinstance(pack, dict) and "rules" in pack else get_rule_pack(pack)
     anchor = _evaluation_date(effective_date=effective_date, now=now)
@@ -1349,12 +1439,23 @@ def select_rules(
         if not verdict["matched"]:
             skipped.append({"id": rule_id, "reason": verdict["reason"]})
             continue
+        try:
+            resolved_params = resolve_params(rule.get("params"), context)
+        except ValueError as exc:
+            skipped.append(
+                {
+                    "id": rule_id,
+                    "reason": f"params did not resolve: {exc}",
+                    "matched": True,
+                }
+            )
+            continue
         fired.append(
             {
                 "id": rule_id,
                 "priority": int(rule.get("priority", 0) or 0),
                 "order": index,
-                "params": resolve_params(rule.get("params"), context),
+                "params": resolved_params,
                 "explanation": verdict,
             }
         )
@@ -1368,6 +1469,257 @@ def select_rules(
         "skipped": skipped,
         "context_fields_used": sorted(
             {str(name) for rule in resolved.get("rules", []) for name in (rule.get("when") or {})}
+        ),
+    }
+
+
+def pack_reachability_report(app_root: Optional[Any] = None) -> dict[str, Any]:
+    """Which registered packs does production code actually select?
+
+    A pack is data, so it can be shipped complete and inert. Every validator in
+    this module checks that a pack is *well formed*; nothing checked that
+    anything *asks* for it, and on this tree two of the three registered packs
+    were selected by no call site outside this module and its own catalog.
+
+    That is worth reporting rather than inferring, because the failure reads as
+    coverage. ``loyalty_retention`` carries two enabled rules with priorities, a
+    discount expression and a description; a reviewer reading the catalog believes
+    a retention nudge system is in place.
+
+    Found by source inspection rather than by behaviour, deliberately. A
+    behavioural reachability probe has to supply a context, and the context it
+    supplies is its own construction -- which is how ``retention_dormant``
+    survived: it reads ``days_since_login`` while the only context built for it
+    anywhere carried ``days_since_last_activity``. Asking "who calls this" cannot
+    be fooled that way.
+
+    ``app_root`` is injectable so a test can point at a fixture tree; it defaults
+    to the ``app`` package next to this module.
+    """
+    import ast as _ast
+    import pathlib as _pathlib
+
+    root = _pathlib.Path(app_root) if app_root is not None else _pathlib.Path(__file__).resolve().parent
+
+    selected: dict[str, list[str]] = {}
+    this_file = _pathlib.Path(__file__).name
+    for path in sorted(root.rglob("*.py")):
+        if path.name == this_file:
+            continue
+        try:
+            tree = _ast.parse(path.read_text())
+        except (OSError, SyntaxError):  # pragma: no cover - unreadable file
+            continue
+        for node in _ast.walk(tree):
+            if not (
+                isinstance(node, _ast.Call)
+                and isinstance(node.func, _ast.Attribute)
+                and node.func.attr == "select_rules"
+                and node.args
+            ):
+                continue
+            first = node.args[0]
+            if isinstance(first, _ast.Constant) and isinstance(first.value, str):
+                selected.setdefault(str(first.value), []).append(path.name)
+
+    registered = sorted(str(entry.get("pack")) for entry in RULE_PACKS)
+    reachable = [name for name in registered if name in selected]
+    unreachable = [name for name in registered if name not in selected]
+
+    reasons: dict[str, str] = {}
+    for name in unreachable:
+        pack = get_rule_pack(name)
+        enabled = [r for r in pack.get("rules", ()) if r.get("enabled", True)]
+        # Descend into combinators, same reason as in `catalog_validation_report`:
+        # a rule that reads `stage` only inside an `any` branch still needs
+        # `stage`, and listing `any` as the field it needs would be nonsense.
+        needed: set[str] = set()
+        for rule in enabled:
+            _collect_when_fields(rule.get("when") or {}, needed)
+        reasons[name] = (
+            f"{len(enabled)} enabled rule(s) read {sorted(needed) or ['nothing']} and no "
+            "call site outside rule_engine selects this pack. Either wire it up or "
+            "delete it: an authored rule nobody evaluates is indistinguishable "
+            "from a safeguard that works, to everyone who reads the catalog."
+        )
+
+    return {
+        "registered_packs": registered,
+        "reachable_packs": reachable,
+        "unreachable_packs": unreachable,
+        "selected_by": {name: sorted(set(files)) for name, files in selected.items()},
+        "reasons": reasons,
+        "note": (
+            "reachability is about call sites, not about whether a rule would "
+            "match: a reachable pack can still be mis-fed, which is a separate "
+            "finding and a separate check"
+        ),
+    }
+
+
+def _collect_when_fields(node: Any, into: set[str]) -> None:
+    """Every field a ``when`` clause reads, descending into the combinators.
+
+    Shared by ``catalog_validation_report`` (to decide which names a rule's
+    ``params`` expressions may bind) and ``pack_reachability_report`` (to say
+    what an unreachable pack would need). Both need the deep answer, and two
+    shallow copies of this collector already disagreed about the same rule --
+    which is the failure mode a shared helper exists to remove.
+    """
+    if not isinstance(node, dict):
+        return
+    for name, value in node.items():
+        if str(name) in _COMBINATORS:
+            for branch in value if isinstance(value, list) else [value]:
+                _collect_when_fields(branch, into)
+            continue
+        into.add(str(name))
+
+
+def expression_free_names(expr: str, available: Any = ()) -> tuple[set[str], list[str]]:
+    """``(names, problems)`` for a ``params`` expression, without a context.
+
+    The free names are what the expression expects its caller to have supplied.
+    Anything outside ``RULE_MATH_CONSTANTS``/``RULE_SAFE_CALLS``/``available``
+    is either a typo or a name nothing will ever bind, and both make the rule
+    unevaluable at selection time. ``available`` is the rule's own
+    ``fields_referenced`` -- the fields its ``when`` reads, and therefore the ones
+    the caller that evaluated that ``when`` must have had.
+
+    **Checked as names rather than by evaluating, and the reason is that
+    evaluation is the wrong test.** The first version of this called
+    ``evaluate_expression`` with no scope and reported ``unknown symbol
+    'stage'`` on the shipped ``loyalty_retention`` rule -- which is *correct
+    behaviour of the evaluator* and a false positive here, because ``stage`` is a
+    context field the rule's own ``when`` reads and the caller does supply. To
+    make evaluation work you must invent values for those fields, and then the
+    verdict depends on the values you invented: ``1 / days`` passes with 0 and
+    fails with a real day count. A static name check has no such dependence.
+
+    Node types are left to ``evaluate_expression`` -- it already refuses
+    attribute access, subscripting and non-allow-listed calls, and duplicating
+    that here would be a second implementation to keep in step with the first.
+    """
+    names: set[str] = set()
+    problems: list[str] = []
+    source = str(expr or "").strip()
+    if not source:
+        return names, ["empty expression"]
+    try:
+        tree = ast.parse(source, mode="eval")
+    except SyntaxError as exc:
+        return names, [f"does not parse: {exc}"]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+    unbound = sorted(
+        name
+        for name in names
+        if name not in _MATH_CONSTANTS and name not in _SAFE_CALLS and name not in set(available)
+    )
+    if unbound:
+        problems.append(
+            f"reads {unbound}, which is neither a rule math constant "
+            f"({sorted(_MATH_CONSTANTS)}) nor a field this rule's own `when` "
+            "reads, so nothing will bind it at selection time"
+        )
+    return names, problems
+
+
+def catalog_validation_report() -> dict[str, Any]:
+    """Run ``validate_when`` over every rule the product ships.
+
+    **The gap this closes was found by accident, which is how to know it was
+    real.** ``loyalty_retention.retention_high_risk`` was written with
+    ``{"stage": {"in": ["engaged", "at_risk"]}}``. There is no ``in`` operator in
+    this DSL. ``validate_when`` had been rejecting it as ``unknown_operator`` for
+    as long as it had existed -- and rejecting nothing here, because every one of
+    its callers validates a *tenant-authored* rule arriving from the admin
+    surface. The built-in catalog in ``RULE_PACKS`` was the one set of rules that
+    had never met the validator that exists to keep it honest.
+
+    That combination produced the quietest failure this module can produce: a
+    rule in a published catalog, with a priority and a discount expression,
+    carrying a clause that fails closed for every context forever. It is also
+    *unreachable*, so nothing would have surfaced it either way -- and that is
+    worth naming, because the two defects hid each other. A pack nothing calls
+    is invisible; a clause nothing implements inside it is also invisible; the
+    pair looks exactly like correct configuration.
+
+    So this validates shape (operators, thresholds, expressions) and separately
+    reports reachability, because those are different questions and a green on
+    one must not be read as a green on the other.
+    """
+    packs: list[dict[str, Any]] = []
+    invalid_rules: list[dict[str, Any]] = []
+    for entry in RULE_PACKS:
+        name = str(entry.get("pack"))
+        rule_reports: list[dict[str, Any]] = []
+        for rule in entry.get("rules", ()):
+            check = validate_when(rule.get("when") or {})
+            rule_id = str(rule.get("id"))
+            problems = list(check["errors"])
+            # `params` are validated too, and they used not to be. Every
+            # pre-existing caller of `validate_when` validates a `when`; the
+            # `=expr` params were resolved at *selection* time by
+            # `resolve_params`, unguarded, so an unevaluable expression shipped
+            # fine and then raised from inside `select_rules` the first time its
+            # rule matched. Validating them here means the catalog cannot contain
+            # a rule that crashes its own caller.
+            #
+            # The names an expression reads are checked against *this rule's* own
+            # fields, which means the field collector has to descend into the
+            # `all`/`any`/`not` combinators: `retention_high_risk` reads `stage`
+            # only inside an `any` branch, and a shallow collector would call
+            # every expression on that rule unbound.
+            available = set(check["fields_referenced"])
+            _collect_when_fields(rule.get("when") or {}, available)
+            for param, value in (rule.get("params") or {}).items():
+                if not (isinstance(value, str) and value.startswith("=")):
+                    continue
+                _, complaints = expression_free_names(value[1:], available)
+                for complaint in complaints:
+                    problems.append(
+                        {
+                            "path": f"params.{param}",
+                            "code": "bad_expression",
+                            "message": f"{complaint} (params are resolved eagerly on a match)",
+                        }
+                    )
+                if not complaints:
+                    try:
+                        evaluate_expression(value[1:], {name: 0 for name in available})
+                    except ValueError as exc:
+                        problems.append(
+                            {
+                                "path": f"params.{param}",
+                                "code": "bad_expression",
+                                "message": f"{exc} (params are resolved eagerly on a match)",
+                            }
+                        )
+            rule_reports.append(
+                {
+                    "id": rule_id,
+                    "enabled": bool(rule.get("enabled", True)),
+                    "valid": not problems,
+                    "errors": problems,
+                    "fields_referenced": list(check["fields_referenced"]),
+                    "warnings": list(check["warnings"]),
+                }
+            )
+            if problems:
+                invalid_rules.append({"pack": name, "rule_id": rule_id, "errors": problems})
+        packs.append({"pack": name, "valid": all(row["valid"] for row in rule_reports), "rules": rule_reports})
+
+    return {
+        "valid": not invalid_rules,
+        "packs": packs,
+        "invalid_rules": invalid_rules,
+        "validated": sum(len(pack["rules"]) for pack in packs),
+        "note": (
+            "shape only. A rule can be well formed and still never fire, because "
+            "the context its caller builds does not carry the fields it reads; "
+            "pair with pack_reachability_report() and neither green stands alone"
         ),
     }
 

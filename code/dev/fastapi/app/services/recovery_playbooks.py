@@ -1166,6 +1166,23 @@ def _communication_context_from_recovery(context: dict[str, Any]) -> dict[str, A
     dissatisfaction, communication reasons about how to talk to someone, and a
     shared context would couple their config tables. This adapter is the whole
     coupling, and it is one direction and one place.
+
+    **The whitelist has a cost, and this key is where it was being paid.** The
+    adapter builds a fixed dict, so any key the *suppression pack* reads that is
+    not listed here is dropped on the floor. ``suppress_recent_complaint`` tests
+    ``complaints_last_30d >= 2``, ``_with_complaint_history`` goes to the
+    complaint ledger to load exactly that key, and the two frames between them
+    are this function. So the database query ran, the count was correct, and the
+    rule still could not fire -- the third attempt at this defect, and the first
+    two were both upstream of the place it actually broke.
+
+    The lesson is not "add the key". It is that a *whitelist* adapter needs a
+    test derived from the pack's own ``when`` clauses rather than from the keys
+    somebody remembered. ``TestTheSuppressionPackCanReadWhatItNeeds`` in
+    ``tests/test_recovery_playbooks.py`` compares the pack's required fields
+    against this function's output for the fields it passes through, and
+    ``rule_pack_context_fields_are_all_produced`` in
+    ``tests/test_rule_engine.py`` checks the wider claim for every pack.
     """
     risks = [str(risk) for risk in (context.get("primary_risks") or [])]
     areas = [str(area) for area in (context.get("risk_areas") or [])]
@@ -1173,7 +1190,7 @@ def _communication_context_from_recovery(context: dict[str, Any]) -> dict[str, A
     # Recovery readiness is a 4-level scale; the communication policy table keys
     # off a churn risk_level. Mapping keeps the two vocabularies from bleeding.
     risk_level = {"critical": "critical", "high": "high", "moderate": "medium"}.get(readiness, "low")
-    return {
+    adapted: dict[str, Any] = {
         "stage": recovery_lifecycle_stage(context),
         "value_tier": context.get("value_tier", "standard"),
         "risk_level": risk_level,
@@ -1183,6 +1200,16 @@ def _communication_context_from_recovery(context: dict[str, Any]) -> dict[str, A
         "top_issue_1": risks[0] if risks else (areas[0] if areas else ""),
         "top_issue_2": risks[1] if len(risks) > 1 else "",
     }
+    # Pass through, and only pass through, what the suppression pack reads and
+    # this adapter does not itself derive. `_with_complaint_history` leaves the
+    # key *absent* when the count could not be read, on purpose: the evaluator
+    # fails closed on an absent field, so a database problem cannot masquerade as
+    # "no complaints" and switch a safeguard off. That decision must survive the
+    # adapter, so the value is copied when present and the key is simply not
+    # invented when it is not.
+    if "complaints_last_30d" in context:
+        adapted["complaints_last_30d"] = context["complaints_last_30d"]
+    return adapted
 
 
 def resolve_recovery_outreach_strategy(

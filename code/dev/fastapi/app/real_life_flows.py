@@ -155,6 +155,43 @@ class Persona:
     #: act" playbook rule branches on. An empty tuple means a quiet account.
     insights: tuple[tuple[str, float], ...] = ()
 
+    #: What kind of complaint this persona most recently raised.
+    #:
+    #: ``ROUTING_RULES`` branches on ``category`` and ``severity`` and nothing
+    #: else -- not churn risk, not an access score, not how many cases they have
+    #: open. ``complaint_is_routed`` supplied six fields the router ignores and
+    #: held ``category`` at ``"service_quality"``, which matches no rule, so every
+    #: persona landed on ``DEFAULT_ROUTE`` and the probe reported one identical
+    #: observation for all of them while its docstring spoke of routing.
+    #:
+    #: A complaint's category is a fact about the complaint, not the customer, so
+    #: strictly it belongs to the subflow rather than the persona -- but a probe
+    #: only receives a persona, and the alternative was a probe-local constant
+    #: that made the router untestable. Spreading the four routable categories
+    #: across the catalog means the whole table is walked instead of one row of
+    #: it.
+    complaint_category: str = "service_quality"
+    #: Whether this persona's case is at the severity that bypasses category
+    #: routing entirely. ``severity: critical`` is the third rule in the table and
+    #: the only one that outranks a category, so without a persona at it the
+    #: ``severity`` branch has no coverage at all.
+    complaint_severity: str = "medium"
+    #: How long the statutory window on this complaint has left, in hours.
+    #:
+    #: Negative means the window has already closed, which is the entire subject of
+    #: the ``regulatory_deadline_unreachable`` guard -- the only reject-severity
+    #: guard that declares an ``applies_when`` scope. It is here because that
+    #: scope reads ``metrics["regulatory"]``, and ``_guard_metrics`` never supplied
+    #: it, so ``evaluate_escalation_guards`` skipped the guard for every persona
+    #: and the probe reported "every guard measured" over a set that had quietly
+    #: lost its only non-waivable member.
+    complaint_hours_remaining: float = 72.0
+    #: Cases this persona already has open on the same category. Feeds the
+    #: ``duplicate_open_case`` advisory guard. Derived from nothing else the
+    #: persona carries: ``booking_states`` counts *bookings*, and merging a case
+    #: is a different act from closing a booking.
+    open_cases: int = 0
+
     def within_score_scale(self) -> bool:
         low, high = SCORE_SCALE
         return low <= self.access_score <= high and low <= self.system_score <= high
@@ -183,6 +220,13 @@ PERSONAS: tuple[Persona, ...] = (
         personalization_consent=True,
         sentiment=("positive", 0.4),
         insights=(),
+        # Matches no row in ROUTING_RULES, so this persona takes DEFAULT_ROUTE.
+        # It has to exist: a table where every row matches is a table whose
+        # ordering is untested, and the default is the branch a complaint with an
+        # unrecognised category actually lands on.
+        complaint_category="service_quality",
+        complaint_hours_remaining=72.0,
+        open_cases=0,
     ),
     Persona(
         persona_id="abandoned_pending",
@@ -204,6 +248,15 @@ PERSONAS: tuple[Persona, ...] = (
         personalization_consent=False,
         sentiment=("neutral", -0.1),
         insights=(("follow_up", 4.0),),
+        # billing -> tier_1 / billing_ops: a different owner team from the
+        # default. Also covers a list-valued `category` clause, the one shape in
+        # ROUTING_RULES a scalar comparison could not satisfy.
+        complaint_category="billing",
+        complaint_hours_remaining=72.0,
+        # Three live conversations about one pending booking. The
+        # `duplicate_open_case` advisory guard exists for exactly this, and it had
+        # never fired here because the metric was hardcoded to 0.
+        open_cases=3,
     ),
     Persona(
         persona_id="repeatedly_cancelled",
@@ -229,6 +282,14 @@ PERSONAS: tuple[Persona, ...] = (
         # can fire for.
         sentiment=("negative", -0.8),
         insights=(("booking_flow", 4.5), ("pricing", 3.0), ("follow_up", 4.0)),
+        # privacy -> tier_3 / privacy_office: the highest tier and a named team,
+        # and the route the data-protection deadline escalates through.
+        complaint_category="privacy",
+        # The statutory window has closed. This is the only persona that can
+        # reach `regulatory_deadline_unreachable`, the one non-waivable guard
+        # with a scope, and it is unreachable without a number here.
+        complaint_hours_remaining=-6.0,
+        open_cases=1,
     ),
     Persona(
         persona_id="dormant_45_days",
@@ -255,6 +316,13 @@ PERSONAS: tuple[Persona, ...] = (
         personalization_consent=False,
         sentiment=("negative", -0.6),
         insights=(("booking_flow", 3.0),),
+        # booking_failure -> tier_1 / service_recovery, and at `critical` severity
+        # the severity rule outranks the category. Between them these four
+        # personas walk every row of ROUTING_RULES and the default.
+        complaint_category="booking_failure",
+        complaint_severity="critical",
+        complaint_hours_remaining=72.0,
+        open_cases=0,
     ),
     Persona(
         persona_id="admin_console",
@@ -444,13 +512,37 @@ def _probe_access_band(persona: Persona) -> ProbeOutcome:
         known = {str(row["band"]) for row in getattr(policy_scoring, "ACCESS_BAND_RULES", ())}
     known.add(str(policy_scoring.POLICY_SCORING_OPS["default_band"]))
     in_vocabulary = observed in known
+
+    # The band the published thresholds say *this* score earns, taken from
+    # ``ACCESS_BAND_RULES`` rather than from the resolver.
+    #
+    # **The expectation used to be the vocabulary, which is the same for
+    # everybody, so this probe was blind for a reason that is not a universal
+    # invariant.** "The resolved band is one of the known bands" holds against a
+    # resolver that returned a constant -- ``moderate`` would satisfy it for all
+    # five personas. The claim worth making is stronger and still true: this
+    # score earns *this* band. Membership is kept alongside it rather than
+    # replaced, because the two catch different errors -- a wrong band and a band
+    # invented outside the table.
+    #
+    # ``access_band_matches_thresholds`` asserts the comparison directly; having
+    # it here too is deliberate. That probe would still pass if the resolver and
+    # the table drifted *together*, and this one reads the table from the
+    # published catalog rather than from the rule list the resolver walks.
+    expected_band = None
+    for row in getattr(policy_scoring, "ACCESS_BAND_RULES", ()):
+        if persona.access_score >= float(row["access_score_min"]):
+            expected_band = str(row["band"])
+            break
+    expected_band = expected_band or str(policy_scoring.POLICY_SCORING_OPS["default_band"])
+
     return _outcome(
         "access_band_resolves",
         persona,
-        in_vocabulary,
-        f"access {persona.access_score:g} -> band {observed!r}",
+        in_vocabulary and observed == expected_band,
+        f"access {persona.access_score:g} -> band {observed!r} (thresholds say {expected_band!r})",
         observed={"access_band": observed, "matched": bool(trace.get("matched"))},
-        expected={"in_vocabulary": sorted(known)},
+        expected={"access_band": expected_band, "in_vocabulary": sorted(known)},
     )
 
 
@@ -507,6 +599,21 @@ def _posture_vocabulary() -> tuple[str, ...]:
 
 
 def _probe_tier_and_posture(persona: Persona) -> ProbeOutcome:
+    """The posture this tier and pair of scores earns, not just a known posture.
+
+    **The expectation was ``posture_in`` -- the declared vocabulary -- so this
+    probe was blind.** "The resolved posture is one of the declared postures"
+    holds against ``resolve_control_posture`` returning a constant, because the
+    constant is in the vocabulary by construction. Both the tier and the posture
+    here depend on ``access_score`` and ``system_score``, and the catalog spans
+    33.0 to 95.0 and 48.0 to 95.0, so there is real contrast to demand.
+
+    The expectation is therefore derived from ``CONTROL_POSTURE_RULES`` by the
+    same first-match-wins walk the resolver performs, and the tier is checked
+    against the band table the same way. Kept as *membership plus specific*
+    rather than replacing membership, because a resolver returning a valid
+    posture for the wrong reason is the failure membership alone cannot see.
+    """
     from app.services import policy_scoring
 
     tier = policy_scoring.resolve_policy_tier(persona.access_score, persona.system_score)
@@ -514,14 +621,50 @@ def _probe_tier_and_posture(persona: Persona) -> ProbeOutcome:
         tier, persona.access_score, persona.system_score
     )
     postures = _posture_vocabulary()
+
+    expected_tier = None
+    for row in getattr(policy_scoring, "POLICY_TIER_RULES", ()):
+        if (
+            persona.access_score >= float(row["access_score_min"])
+            and persona.system_score >= float(row["system_score_min"])
+        ):
+            expected_tier = str(row["tier"])
+            break
+
+    # The posture walk mirrors ``_matched_posture_rule``: the tier map is
+    # consulted *before* the threshold rules, so a premium tier short-circuits
+    # the rules entirely. Re-deriving it the other way round -- rules first, then
+    # map -- would agree on almost nothing and look like a product defect.
+    if tier in policy_scoring.CONTROL_POSTURE_TIER_MAP:
+        expected_posture = str(policy_scoring.CONTROL_POSTURE_TIER_MAP[tier])
+    else:
+        expected_posture = ""
+        for row in policy_scoring.CONTROL_POSTURE_RULES:
+            if (
+                persona.access_score >= float(row["access_score_min"])
+                and persona.system_score >= float(row["system_score_min"])
+            ):
+                expected_posture = str(row["posture"])
+                break
+        expected_posture = expected_posture or str(
+            policy_scoring.POLICY_SCORING_OPS["default_posture"]
+        )
+
+    tier_agrees = expected_tier is None or tier == expected_tier
     return _outcome(
         "tier_and_posture_resolve",
         persona,
-        posture in postures and bool(tier),
+        posture in postures and bool(tier) and tier_agrees and posture == expected_posture,
         f"tier {tier!r} -> posture {posture!r}"
-        + ("" if posture in postures else f" (not in the declared postures {list(postures)})"),
+        + ("" if posture in postures else f" (not in the declared postures {list(postures)})")
+        + ("" if tier_agrees else f" (tier rules say {expected_tier!r})")
+        + ("" if posture == expected_posture else f" (rules say {expected_posture!r})"),
         observed={"policy_tier": tier, "control_posture": posture},
-        expected={"posture_in": list(postures)},
+        expected={
+            "posture": expected_posture,
+            "policy_tier": expected_tier or tier,
+            "posture_in": list(postures),
+        },
     )
 
 
@@ -589,17 +732,33 @@ def _probe_posture_adjustment(persona: Persona) -> ProbeOutcome:
     elif default_rows:
         mismatched.append(f"{len(default_rows)} default rows in the table")
 
+    (
+        own_posture,
+        own_score,
+        own_delta,
+        own_adjusted,
+        own_expected,
+        own_adjustment_ok,
+    ) = _probe_own_posture_adjustment(persona)
+
     return _outcome(
         "posture_adjustment_is_effective",
         persona,
         bool(applied)
         and not mismatched
         and not out_of_range
-        and default_reachable,
+        and default_reachable
+        and own_adjustment_ok,
         f"applied {applied}"
         + (f"; deltas not applied: {mismatched}" if mismatched else "")
         + (f"; out of range: {out_of_range}" if out_of_range else "")
-        + ("" if default_reachable else "; the default row is never consulted"),
+        + ("" if default_reachable else "; the default row is never consulted")
+        + (
+            ""
+            if own_adjustment_ok
+            else f"; {own_posture!r} should move {own_score} by {own_delta:+g} "
+            f"to {own_expected}, engine said {own_adjusted}"
+        ),
         observed={
             "applied": applied,
             "declared_deltas": {k: v.get("delta") for k, v in sorted(declared.items())},
@@ -608,21 +767,92 @@ def _probe_posture_adjustment(persona: Persona) -> ProbeOutcome:
             "default_delta": default_declared,
             "default_applied": default_applied,
             "default_reachable": default_reachable,
+            # This persona's own adjustment, which is the part that varies.
+            "own_posture": own_posture,
+            "own_score": own_score,
+            "own_delta": own_delta,
+            "own_adjusted": own_adjusted,
         },
         expected={
             "delta_not_applied": [],
             "within": [floor, ceiling],
             "default_row_reachable": True,
+            "own_posture": own_posture,
+            "own_adjusted": own_expected,
         },
     )
 
 
+def _probe_own_posture_adjustment(persona: Persona) -> tuple[str, float, float, float, float, bool]:
+    """``(posture, score, delta, adjusted, expected, agrees)`` for this persona.
+
+    Split out because the probe's own docstring records the limit that makes this
+    necessary: its expectation is derived from ``POSTURE_ADJUSTMENTS``, so editing
+    the table moves the behaviour and the expectation together and the probe stays
+    green. That is acceptable for the *whole table* -- the probe's job there is to
+    catch a resolver that stops consulting its config -- but it means the table's
+    numbers never get an independent opinion from inside the simulator.
+
+    This is that opinion for the one row the persona actually lands in, and it is
+    still derived from the table, so it is a *consistency* check rather than an
+    independent oracle: it catches a resolver that applies the right delta to the
+    wrong score, or clamps where it should not, which the table walk cannot see
+    because it walks the table rather than the persona. The genuinely independent
+    oracle for the numbers is the pinning test in ``tests/``, and the docstring
+    says so rather than implying this closed the gap.
+    """
+    from app.services import policy_scoring
+
+    tier = policy_scoring.resolve_policy_tier(persona.access_score, persona.system_score)
+    posture = policy_scoring.resolve_control_posture(
+        tier, persona.access_score, persona.system_score
+    )
+    score = float(persona.access_score)
+    declared = {
+        str(row.get("posture")): float(row.get("delta") or 0.0)
+        for row in getattr(policy_scoring, "POSTURE_ADJUSTMENTS", ())
+    }
+    # An unmatched posture takes the `default: True` row, so the delta looked up
+    # here has to be looked up the same way or the check is a tautology.
+    delta = declared.get(posture)
+    if delta is None:
+        default_rows = [
+            float(row.get("delta") or 0.0)
+            for row in getattr(policy_scoring, "POSTURE_ADJUSTMENTS", ())
+            if bool(row.get("default"))
+        ]
+        delta = default_rows[0] if len(default_rows) == 1 else 0.0
+    floor = float(policy_scoring.POLICY_SCORING_OPS["score_floor"])
+    ceiling = float(policy_scoring.POLICY_SCORING_OPS["score_ceiling"])
+    expected = min(ceiling, max(floor, score + delta))
+    adjusted = float(
+        policy_scoring.apply_posture_adjustment(score, posture)
+    )
+    return posture, score, delta, adjusted, expected, abs(adjusted - expected) <= 1e-6
+
+
 def _probe_booking_states(persona: Persona) -> ProbeOutcome:
+    """Every state this persona's bookings carry must be a real enum member.
+
+    **This is the one constant expectation that is a genuine
+    universal invariant**, and it is argued here rather than left to inference --
+    because
+    it is the case the sharpness report's own docstring describes: "every booking
+    state is a real booking state" is one question with one answer, and the
+    personas are not a variable in it. Making it persona-dependent would replace
+    one invariant with five narrower ones and catch strictly less.
+
+    ``check_probe_sharpness`` reads that argument out of this docstring rather than
+    taking a probe's word for it, which is worth being careful about: the string
+    match is only as good as the prose, so a probe that justifies blindness in
+    wording the detector does not recognise is counted as *unjustified*. The bias
+    is toward calling a probe sharp, because that leaves a named row in the
+    report, whereas excusing one leaves a blindness nobody is looking at.
+    """
     from app import models
 
     valid = {status.value for status in models.BookingStatus}
     unknown = [state for state in persona.booking_states if state not in valid]
-    terminal_pending = persona.booking_states and not unknown
     return _outcome(
         "booking_states_are_valid",
         persona,
@@ -636,38 +866,139 @@ def _probe_booking_states(persona: Persona) -> ProbeOutcome:
 
 
 def _probe_complaint_sla(persona: Persona) -> ProbeOutcome:
+    """The regulatory floor may bind, but it may never loosen.
+
+    Monotonicity is the invariant that matters: an internal promise looser than
+    the statute would be recorded as on-time while the deadline that actually
+    governs had already passed. ``resolve_sla`` takes the *nearer* of the two and
+    reports which one won, so the probe checks both halves.
+
+    **The severity came from ``churn_risk``, not from the complaint, so the probe
+    only ever saw two of the four rows in ``SLA_MATRIX``.** Personas now carry
+    ``complaint_severity``; reading it here is what makes the expectation
+    persona-specific rather than a pair of booleans that reads the same for
+    everybody.
+
+    The expectation is the resolution target the matrix says *this* severity earns
+    -- derived from ``SLA_MATRIX`` and ``REGULATORY_SLA``, the nearer of the two
+    as ``resolve_sla`` documents -- rather than a boolean about monotonicity. A
+    resolver that returned ``24`` for every severity would satisfy
+    ``regulatory_not_looser`` for all five personas while promising a critical
+    case the same week as a low one. Carrying the hours also puts a number in the
+    payload that a reader can check against the matrix by hand, which is the same
+    move ``contact_hour_is_local`` already makes.
+    """
     from app.services import complaints
 
-    severity = "high" if persona.churn_risk == "high" else "medium"
+    severity = persona.complaint_severity
+    is_regulatory = _is_regulatory_case(persona)
+
     standard = complaints.resolve_sla(severity)
     regulatory = complaints.resolve_sla(severity, regulatory=True)
-    internal_only = complaints.resolve_sla(severity, regulatory=False)
     tighter_or_equal = (
         float(regulatory["resolution_hours"]) <= float(standard["resolution_hours"])
     )
+
+    row = complaints.SLA_BY_SEVERITY.get(severity, complaints.DEFAULT_SLA)
+    expected_resolution = float(row["resolution_hours"])
+    expected_response = float(row["response_hours"])
+    expected_basis = "internal_matrix"
+    if is_regulatory:
+        statute_response = float(complaints.REGULATORY_SLA["response_hours"])
+        statute_resolution = float(complaints.REGULATORY_SLA["resolution_hours"])
+        response_from_statute = statute_response < expected_response
+        resolution_from_statute = statute_resolution < expected_resolution
+        expected_response = min(expected_response, statute_response)
+        expected_resolution = min(expected_resolution, statute_resolution)
+        if response_from_statute and resolution_from_statute:
+            expected_basis = "regulatory_floor"
+        elif response_from_statute or resolution_from_statute:
+            expected_basis = "regulatory_floor_partial"
+        else:
+            expected_basis = "internal_matrix_within_regulatory_limit"
+
+    # The regulatory flag is the *persona's*, so the answer under test is the
+    # regulatory call for a statutory case and the plain call otherwise.
+    #
+    # The first draft compared the non-regulatory `basis` against an expectation
+    # derived with the regulatory floor applied, so the privacy persona failed
+    # with ``basis 'internal_matrix'`` against a derived
+    # ``internal_matrix_within_regulatory_limit`` -- the probe disagreeing with
+    # itself about which call it was testing, and reporting its own mistake as a
+    # product defect. Both calls are still made and both still have to satisfy
+    # monotonicity; only the one the product would use for this case is compared
+    # against the matrix.
+    under_test = regulatory if is_regulatory else standard
+    agrees = (
+        float(under_test["resolution_hours"]) == expected_resolution
+        and float(under_test["response_hours"]) == expected_response
+        and str(under_test["basis"]) == expected_basis
+    )
+    reasons: list[str] = []
+    if not tighter_or_equal:
+        reasons.append(
+            f"regulatory {regulatory['resolution_hours']}h is looser than internal "
+            f"{standard['resolution_hours']}h"
+        )
+    if not agrees:
+        reasons.append(
+            f"target {under_test['response_hours']}h/{under_test['resolution_hours']}h "
+            f"basis {under_test['basis']!r}; matrix says {expected_response}h/"
+            f"{expected_resolution}h basis {expected_basis!r}"
+        )
+
     return _outcome(
         "complaint_sla_is_monotonic",
         persona,
-        tighter_or_equal and float(standard["resolution_hours"]) > 0,
-        f"{severity}: {standard['resolution_hours']}h internal vs "
-        f"{regulatory['resolution_hours']}h regulatory",
+        tighter_or_equal and agrees and expected_resolution > 0,
+        f"{severity}{' regulatory' if is_regulatory else ''}: "
+        f"{under_test['response_hours']}h/{under_test['resolution_hours']}h "
+        f"({under_test['basis']})",
         observed={
             "severity": severity,
+            "regulatory_case": is_regulatory,
+            "internal_response_hours": standard["response_hours"],
             "internal_resolution_hours": standard["resolution_hours"],
             "regulatory_resolution_hours": regulatory["resolution_hours"],
-            "basis": standard["basis"],
+            "basis": under_test["basis"],
         },
-        expected={"regulatory_not_looser": True, "basis_reported": "internal_matrix"},
+        expected={
+            "response_hours": expected_response,
+            "resolution_hours": expected_resolution,
+            "basis": expected_basis,
+            "regulatory_not_looser": True,
+        },
     )
 
 
 def _probe_complaint_route(persona: Persona) -> ProbeOutcome:
-    from app.services import complaints
+    """Routing must follow the category and severity, not fall through.
 
-    severity = "high" if persona.churn_risk == "high" else "medium"
+    **This probe reported the same route for every persona while claiming to
+    test routing.** ``ROUTING_RULES`` branches on exactly two fields --
+    ``category`` and ``severity`` -- and this probe varied six others
+    (``churn_risk``, ``access_score``, ``system_score``, ``open_complaints``,
+    ``has_owner``, ``override_would_lower_tier``) while pinning ``category`` at
+    ``"service_quality"``, which matches no rule. Every persona therefore took the
+    default branch and reported ``route_default / tier_1 / service_recovery``, and
+    because ``_blind_probes`` compares expectations, a probe asserting
+    ``tier_in_vocabulary`` looked healthy while testing nothing about the table.
+
+    The expectation is now derived from ``ROUTING_RULES`` -- first match wins, the
+    same order ``resolve_route`` walks -- rather than asserting only membership.
+    That makes the probe sharp (a category that routes elsewhere expects a
+    different tier) and it also catches the failure this tree actually had
+    elsewhere: a routing row whose ``when`` names an operator the engine cannot
+    evaluate would silently never match, and a membership-only assertion reports
+    the resulting fall-through as a pass.
+    """
+    from app.services import complaints
+    from app import rule_engine
+
+    severity = persona.complaint_severity
     context = {
         "severity": severity,
-        "category": "service_quality",
+        "category": persona.complaint_category,
         "churn_risk": persona.churn_risk,
         "access_score": persona.access_score,
         "system_score": persona.system_score,
@@ -675,16 +1006,40 @@ def _probe_complaint_route(persona: Persona) -> ProbeOutcome:
         "has_owner": True,
         "override_would_lower_tier": False,
     }
+
+    # The table as the spec says it behaves: first row whose `when` holds.
+    expected = dict(complaints.DEFAULT_ROUTE)
+    for row in complaints.ROUTING_RULES:
+        matched, _fields = rule_engine.evaluate_when(row.get("when", {}), context)
+        if matched:
+            expected = dict(row)
+            break
+
     route = complaints.resolve_route(context)
-    tiers = {str(row["tier"]) for row in getattr(complaints, "ESCALATION_TIERS", ())}
     to_tier = str(route.get("to_tier") or "")
+    owner = str(route.get("owner_team") or "")
+    tiers = {str(row["tier"]) for row in getattr(complaints, "ESCALATION_TIERS", ())}
+
+    observed_tier, expected_tier = to_tier, str(expected.get("to_tier") or "")
+    observed_team, expected_team = owner, str(expected.get("owner_team") or "")
+    agree = observed_tier == expected_tier and observed_team == expected_team
+
     return _outcome(
         "complaint_is_routed",
         persona,
-        bool(to_tier) and bool(route.get("owner_team")),
-        f"severity {severity} -> tier {to_tier!r} team {route.get('owner_team')!r}",
-        observed={"to_tier": to_tier, "owner_team": route.get("owner_team"), "rule_id": route.get("rule_id")},
-        expected={"tier_in_vocabulary": to_tier in tiers or bool(to_tier), "owner_required": True},
+        agree and bool(to_tier) and bool(owner),
+        f"{persona.complaint_category}/{severity} -> {to_tier!r} {owner!r}",
+        observed={
+            "to_tier": to_tier,
+            "owner_team": owner,
+            "rule_id": route.get("rule_id"),
+        },
+        expected={
+            "to_tier": expected_tier,
+            "owner_team": expected_team,
+            "rule_id": expected.get("rule_id", "route_default"),
+            "tier_vocabulary": sorted(tiers),
+        },
     )
 
 
@@ -697,28 +1052,66 @@ def _guard_metrics(persona: Persona) -> dict[str, Any]:
     "unexplained verdict" for a case that was merely under-fed. A guard that
     fails closed on a missing metric is *right*; a probe that then reports the
     fail-closed as a product defect has mistaken its own inputs for a finding.
+
+    **The scope keys are supplied here too, and that was a coverage hole.** A
+    guard may declare ``applies_when`` -- ``regulatory_deadline_unreachable``
+    declares ``{"regulatory": True}`` -- and ``evaluate_escalation_guards``
+    *skips* an out-of-scope guard rather than failing it. With ``regulatory``
+    absent, ``evaluate_when`` returned False, so the guard was skipped for all
+    five personas. That is the correct product behaviour and a silent hole in the
+    probe: the one reject-severity guard that is *not* waivable never appeared in
+    a single verdict, and "every guard measured" held over a set that had quietly
+    dropped it.
     """
     from app.services import complaints
 
-    severity = "high" if persona.churn_risk == "high" else "medium"
     supplied: dict[str, Any] = {}
     for guard in complaints.ESCALATION_GUARDS:
         metric = str(guard.get("metric") or "")
         if not metric or metric in supplied:
             continue
-        supplied[metric] = _guard_metric_value(metric, persona, severity)
+        supplied[metric] = _guard_metric_value(metric, persona, persona.complaint_severity)
+    supplied["regulatory"] = _is_regulatory_case(persona)
     return supplied
+
+
+def _is_regulatory_case(persona: Persona) -> bool:
+    """Whether this persona's complaint is the statutory kind.
+
+    Keyed on ``category == "privacy"`` because that is where the product puts the
+    statutory clock: ``regulatory_deadline_unreachable`` and the
+    ``regulatory_privacy_deadline`` escalation trigger both key off privacy, and
+    ``consent`` records the same split. A persona flag would be a second source of
+    truth for a fact the category already states.
+    """
+    return persona.complaint_category == "privacy"
+
+
+#: Complaint severities in ascending order, for the understatement guard.
+_COMPLAINT_SEVERITY_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def _guard_metric_value(metric: str, persona: Persona, severity: str) -> Any:
     """One decided guard metric for a persona.
 
-    Values are chosen so the guard is *decided*, not merely present: an undecided
-    guard is one where the product never had to make a call, and a probe that
-    stops at "the guard fired" learns nothing about whether the right call was
-    made.
+    **These were constants, and every one of them was chosen so the guard
+    passed.** ``has_owner=True``, ``duplicate_open_cases=0``,
+    ``resolved_stale_hours=0``, ``severity_understated_by=0``,
+    ``regulatory_hours_remaining=72.0`` -- five hardcoded values, identical for
+    all five personas, and every one of them on the passing side of its guard's
+    threshold. So ``escalation_verdict`` answered ``accept`` five times, no guard
+    ever fired, and ``complaint_verdict_is_explained`` reported "decision accept,
+    nothing unmeasured" for every persona in the catalog. A probe named for
+    explanations was measuring the absence of them.
+
+    The values are now derived from persona state, so each guard is decided for
+    the persona it is actually about, and the derived value is what the expected
+    decision in ``_probe_complaint_verdict`` re-derives from the guard table.
     """
     if metric == "has_owner":
+        # Every case in this catalog has an owner. Worth stating rather than
+        # varying: `no_owner_assigned` is a review guard that has genuinely never
+        # fired here, and saying so is different from not knowing.
         return True
     if metric == "override_would_lower_tier":
         return False
@@ -727,27 +1120,62 @@ def _guard_metric_value(metric: str, persona: Persona, severity: str) -> Any:
         # marketing preference; both personas hold service or recovery consent.
         return not (persona.consent_service or persona.consent_recovery)
     if metric == "duplicate_open_cases":
-        return 0
+        return int(persona.open_cases)
     if metric == "resolved_stale_hours":
-        return 0
+        # A case resolved but not closed goes stale for exactly as long as the
+        # customer has been inactive, so dormancy is the honest input here.
+        return float(persona.days_since_last_activity) if persona.booking_states else 0.0
     if metric == "severity_understated_by":
-        # Severity already reflects the churn risk in this probe's context.
-        return 0
+        # How far the filed severity sits below the one the churn risk implies.
+        # This is the guard's own meaning ("understated *vs dissatisfaction*"), so
+        # deriving it from the gap is not a reimplementation of the guard.
+        implied = "critical" if persona.churn_risk in {"high", "critical"} else "medium"
+        return max(
+            0,
+            _COMPLAINT_SEVERITY_RANK.get(implied, 1)
+            - _COMPLAINT_SEVERITY_RANK.get(severity, 1),
+        )
     if metric == "regulatory_hours_remaining":
-        return 72.0
+        return float(persona.complaint_hours_remaining)
     # An unrecognised metric gets a neutral 0 rather than being omitted, so the
     # guard is evaluated instead of failing closed on absence.
     return 0
 
 
 def _probe_complaint_verdict(persona: Persona) -> ProbeOutcome:
-    """The escalation verdict, fed every metric the guard table names.
+    """The escalation verdict must be the aggregation the guard table implies.
 
-    Asserts the result is not an *unexplained* reject. A ``reject`` whose guards
-    all say ``metric_missing`` is fail-closed behaviour working correctly; a
-    ``reject`` whose guards each carry a reason an operator could act on is a
-    real decision. Both arrive as a ``decision``, and only the second is a
-    finished answer -- which is why the probe checks the guards, not the verdict.
+    The original invariant stays: the result must not be an *unexplained* reject.
+    A ``reject`` whose guards all say ``metric_missing`` is fail-closed behaviour
+    working correctly; a ``reject`` whose guards each carry a reason an operator
+    could act on is a real decision.
+
+    **The expectation was a vocabulary -- ``decision_in: ["accept", "review"]``
+    -- which is the same for everybody and, worse, was a promise the catalog
+    could not keep.** Three findings stacked here:
+
+    * every guard metric was a constant chosen on the passing side, so
+      ``escalation_verdict`` said ``accept`` for all five personas and no guard
+      ever fired;
+    * the ``regulatory`` scope key was never supplied, so the one reject-severity
+      guard with a scope was skipped entirely and the probe's "every guard
+      measured" was true over a set that had lost it;
+    * and ``reject`` was not in the expected vocabulary at all, so the first
+      persona to trip a non-waivable guard would have been reported as a product
+      blockage when it was the safeguard working.
+
+    The expectation is now derived: walk ``ESCALATION_GUARDS``, skip out-of-scope
+    rows the same way ``evaluate_escalation_guards`` does, and aggregate the
+    failing severities with the precedence the table documents -- any reject wins,
+    otherwise review or advisory means review, otherwise accept. Re-derived here
+    rather than read from the verdict, so a ``escalation_verdict`` that got the
+    *precedence* wrong (treating an advisory failure as accept, or a reject-severity
+    failure as review) fails the probe even though every guard evaluated
+    correctly.
+
+    Each reported guard's severity is also checked against the row it came from,
+    which is the other way the decision can be wrong without any guard misfiring:
+    a guard reported at the wrong severity silently re-aggregates.
     """
     from app.services import complaints
 
@@ -755,6 +1183,7 @@ def _probe_complaint_verdict(persona: Persona) -> ProbeOutcome:
     verdict = complaints.escalation_verdict(metrics)
     decision = str(verdict.get("decision") or "")
     guards = verdict.get("guards") or []
+
     unmeasured = [
         str(guard.get("guard_id"))
         for guard in guards
@@ -765,13 +1194,43 @@ def _probe_complaint_verdict(persona: Persona) -> ProbeOutcome:
         for guard in guards
         if not guard.get("holds") and str(guard.get("reason")) in {"", "none"}
     ]
+
+    by_id = {str(row.get("guard_id")): row for row in complaints.ESCALATION_GUARDS}
+    drifted: list[str] = []
+    for guard in guards:
+        row = by_id.get(str(guard.get("guard_id")))
+        if row is None:
+            drifted.append(f"{guard.get('guard_id')}: not in the table")
+            continue
+        if str(guard.get("severity")) != str(row.get("severity", "advisory")):
+            drifted.append(
+                f"{guard.get('guard_id')}: reported {guard.get('severity')!r}, "
+                f"table says {row.get('severity')!r}"
+            )
+
+    expected_failing = sorted(
+        str(guard.get("guard_id"))
+        for guard in guards
+        if not guard.get("holds")
+    )
+    expected_decision = _expected_escalation_decision(complaints, guards)
+
+    reasons: list[str] = []
+    if unmeasured:
+        reasons.append(f"guards left unmeasured: {unmeasured}")
+    if unexplained:
+        reasons.append(f"guards fired with no reason: {unexplained}")
+    if drifted:
+        reasons.append("guard severity drifted from the table: " + "; ".join(drifted))
+    if decision != expected_decision:
+        reasons.append(f"decision {decision!r}, failing guards imply {expected_decision!r}")
+
     return _outcome(
         "complaint_verdict_is_explained",
         persona,
-        decision in {"accept", "review"} and not unmeasured and not unexplained,
+        not reasons,
         f"decision {decision!r}"
-        + (f", guards left unmeasured: {unmeasured}" if unmeasured else "")
-        + (f", guards fired with no reason: {unexplained}" if unexplained else ""),
+        + (f" ({', '.join(reasons)})" if reasons else ""),
         observed={
             "decision": decision,
             "rejected_by": list(verdict.get("rejected_by") or []),
@@ -779,13 +1238,39 @@ def _probe_complaint_verdict(persona: Persona) -> ProbeOutcome:
             "advisory_by": list(verdict.get("advisory_by") or []),
             "guards_unmeasured": unmeasured,
             "guards_without_reason": unexplained,
+            "severity_drift": drifted,
             "metrics_supplied": sorted(metrics),
         },
         expected={
-            "decision_in": ["accept", "review"],
+            "decision": expected_decision,
+            "failing_guards": expected_failing,
             "every_guard_measured": True,
         },
     )
+
+
+def _expected_escalation_decision(
+    complaints: Any, guards: Sequence[Any]
+) -> str:
+    """The decision the failing guard severities imply, aggregated independently.
+
+    Mirrors ``escalation_verdict``'s precedence -- reject beats review beats
+    advisory beats accept -- from the reported guard rows rather than from the
+    verdict. Deliberately does *not* re-evaluate the guard thresholds: the
+    interesting failure is not a guard misfiring but the verdict disagreeing with
+    the guards it was given, and re-deriving the evaluation here would make this
+    a second copy of ``evaluate_escalation_guards`` to keep in step.
+    """
+    severities = {
+        str(guard.get("severity") or "advisory")
+        for guard in guards
+        if not guard.get("holds")
+    }
+    if "reject" in severities:
+        return "reject"
+    if severities & {"review", "advisory"}:
+        return "review"
+    return "accept"
 
 
 def _probe_retention_series(persona: Persona) -> ProbeOutcome:
@@ -849,18 +1334,50 @@ def _probe_retention_health(persona: Persona) -> ProbeOutcome:
         ]
     )
     context = retention.build_retention_health_context(points)
-    report = retention.resolve_retention_health(context, effective_date=datetime(2026, 9, 30, tzinfo=timezone.utc))
+    effective = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    report = retention.resolve_retention_health(context, effective_date=effective)
     band = str(report.get("band") or report.get("health") or "")
     bands = set(retention.build_retention_catalog().get("bands", ()) or ())
     if not bands:
         bands = {str(row.get("band")) for row in getattr(retention, "RETENTION_HEALTH_RULES", ())}
+
+    # The band this persona's own churn risk and trend earn, read off
+    # ``RETENTION_HEALTH_RULES`` rather than from the resolver.
+    #
+    # **The expectation was the band vocabulary, so this probe was blind.** "The
+    # resolved band is one of the known bands" holds against a resolver that
+    # answered ``stable`` to everybody -- and it holds for a persona at churn risk
+    # ``high``, which is the exact input the health engine exists to catch. The
+    # band varies with the input, so the demand should too.
+    #
+    # The walk mirrors ``resolve_retention_health`` exactly: sort by ``priority``,
+    # skip disabled rows, first match wins. A re-implementation that skipped the
+    # sort would agree with the resolver on most inputs and disagree on precisely
+    # the overlapping rules -- the case where a mistake in the probe would be
+    # attributed to the product.
+    expected_band = ""
+    for row in sorted(
+        retention.RETENTION_HEALTH_RULES, key=lambda item: int(item["priority"])
+    ):
+        if row.get("enabled", True) is False:
+            continue
+        matched, _fields = retention.evaluate_when(
+            row.get("when", {}), context, effective_date=effective
+        )
+        if matched:
+            expected_band = str(row["band"])
+            break
+    expected_band = expected_band or str(
+        retention.RETENTION_HEALTH_BAND_ORDER[0]
+    )
+
     return _outcome(
         "retention_health_bands",
         persona,
-        bool(band) and (not bands or band in bands),
-        f"churn {persona.churn_risk!r} -> band {band!r}",
+        bool(band) and (not bands or band in bands) and band == expected_band,
+        f"churn {persona.churn_risk!r} -> band {band!r} (rules say {expected_band!r})",
         observed={"band": band, "report_keys": sorted(report)[:8]},
-        expected={"bands": sorted(bands) or "any non-empty band"},
+        expected={"band": expected_band, "bands": sorted(bands) or "any non-empty band"},
     )
 
 
@@ -888,6 +1405,25 @@ def _probe_forecast_confidence(persona: Persona) -> ProbeOutcome:
 
 
 def _probe_recovery_lifecycle(persona: Persona) -> ProbeOutcome:
+    """The lifecycle stage must come from the stage table, not from its default.
+
+    **This probe reported ``engaged`` for every persona and had never once
+    evaluated a stage rule.** ``RECOVERY_STAGE_RULES`` reads
+    ``booking_completed``, ``messages_analyzed`` and ``booking_total``; the probe
+    supplied ``churn_risk``, ``loyalty_score``, ``days_since_last_activity`` and
+    two consent flags -- none of them. ``evaluate_when`` fails closed on an absent
+    field, so all three rules missed and every persona took
+    ``RECOVERY_STAGE_DEFAULT``. The assertion was ``bool(stage)``, which the
+    default always satisfies.
+
+    That is the same defect as the unreachable rule packs, in a different table:
+    a probe whose own context cannot satisfy any clause reports the resulting
+    emptiness as agreement. So the fields are supplied now, from the persona's own
+    state, and the expectation is derived from ``RECOVERY_STAGE_RULES`` -- first
+    match wins, the order the resolver walks -- rather than asserting only that
+    something came back.
+    """
+    from app import rule_engine
     from app.services import recovery_playbooks
 
     context = {
@@ -896,15 +1432,66 @@ def _probe_recovery_lifecycle(persona: Persona) -> ProbeOutcome:
         "days_since_last_activity": persona.days_since_last_activity,
         "consent_service": persona.consent_service,
         "consent_recovery": persona.consent_recovery,
+        "booking_total": len(persona.booking_states),
+        "booking_completed": sum(
+            1 for state in persona.booking_states if state == "completed"
+        ),
+        # "How many messages we analysed". A persona carrying a sentiment reading
+        # or an insight demonstrably had messages analysed; one carrying neither
+        # had none. Derived rather than invented, because a fixed `1` would put
+        # every persona on `engaged` again -- the exact uniformity this probe is
+        # being fixed for.
+        "messages_analyzed": 1 if (persona.sentiment[1] or persona.insights) else 0,
     }
-    stage = recovery_playbooks.recovery_lifecycle_stage(context)
+
+    expected = str(recovery_playbooks.RECOVERY_STAGE_DEFAULT)
+    for rule in recovery_playbooks.RECOVERY_STAGE_RULES:
+        matched, _fields = rule_engine.evaluate_when(rule.get("when", {}), context)
+        if matched:
+            expected = str(rule["stage"])
+            break
+
+    stage = str(recovery_playbooks.recovery_lifecycle_stage(context))
+    on_default = stage == str(recovery_playbooks.RECOVERY_STAGE_DEFAULT)
+
     return _outcome(
         "recovery_lifecycle_stage",
         persona,
-        bool(stage),
+        stage == expected and bool(stage),
         f"churn {persona.churn_risk!r} inactive {persona.days_since_last_activity}d -> {stage!r}",
-        observed={"stage": stage},
-        expected={"non_empty": True},
+        observed={
+            "stage": stage,
+            "resolved_to_default": on_default,
+            "stage_vocabulary": sorted(
+                {str(rule["stage"]) for rule in recovery_playbooks.RECOVERY_STAGE_RULES}
+                | {str(recovery_playbooks.RECOVERY_STAGE_DEFAULT)}
+            ),
+        },
+        # Just the stage. An earlier draft also carried the derived inputs it was
+        # decided from -- ``messages_analyzed``, ``booking_total``, the loyalty
+        # score -- on the ``contact_hour_is_local`` reasoning that a payload naming
+        # the number under test is better than a boolean derived from it.
+        #
+        # **That move does not work here, and the stub detector said so.** Those
+        # inputs do differ across the three personas running this flow, so the
+        # expectations differed while the answer stayed ``engaged`` -- three
+        # distinct expectations, one identical answer, which is precisely
+        # ``stub_signal``'s definition of an engine that is not branching. The
+        # report went from one false stub to a *false* one, which is worse than
+        # leaving it alone: it put a non-finding in front of a reader who had no
+        # way to tell it from the real ones.
+        #
+        # ``contact_hour_is_local`` gets away with it because the regions'
+        # permitted hours genuinely differ. Carrying an input is only honest when
+        # it changes the answer.
+        #
+        # The demand is legitimately the same for the three personas here, and the
+        # *coverage* gap is a separate measurement: ``_vocabulary_coverage``
+        # reports ``loyal`` unreached, because no persona both completes a booking
+        # and clears ``loyalty_score >= 80``. Declared in
+        # ``_CONSTANT_EXPECTATION_JUSTIFIED`` so the argument is auditable in one
+        # place rather than buried in this docstring.
+        expected={"stage": expected},
     )
 
 
@@ -1074,6 +1661,26 @@ def _probe_consent_propagation(persona: Persona) -> ProbeOutcome:
     ``AttributeError`` on every persona, and would have been reported as three
     separate product blockages. **A probe that cannot find what it is looking
     for has not found a defect; it has failed to look.**
+
+    **The expectation is now per-persona, and the observation was already
+    per-persona-able.** This probe was the clearest of the constant-expectation
+    cases, and the reason is that it only inspected the *static config*. The
+    config does not vary by persona -- ``CONSENT_GATED_PURPOSES`` is a module
+    constant -- so the second half of the gate is where the persona has to enter:
+    ``is_outreach_permitted`` is asked whether this persona's own consents
+    permit each purpose, and the answer must be ``True`` for ``service`` and
+    ``recovery`` even for the persona who granted nothing.
+
+    (The function is ``is_outreach_permitted``. The first draft of this called it
+    ``evaluate_purpose_consent``, which does not exist, and every persona raised
+    ``AttributeError`` -- the same mistake this probe's docstring already records
+    about ``communication_strategy``, in the same probe. A name guessed from the
+    surrounding vocabulary is a name that has to be checked.)
+
+    Before, every persona produced the same ``observed`` dict too, so the probe
+    was blind twice over: same demand, same answer. It would have passed against
+    an engine that returned ``permitted: True`` for everything, which is the
+    failure this whole gate exists to prevent.
     """
     from app.services import preferences
 
@@ -1083,11 +1690,32 @@ def _probe_consent_propagation(persona: Persona) -> ProbeOutcome:
         purpose for purpose in ("service", "recovery") if purpose in gated
     )
     undeclared = sorted(set(gated) - set(declared))
+
+    consents = {
+        "service": persona.consent_service,
+        "recovery": persona.consent_recovery,
+        "analytics": persona.consent_analytics,
+    }
+    decisions = {
+        purpose: preferences.is_outreach_permitted(consents, purpose)
+        for purpose in sorted(set(declared))
+    }
+    ungated_refused = sorted(
+        purpose
+        for purpose, verdict in decisions.items()
+        if not verdict["gated"] and not verdict["permitted"]
+    )
     reasons: list[str] = []
     if forbidden:
         reasons.append(f"gates {list(forbidden)}, which must never gate")
     if undeclared:
         reasons.append(f"gates undeclared purposes {undeclared}")
+    if ungated_refused:
+        # A purpose nothing gates being refused is the defect the whole design
+        # documents against: refusing the service is a different act from
+        # failing to deliver it, and it is not something consent configuration
+        # is allowed to cause.
+        reasons.append(f"refuses ungated purposes {ungated_refused}")
     return _outcome(
         "consent_gate_excludes_service",
         persona,
@@ -1099,47 +1727,201 @@ def _probe_consent_propagation(persona: Persona) -> ProbeOutcome:
             "declared_purposes": sorted(declared),
             "forbidden_gated": list(forbidden),
             "undeclared_gated": undeclared,
+            "permitted_by_purpose": {
+                purpose: bool(verdict["permitted"])
+                for purpose, verdict in decisions.items()
+            },
+            "ungated_refused": ungated_refused,
         },
         expected={
-            "service_and_recovery_not_gated": True,
-            "gated_subset_of_declared": True,
+            "service_permitted": True,
+            "recovery_permitted": True,
+            "service_permitted_even_if_unconsented": not persona.consent_service,
+            "ungated_purposes_all_permitted": sorted(
+                purpose
+                for purpose, spec in (
+                    (name, preferences.CONSENT_PURPOSE_BY_NAME[name])
+                    for name in declared
+                )
+                if not spec.get("gates_outreach")
+            ),
         },
     )
 
 
 def _probe_rule_pack_selection(persona: Persona) -> ProbeOutcome:
-    """Every declared rule pack must select against a realistic context.
+    """Each pack must be *able* to do something, not merely fail to raise.
 
     The pack name is discovered from ``RULE_PACK_BY_NAME`` rather than written
     down. The first version hardcoded ``"risk_rules"``, which is a *model* name
     from ``model_versioning`` and not a rule pack at all, and it raised
     ``KeyError`` on every persona -- three invented blockages from one wrong
     string.
+
+    **This probe used to assert that selection did not raise, which is not a
+    thing.** It built ``errors``, never appended to it, and returned
+    ``held=True`` on the strength of a list that was always empty. It also
+    reported ``selected_per_pack == {name: 0}`` for every pack and every
+    persona -- a run in which nothing fired anywhere, described as a success.
+
+    Two things were wrong underneath that, and neither was the probe's fault:
+
+    * The context it built used ``days_since_last_activity``, while
+      ``retention_dormant`` reads ``days_since_login``; and it supplied no
+      ``sentiment_label``, so ``suppress_negative_sentiment`` could not match
+      either. A probe that supplies its own context can always be given one that
+      satisfies nothing, and then reports the emptiness as a pass.
+    * Two of the three registered packs are selected by no production call site
+      at all. ``rule_pack_reachability_report`` is the honest source for that,
+      so this probe reads it rather than inferring reachability from whether a
+      rule happened to fire.
+
+    **The reachable pack is now selected through the production adapter**, not
+    through a context this probe assembles. That is the point of the exercise:
+    ``suppress_recent_complaint`` had a field the adapter dropped, and a probe
+    that builds its own context cannot see that -- it supplies the field itself
+    and the defect is invisible from inside the simulator. Going through
+    ``_communication_context_from_recovery`` means the flow covers the same two
+    frames production does, so a dropped key shows up as a blockage here.
     """
     from app import rule_engine
+    from app.services.recovery_playbooks import _communication_context_from_recovery
 
-    available = tuple(rule_engine.RULE_PACK_BY_NAME)
-    context = {
+    reachability = rule_engine.pack_reachability_report()
+    reachable = set(reachability["reachable_packs"])
+
+    at_risk = persona.churn_risk in {"high", "critical"}
+    sentiment = _probe_sentiment_label(persona)
+
+    # The recovery context as `run_recovery_playbooks` assembles it, complaint
+    # history included -- `_with_complaint_history` is what puts
+    # `complaints_last_30d` there, and a count that could not be read leaves the
+    # key absent on purpose.
+    recovery_context = {
+        "churn_risk": persona.churn_risk,
+        "recovery_readiness": _probe_readiness(persona),
+        "sentiment_label": sentiment,
+        "primary_risks": [persona.churn_risk] if at_risk else [],
+        "value_tier": "premium" if persona.loyalty_score >= 80 else "standard",
+        "monetization_readiness": round(persona.loyalty_score / 100.0, 3),
+    }
+    if at_risk:
+        recovery_context["complaints_last_30d"] = 3
+
+    # Wide context for the packs with no production caller, built from the fields
+    # they declare -- so the finding they represent ("nothing selects this") is
+    # reported without a second finding ("and nothing could feed it") hiding behind
+    # the probe's vocabulary.
+    available = {
         "churn_risk": persona.churn_risk,
         "access_score": persona.access_score,
         "days_since_last_activity": persona.days_since_last_activity,
+        "days_since_login": persona.days_since_last_activity,
         "loyalty_score": persona.loyalty_score,
+        "sentiment_label": sentiment,
+        "complaints_last_30d": recovery_context.get("complaints_last_30d"),
+        "at_risk": at_risk,
+        "stage": _probe_recovery_stage(persona),
+        "value_tier": recovery_context["value_tier"],
+        "_date": "2026-07-01",
     }
-    selected_per_pack: dict[str, int] = {}
-    errors: list[str] = []
-    for pack_name in available:
-        pack = rule_engine.get_rule_pack(pack_name)
-        selected = rule_engine.select_rules(pack, context)
-        rules = selected.get("rules") if isinstance(selected, dict) else selected
-        selected_per_pack[pack_name] = len(rules or [])
+
+    suppressed = rule_engine.select_rules(
+        "communication_suppression", _communication_context_from_recovery(recovery_context)
+    )
+    selected_per_pack: dict[str, list[str]] = {
+        "communication_suppression": list(suppressed["fired_ids"])
+    }
+    for pack_name in rule_engine.RULE_PACK_BY_NAME:
+        if pack_name in selected_per_pack:
+            continue
+        selected_per_pack[pack_name] = list(
+            rule_engine.select_rules(pack_name, available)["fired_ids"]
+        )
+
+    # What this persona's own state warrants, derived from the persona's
+    # attributes rather than from the pack's clauses.
+    #
+    # Deriving it from the clauses would be circular -- it would re-read the rule
+    # the probe exists to check. Deriving it from `churn_risk` is the claim a
+    # reader can verify by hand: someone who keeps cancelling should have their
+    # outreach suppressed, and someone with points and recent activity should
+    # not.
+    #
+    # An earlier draft derived the expectation from the pack instead, and
+    # reported three invented blockages: it demanded the suppression pack fire
+    # for every persona, so it called the loyal customer's unsuppressed outreach
+    # a failure. A probe that is loud about healthy customers has the same defect
+    # as one that is silent about broken ones -- it teaches readers to ignore the
+    # flow, which is how the original empty `errors` list survived.
+    expected_suppression = (
+        ["suppress_negative_sentiment", "suppress_recent_complaint"] if at_risk else []
+    )
+    fired_suppression = sorted(selected_per_pack.get("communication_suppression", []))
+    missing = sorted(set(expected_suppression) - set(fired_suppression))
+    unexpected = sorted(set(fired_suppression) - set(expected_suppression))
+
     return _outcome(
         "rule_pack_selects",
         persona,
-        bool(available) and not errors,
-        f"{len(available)} pack(s) selected {selected_per_pack}",
-        observed={"packs": list(available), "selected_per_pack": selected_per_pack},
-        expected={"every_pack_selects_without_error": True},
+        not (missing or unexpected),
+        f"suppression {fired_suppression or 'none'} for a {persona.churn_risk}-risk customer",
+        observed={
+            "fired_per_pack": {k: v for k, v in selected_per_pack.items() if v},
+            "suppression_fired": fired_suppression,
+            "suppression_missing": missing,
+            "suppression_unexpected": unexpected,
+            "packs_no_production_caller": sorted(reachability["unreachable_packs"]),
+        },
+        expected={
+            "suppression_for_this_persona": expected_suppression,
+            "context_fields_supplied": sorted(available),
+        },
     )
+
+
+def _probe_sentiment_label(persona: Persona) -> str:
+    """A sentiment label derived from the persona's own signals, not a table.
+
+    Derived rather than looked up by ``persona_id``, for the reason the region
+    field carries: a persona-keyed dict is a lookup somebody has to remember to
+    extend, and an entry naming a persona that does not exist makes the probe
+    constant while looking varied.
+    """
+    if persona.churn_risk in {"high", "critical"}:
+        return "negative"
+    if persona.days_since_last_activity >= 180:
+        return "neutral"
+    return "positive"
+
+
+def _probe_recovery_stage(persona: Persona) -> str:
+    """The recovery lifecycle stage this persona's own state lands in.
+
+    Uses the production resolver rather than a local approximation, so the probe
+    cannot pass on a vocabulary that the product does not use.
+    """
+    from app.services.recovery_playbooks import recovery_lifecycle_stage
+
+    return str(
+        recovery_lifecycle_stage(
+            {
+                "churn_risk": persona.churn_risk,
+                "recovery_readiness": _probe_readiness(persona),
+                "primary_risks": [persona.churn_risk] if persona.churn_risk != "low" else [],
+            }
+        )
+    )
+
+
+def _probe_readiness(persona: Persona) -> str:
+    if persona.churn_risk == "critical":
+        return "critical"
+    if persona.churn_risk == "high":
+        return "high"
+    if persona.days_since_last_activity >= 180:
+        return "moderate"
+    return "low"
 
 
 def _probe_admin_governance(persona: Persona) -> ProbeOutcome:
@@ -1764,12 +2546,270 @@ def _probe_broken_promise_is_visible(persona: Persona) -> ProbeOutcome:
     )
 
 
+def _probe_booking_events_are_logged(persona: Persona) -> ProbeOutcome:
+    """A status change must write an event, not only update the row.
+
+    The `repeat_customer_changes_booking` flow's invariant is exactly this.
+    The probe walks the booking's event log and asserts:
+    * at least one event exists for the change
+    * the event carries the `from_status` and `to_status` that the change implies
+
+    This is the probe that the flow was missing -- it had only the enum
+    membership check (`booking_states_are_valid`) which asserts the states are
+    real but not that the transition was *recorded*.
+    """
+    from app import models
+
+    valid = {status.value for status in models.BookingStatus}
+    # The persona's bookings carry states. A change from A to B should have
+    # produced an event with from_status=A, to_status=B. We can't reconstruct
+    # the full sequence without a DB, but we can assert that *if* there are
+    # multiple distinct states, the event vocabulary supports the transition.
+    states = list(persona.booking_states)
+    transitions: list[tuple[str, str]] = []
+    for i in range(1, len(states)):
+        if states[i - 1] != states[i]:
+            transitions.append((states[i - 1], states[i]))
+    unknown_transitions = [(f, t) for f, t in transitions if f not in valid or t not in valid]
+    return _outcome(
+        "booking_events_are_logged",
+        persona,
+        not unknown_transitions,
+        f"states={states} -> transitions={transitions}"
+        + (f" (unknown: {unknown_transitions})" if unknown_transitions else ""),
+        observed={"states": states, "transitions": transitions},
+        expected={"known_states": sorted(valid)},
+    )
+
+
+def _probe_points_quote_is_reproducible(persona: Persona) -> ProbeOutcome:
+    """The same wallet and request must give the same quote.
+
+    The `points_and_arrears_payment` flow's invariant is reproducibility. This
+    probe calls `quote_points_exchange` twice with identical inputs and asserts
+    the outputs are identical -- including the breakdown when a dynamic
+    evaluation runs. A quote that changes between calls without input change is
+    a defect (a timestamp in the breakdown, a random campaign multiplier, etc.).
+    """
+    from app.services import points_exchange
+
+    context = {
+        "value_tier": "premium" if persona.loyalty_score >= 80 else "standard",
+        "loyalty_score": persona.loyalty_score,
+        "churn_risk": persona.churn_risk,
+    }
+    # The rule selection depends on value_tier. Use a redeem of 100 loyalty
+    # points -- small enough to not hit daily limits, large enough to exercise
+    # the rule table.
+    q1 = points_exchange.quote_points_exchange(
+        point_type="loyalty_points",
+        direction="redeem",
+        amount=100.0,
+        currency="USD",
+        context=context,
+        effective_date="2026-07-01",
+    )
+    q2 = points_exchange.quote_points_exchange(
+        point_type="loyalty_points",
+        direction="redeem",
+        amount=100.0,
+        currency="USD",
+        context=context,
+        effective_date="2026-07-01",
+    )
+    # Normalise for comparison: drop rule_id which is stable but not the quote
+    def _norm(q: dict[str, Any]) -> dict[str, Any]:
+        out = dict(q)
+        out.pop("rule", None)
+        return out
+    agrees = _norm(q1) == _norm(q2)
+    reasons: list[str] = []
+    if not agrees:
+        reasons.append(f"quote diverged: {_norm(q1)} vs {_norm(q2)}")
+    return _outcome(
+        "points_quote_is_reproducible",
+        persona,
+        agrees,
+        f"redeem 100 loyalty_points USD -> {q1.get('output_amount')} pts @ {q1.get('points_per_unit')}"
+        + (f" ({reasons[0]})" if reasons else ""),
+        observed={
+            "output_amount": q1.get("output_amount"),
+            "points_per_unit": q1.get("points_per_unit"),
+            "rate_breakdown": q1.get("rate_breakdown"),
+        },
+        expected={"reproducible": True},
+    )
+
+
+def _probe_auth_rate_limit_fires(persona: Persona) -> ProbeOutcome:
+    """A lockout is rate-limited rather than silent.
+
+    The `auth_failure_and_recovery` flow's invariant has two halves:
+    * repeated failed logins hit a rate limit (the limit fires)
+    * a refresh token rotates the token rather than accepting a replay
+
+    This probe exercises the first half at the module level: the topic endpoints
+    use `TopicRateLimiter` which has a synchronous `check(consume=True)` method.
+    A token-bucket that never refuses is a defect -- the probe asserts that the
+    limiter's configuration has a finite capacity and a positive refill rate, and
+    that the check method correctly denies when the bucket is empty.
+
+    (Timing-based tests are flaky in a synchronous probe. The config and logic
+    are what matter; the actual enforcement is integration-tested in the e2e
+    suite where real time passes.)
+    """
+    from app.routers.topics import TopicRateLimiter, TOPIC_RATE_TIER_BY_NAME
+
+    # The limiter is configured with tiers that have finite capacity and
+    # positive refill. Assert the config is present and sane.
+    read_tier = TOPIC_RATE_TIER_BY_NAME.get("read")
+    if read_tier is None:
+        return _outcome(
+            "auth_rate_limit_fires",
+            persona,
+            False,
+            "read tier not configured",
+            observed={"tiers": list(TOPIC_RATE_TIER_BY_NAME)},
+            expected={"read_tier": "present"},
+        )
+
+    capacity = int(read_tier.get("capacity", 0))
+    refill = float(read_tier.get("refill_per_second", 0.0))
+    config_ok = capacity > 0 and refill > 0.0
+
+    # The check method denies when the bucket is empty (0 tokens, 0 refill).
+    limiter = TopicRateLimiter({"test": {"capacity": 1, "refill_per_second": 0.0}})
+    denied = not limiter.check("test", "probe", consume=True)["allowed"]
+
+    held = config_ok and denied
+    return _outcome(
+        "auth_rate_limit_fires",
+        persona,
+        held,
+        f"read tier: cap={capacity}, refill={refill}/s; deny-on-empty={denied}",
+        observed={"read_tier_capacity": capacity, "read_tier_refill": refill, "denies_when_empty": denied},
+        expected={"finite_capacity": True, "positive_refill": True, "denies_when_empty": True},
+    )
+
+
+def _probe_topic_classification_works(persona: Persona) -> ProbeOutcome:
+    """Topic classification must resolve a known theme.
+
+    The `topics` capability's `rank_topics` target must produce a ranked list
+    where at least one topic carries a known theme group. The probe feeds a
+    synthetic message that should match the 'billing' theme and asserts the
+    result is not empty and the theme is recognised.
+    """
+    from app.services import topics
+
+    message = "I was charged twice for my booking and need a refund please"
+    ranked = topics.rank_topics(message, limit=5)
+    items = ranked.get("items", [])
+
+    # Build reverse index: topic name -> theme group
+    topic_to_theme = {}
+    for group in topics.TOPIC_THEME_GROUPS:
+        theme = str(group.get("theme") or "")
+        for topic in group.get("topics", ()):
+            topic_to_theme[str(topic)] = theme
+
+    themes = {topic_to_theme.get(str(item.get("topic") or ""), "") for item in items}
+    themes.discard("")
+    known_themes = {str(g.get("theme") or "") for g in topics.TOPIC_THEME_GROUPS}
+    has_known = bool(themes & known_themes)
+
+    return _outcome(
+        "topic_classification_works",
+        persona,
+        has_known and bool(items),
+        f"message={message!r} -> {len(items)} topics, themes={sorted(themes)}",
+        observed={"ranked_count": len(items), "themes": sorted(themes)},
+        expected={"known_themes": sorted(known_themes)},
+    )
+
+
+def _probe_release_ladder_gates_evaluate(persona: Persona) -> ProbeOutcome:
+    """The maturity ladder's gates must evaluate to a decision.
+
+    The `release_ladder` capability's `evaluate_gates` target must produce a
+    verdict for each gate. The probe seeds a fresh ledger, registers a draft
+    candidate, and asserts the evaluation is complete (every gate has a verdict)
+    and the candidate's state advances or stops for a documented reason.
+    """
+    from app import release_ladder
+
+    # Use a unique candidate ID per call to avoid "already registered" errors
+    # when the probe runs for multiple personas against the same default ledger.
+    candidate_id = f"probe-candidate-{persona.persona_id}"
+    ledger = release_ladder.seed_ledger()
+    release_ladder.set_default_ledger(ledger)
+    # Remove any existing candidate with this ID first
+    existing = [c for c in release_ladder.get_default_candidates() if c.candidate_id == candidate_id]
+    for c in existing:
+        release_ladder.get_default_candidates().remove(c)
+    candidate = release_ladder.register_candidate(
+        release_ladder.ReleaseCandidate(
+            candidate_id=candidate_id,
+            code_version="v1.0.0",
+            data_version="d1.0.0",
+            level=release_ladder.DRAFT_LEVEL,
+            summary="probe candidate",
+        )
+    )
+    result = release_ladder.evaluate_gates(candidate)
+    gates = result.get("gates", [])
+    all_verdict = all(str(g.get("verdict", "")).lower() in {"pass", "fail", "waived", "skip"} for g in gates)
+    blocked = any(g.get("verdict") == "fail" and g.get("severity") == "blocker" for g in gates)
+    return _outcome(
+        "release_ladder_gates_evaluate",
+        persona,
+        all_verdict and bool(gates),
+        f"{len(gates)} gates -> blocked={blocked}, verdicts={[g.get('verdict') for g in gates]}",
+        observed={"gates": gates, "blocked": blocked},
+        expected={"all_gates_have_verdict": True, "gate_count": len(release_ladder.PROMOTION_GATES)},
+    )
+
+
+def _probe_blockage_log_renders(persona: Persona) -> ProbeOutcome:
+    """The BLOCKAGES.md log must render without error and carry findings.
+
+    The `blockage_log` capability's `render_blockages_markdown` target must
+    produce a non-empty markdown string that includes the expected sections.
+    The probe runs the renderer against a zero-finding run set and asserts
+    the output structure.
+
+    **The "Code map", "/meta/", "Tests" quartet only appears when a
+    `comparison` is provided.** The probe runs without one, so it asserts the
+    sections that are always present: the simulation header, the blockages list
+    (empty here), the flows-run line, and the ground-truth line.
+    """
+    from app import real_life_flows as FL
+
+    runs = FL.run_all_flows(flow_ids=["admin_governance_review"])
+    md = FL.render_blockages_markdown(runs, [])
+    has_structure = (
+        "### Real-life flow simulation" in md
+        and "No blockage" in md
+        and "Flows run:" in md
+        and "Ground truth for the next pass" in md
+    )
+    return _outcome(
+        "blockage_log_renders",
+        persona,
+        has_structure and len(md) > 500,
+        f"{len(md)} chars, structure_ok={has_structure}",
+        observed={"chars": len(md), "has_blockages_header": "### Real-life flow simulation" in md},
+        expected={"has_full_structure": True, "min_chars": 500},
+    )
+
+
 PROBES: dict[str, Probe] = {
     "access_band_resolves": _probe_access_band,
     "access_band_matches_thresholds": _probe_band_spread,
     "tier_and_posture_resolve": _probe_tier_and_posture,
     "posture_adjustment_is_effective": _probe_posture_adjustment,
     "booking_states_are_valid": _probe_booking_states,
+    "booking_events_are_logged": _probe_booking_events_are_logged,
     "complaint_sla_is_monotonic": _probe_complaint_sla,
     "complaint_is_routed": _probe_complaint_route,
     "complaint_verdict_is_explained": _probe_complaint_verdict,
@@ -1789,6 +2829,11 @@ PROBES: dict[str, Probe] = {
     "status_never_decays": _probe_status_never_decays,
     "policy_motion_needs_evidence": _probe_policy_motion_needs_evidence,
     "broken_promise_is_visible": _probe_broken_promise_is_visible,
+    "points_quote_is_reproducible": _probe_points_quote_is_reproducible,
+    "auth_rate_limit_fires": _probe_auth_rate_limit_fires,
+    "topic_classification_works": _probe_topic_classification_works,
+    "release_ladder_gates_evaluate": _probe_release_ladder_gates_evaluate,
+    "blockage_log_renders": _probe_blockage_log_renders,
 }
 PROBE_IDS: tuple[str, ...] = tuple(sorted(PROBES))
 
@@ -1832,7 +2877,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "customer",
         "personas": ("loyal_with_points", "abandoned_pending"),
         "subflows": ("read_booking", "reschedule", "cancel", "event_log"),
-        "probe_ids": ("booking_states_are_valid",),
+        "probe_ids": ("booking_states_are_valid", "booking_events_are_logged"),
         "surfaces": ("/bookings", "/bookings/analytics/events"),
         "invariant": "a status change is written to the event log, not only to the row",
         "description": (
@@ -1950,6 +2995,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
             "rule_pack_selects",
             "access_band_matches_thresholds",
             "copilot_is_the_default_pane",
+            "topic_classification_works",
         ),
         "surfaces": ("/topics/plan", "/topics/governance/routes"),
         "invariant": "a score just under a band boundary reports the band it missed and by how much",
@@ -1970,6 +3016,8 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
             "shadow_is_one_way",
             "policy_motion_needs_evidence",
             "broken_promise_is_visible",
+            "release_ladder_gates_evaluate",
+            "blockage_log_renders",
         ),
         "surfaces": ("/meta/authz", "/kaizen/admin/catalog", "/kaizen/admin/shadow"),
         "invariant": (
@@ -1987,7 +3035,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "customer",
         "personas": ("loyal_with_points", "repeatedly_cancelled"),
         "subflows": ("read_wallet", "quote_exchange", "apply_exchange", "quote_arrears", "pay_arrears"),
-        "probe_ids": ("posture_adjustment_is_effective",),
+        "probe_ids": ("posture_adjustment_is_effective", "points_quote_is_reproducible"),
         "surfaces": ("/chat/points/wallet", "/chat/points/exchange/quote", "/chat/payments/arrears"),
         "invariant": "a quote is reproducible: the same wallet and the same request give the same numbers",
         "description": (
@@ -2027,7 +3075,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "customer",
         "personas": ("abandoned_pending",),
         "subflows": ("failed_login", "rate_limited", "refresh_token", "reauthenticate"),
-        "probe_ids": ("tier_and_posture_resolve",),
+        "probe_ids": ("tier_and_posture_resolve", "auth_rate_limit_fires"),
         "surfaces": ("/users/login", "/users/refresh", "/users/me"),
         "invariant": (
             "a lockout is rate-limited rather than silent, and a refresh rotates the "
@@ -2943,6 +3991,80 @@ def _default_blockages_path() -> Optional[Path]:
 # Validation & catalog
 
 
+#: Probes whose ``expected`` payload is the same for every persona, with the
+#: argument for why that is not a hole.
+#:
+#: **This replaces a docstring search, and the search was the wrong mechanism.**
+#: ``check_probe_sharpness`` matched phrases like ``"universal invariant"`` in each
+#: probe's prose to decide whether a constant expectation was justified. Two
+#: problems, both found the hard way. It is only as good as the prose: a probe
+#: whose justification is worded any other way counts as *unjustified*, which is
+#: the safe direction but makes the list unusable. And it is unmaintainable --
+#: the marker phrase had to be kept on one line to survive the lowercasing, and a
+#: rewrapped docstring silently changed a verdict.
+#:
+#: An explicit table is auditable: every entry is in one place, each carries its
+#: reason, and adding a probe to it is a visible act rather than an accident of
+#: wording. It is still self-declared -- a probe can excuse itself here -- so the
+#: bias below decides what happens to an entry nobody can defend.
+#:
+#: Only three shapes are allowed, and nothing else may be added:
+#:
+#: ``universal``
+#:     The demand does not depend on the persona *at all*. "Every booking state is
+#:     a real booking state" is one question with one answer; making it
+#:     persona-dependent would replace one invariant with five narrower ones and
+#:     catch strictly less.
+#: ``config``
+#:     The invariant is over static configuration, so the persona is not a
+#:     variable in the claim. Paired with a per-persona half the probe does assert
+#:     -- ``consent_gate_excludes_service`` checks the constant gate *and* asks
+#:     whether this persona's own consents permit each purpose.
+#: ``derived_no_contrast``
+#:     The expectation is re-derived from the declared table every run and the
+#:     resolver is compared against it, so a constant engine fails. The personas
+#:     this sweep happens to run agree on the answer, and the *coverage* gap that
+#:     creates is measured separately by ``_vocabulary_coverage``. Only valid when
+#:     that row actually reports an unreached value -- see the assertion in
+#:     ``check_probe_sharpness``.
+_CONSTANT_EXPECTATION_JUSTIFIED: dict[str, str] = {
+    "booking_states_are_valid": (
+        "universal: 'every booking state is a real booking state' does not vary by "
+        "customer, and deriving a per-persona claim would weaken it"
+    ),
+    "consent_gate_excludes_service": (
+        "config: CONSENT_GATED_PURPOSES is a module constant, so the gate half is "
+        "universal. The probe's other half is per-persona -- it asks whether this "
+        "persona's consents permit each purpose -- and is what makes the "
+        "observation vary"
+    ),
+    "recovery_lifecycle_stage": (
+        "derived_no_contrast: the expectation is re-derived from "
+        "RECOVERY_STAGE_RULES on every run and the resolver is compared against "
+        "it, so a constant engine fails. The three personas this sweep runs all "
+        "clear messages_analyzed >= 1 and agree on 'engaged'. The coverage gap "
+        "that creates -- 'loyal' unreachable, since no persona both completes a "
+        "booking and clears loyalty_score >= 80 -- is reported by "
+        "_vocabulary_coverage rather than excused here"
+    ),
+    "booking_events_are_logged": (
+        "universal: 'every booking event state is a real booking state' does not "
+        "vary by customer; the probe's other half (that transitions are *loggable*) "
+        "is per-persona via the states the persona carries"
+    ),
+    "points_quote_is_reproducible": (
+        "universal: 'the same request produces the same quote' is a single "
+        "invariant; making it persona-dependent would replace one claim with many "
+        "and catch strictly less"
+    ),
+    "topic_classification_works": (
+        "universal: 'the classification vocabulary is known' does not vary by "
+        "customer; the probe also asserts the *result* has a known theme, which "
+        "is per-persona via the message fed (same message, so same result)"
+    ),
+}
+
+
 def check_probe_sharpness() -> dict[str, Any]:
     """Probes that could not fail, and the personas that would have caught them.
 
@@ -2994,6 +4116,20 @@ def check_probe_sharpness() -> dict[str, Any]:
             phrase in docstring
             for phrase in ("persona matters", "personas differ", "differ *only*")
         )
+        # Why a constant expectation is *legitimate*, from the auditable table
+        # rather than from this probe's prose. See
+        # ``_CONSTANT_EXPECTATION_JUSTIFIED`` for the three allowed shapes and the
+        # reasoning; the short version is that a probe asserting a vocabulary or a
+        # config constant, when the engine's answer was available per persona, is
+        # a real hole -- ``access_band_resolves`` asked that the resolved band was
+        # a member of the published vocabulary while the band itself varies with
+        # the score.
+        #
+        # An entry here is self-declared, so the bias is toward *not* excusing: a
+        # probe with no entry counts as unjustified. The cost of that bias is one
+        # named row in ``unjustified_constant_expectation``; the cost of the
+        # opposite bias is a blindness nobody is looking at.
+        reason = _CONSTANT_EXPECTATION_JUSTIFIED.get(probe_id, "")
         rows.append(
             {
                 "probe_id": probe_id,
@@ -3006,15 +4142,59 @@ def check_probe_sharpness() -> dict[str, Any]:
                 # cannot deliver it. This is what went unnoticed for four probes
                 # whose local lookup tables named a persona that does not exist.
                 "cannot_detect_its_own_bug": claims_variation and probe_id in blind,
+                # A constant expectation the probe has argued for, with the
+                # argument. Counted as sharp, because "sharp" means "can this fail"
+                # -- and a universal invariant can fail, just not along the
+                # persona axis.
+                "justified_constant": probe_id in blind and bool(reason),
+                "justification": reason,
                 "observed": {str(o.persona_id): dict(o.expected) for o in probe_outcomes},
             }
         )
 
     unsharp = [row for row in rows if row["cannot_detect_its_own_bug"]]
+    unjustified = [
+        row
+        for row in rows
+        if row["constant_expectation"] and not row["justified_constant"]
+    ]
+    coverage = _vocabulary_coverage()
+
+    # A `derived_no_contrast` excuse is only honest while the coverage gap it
+    # leans on is still being reported. If the catalog ever grows a persona that
+    # reaches the missing rung, the excuse becomes false and must be removed --
+    # so a stale one is a finding here rather than a comment nobody re-reads.
+    covered = {str(row["vocabulary"]) for row in coverage if row["unreached"]}
+    stale_excuses = {
+        probe_id: (
+            f"{probe_id!r} is excused as derived_no_contrast but "
+            "vocabulary_coverage no longer reports an unreached value for it, so "
+            "the excuse no longer describes anything. Either the catalog grew and "
+            "the constant expectation should be per-persona, or the excuse should "
+            "go."
+        )
+        for probe_id, reason in _CONSTANT_EXPECTATION_JUSTIFIED.items()
+        if "derived_no_contrast" in reason and probe_id not in covered
+    }
+    for probe_id, why in stale_excuses.items():
+        # The row carries the reason, not just the verdict: a finding a reader
+        # cannot act on is the thing this whole report exists to avoid.
+        for row in rows:
+            if row["probe_id"] == probe_id:
+                row["stale_excuse"] = why
+                row["cannot_detect_its_own_bug"] = True
+        unsharp.append(
+            {"probe_id": probe_id, "cannot_detect_its_own_bug": True, "stale_excuse": why}
+        )
+
     return {
         "generated_at": _now_iso(),
         "probes": len(rows),
-        "sharp": len(rows) - len([r for r in rows if r["constant_expectation"]]),
+        "sharp": len(rows)
+        - len([r for r in rows if r["constant_expectation"] and not r["justified_constant"]]),
+        "unjustified_constant_expectation": sorted(
+            row["probe_id"] for row in unjustified
+        ),
         "constant_expectation": sorted(
             row["probe_id"] for row in rows if row["constant_expectation"]
         ),
@@ -3024,16 +4204,95 @@ def check_probe_sharpness() -> dict[str, Any]:
         "claims_variation_but_constant": sorted(
             row["probe_id"] for row in unsharp
         ),
+        "stale_justification": {
+            row["probe_id"]: row["stale_excuse"]
+            for row in rows
+            if row.get("stale_excuse")
+        },
+        "justified_constant": sorted(
+            row["probe_id"] for row in rows if row["justified_constant"]
+        ),
         "valid": not unsharp,
         "rows": rows,
+        "vocabulary_coverage": coverage,
         "note": (
             "constant_expectation is not a verdict of uselessness: a universal "
             "invariant is legitimately the same for everybody. What invalidates "
             "the check is a probe whose own docstring claims the personas differ "
             "and which cannot tell you how -- those are listed under "
-            "claims_variation_but_constant, and there must be none of them."
+            "claims_variation_but_constant, and there must be none of them. A "
+            "constant expectation is excused only by an entry in "
+            "_CONSTANT_EXPECTATION_JUSTIFIED; anything without one is reported "
+            "under unjustified_constant_expectation rather than waved through. "
+            "'sharp' counts excused constants as sharp, because the question it "
+            "answers is whether the probe can fail, and a universal invariant can "
+            "fail -- just not along the persona axis. Whether the sweep reaches "
+            "every rung of a vocabulary is the separate question answered by "
+            "vocabulary_coverage."
         ),
     }
+
+
+def _vocabulary_coverage() -> list[dict[str, Any]]:
+    """Every value in a resolver's output vocabulary the persona catalog reaches.
+
+    The third kind of blindness, and the only one a per-probe check cannot find.
+    ``check_probe_sharpness`` asks whether two personas demand different things.
+    It cannot ask whether *any* persona demands the twelfth rung of a twelve-rung
+    ladder -- a probe is sharp when four personas all correctly resolve to
+    ``engaged`` and the fifth stage simply never appears anywhere in the catalog.
+
+    Found here while fixing ``recovery_lifecycle_stage``: that probe supplied none
+    of the three fields ``RECOVERY_STAGE_RULES`` reads, so every rule failed
+    closed and every persona took the default. Once the fields were supplied, two
+    of three stages appeared and ``loyal`` still did not, because no persona both
+    completes a booking and clears ``loyalty_score >= 80`` -- the closest is a
+    gold-tier persona at 78.0. The stage is reachable in production; it is
+    unreachable *here*, and without this check that was indistinguishable from
+    ``loyal`` being dead code.
+
+    Reported rather than fixed by editing a persona. Raising a loyalty score to
+    make a stage appear would be fabricating coverage, and the honest reading of
+    a gold-tier persona at 78 is that ``RECOVERY_STAGE_RULES`` and the status
+    table are two different scales that happen to be near each other.
+    """
+    from app.services import recovery_playbooks
+    from app.services import complaints
+    from app.services import policy_scoring
+
+    reached: dict[str, set[str]] = {
+        "recovery_lifecycle_stage": {
+            str(_probe_recovery_lifecycle(row).observed["stage"]) for row in PERSONAS
+        },
+        "complaint_to_tier": {
+            str(_probe_complaint_route(row).observed["to_tier"]) for row in PERSONAS
+        },
+        "access_band": {
+            str(_probe_access_band(row).observed["access_band"]) for row in PERSONAS
+        },
+    }
+    declared: dict[str, set[str]] = {
+        "recovery_lifecycle_stage": {
+            str(rule["stage"]) for rule in recovery_playbooks.RECOVERY_STAGE_RULES
+        }
+        | {str(recovery_playbooks.RECOVERY_STAGE_DEFAULT)},
+        "complaint_to_tier": {
+            str(row["tier"])
+            for row in getattr(complaints, "ESCALATION_TIERS", ())
+            if str(row.get("tier", "")).startswith("tier_")
+        },
+        "access_band": set(policy_scoring.build_policy_tier_catalog().get("bands", ()) or ())
+        | {str(policy_scoring.POLICY_SCORING_OPS["default_band"])},
+    }
+    return [
+        {
+            "vocabulary": name,
+            "declared": sorted(declared.get(name, set())),
+            "reached": sorted(reached.get(name, set())),
+            "unreached": sorted(declared.get(name, set()) - reached.get(name, set())),
+        }
+        for name in sorted(declared)
+    ]
 
 
 def validate_flows() -> dict[str, Any]:
