@@ -744,16 +744,37 @@ class Mounted:
     # --- requests ----------------------------------------------------------
 
     def _send(self, verb: str, path: str, **kwargs: Any) -> Any:
+        return self.world.run(self.asend(verb, path, **kwargs))
+
+    async def asend(self, verb: str, path: str, **kwargs: Any) -> Any:
+        """The coroutine behind :meth:`_send`, for callers that are already on the loop.
+
+        The sync verbs go through ``world.run``, which starts the world's loop. A
+        test that is *already* inside ``world.run`` -- which is every
+        ``world.gather(...)`` -- cannot call them, because ``run_until_complete``
+        on a running loop raises ``RuntimeError: This event loop is already
+        running``. That is not a harness limitation to work around in each test;
+        it is the reason this method exists.
+        """
         from httpx import ASGITransport, AsyncClient
 
-        async def _go() -> Any:
-            await self._apply()
-            try:
-                transport = ASGITransport(app=self.app, client=("10.0.0.7", 51234))
-                async with AsyncClient(transport=transport, base_url="http://t") as client:
-                    return await getattr(client, verb)(path, **kwargs)
-            finally:
-                self.release()
+        await self._apply()
+        try:
+            transport = ASGITransport(app=self.app, client=("10.0.0.7", 51234))
+            async with AsyncClient(transport=transport, base_url="http://t") as client:
+                return await getattr(client, verb)(path, **kwargs)
+        finally:
+            self.release()
+
+    async def ajson(self, verb: str, path: str, **kwargs: Any) -> Any:
+        """:meth:`asend`, asserting a 2xx and parsing, for use inside ``gather``."""
+        response = await self.asend(verb, path, **kwargs)
+        try:
+            body = response.json()
+        except ValueError:
+            body = response.text
+        assert response.status_code < 400, (verb.upper(), path, response.status_code, body)
+        return body
 
         return self.world.run(_go())
 

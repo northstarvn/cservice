@@ -119,10 +119,21 @@ class MeasureIn(BaseModel):
     ``in_sync: true``. Names in ``measured`` and in ``from_app`` for the same
     key collide, and the app wins: a caller cannot override a measurement of
     the running system with a number they typed.
+
+    Three sources were added after this was found to matter. ``completeness``,
+    ``divergence`` and ``rollback`` exist because every blocking gate guarding
+    ``l3_canary`` and ``l4_live`` -- the first levels at which a customer can be
+    affected -- had **no computable source**, so the only way past them was to
+    type ``{"regressions": 0, "rollback_targets": 5, "capability_blocking": 0}``
+    into a request body. A ladder whose last two rungs are unlocked by typing is
+    a ladder with two decorative rungs, and it read as a working promotion path
+    because ``advance`` returned 200 with the candidate at ``l4_live``.
     """
 
     measured: dict[str, Any] = Field(default_factory=dict)
-    from_app: list[Literal["authz", "flows", "shadow", "care"]] = Field(
+    from_app: list[
+        Literal["authz", "flows", "shadow", "care", "completeness", "divergence", "rollback"]
+    ] = Field(
         default_factory=list,
         description="measurement sources this server computes, merged over `measured`",
     )
@@ -1150,6 +1161,24 @@ _MEASUREMENT_SOURCES: dict[str, str] = {
     "shadow": (
         "shadow_env.evaluate_isolation(build_process_observations()) -- this process, now"
     ),
+    "completeness": (
+        "real_life_flows.completeness_measurements(capability_report(run_all_flows())) "
+        "-- how many capability findings block at this level. Added because "
+        "`backend_completeness_honest` guards l3_canary and l4_live and had no "
+        "computable source at all, so the only way through it was to type 0"
+    ),
+    "divergence": (
+        "real_life_flows.divergence_measurements(compare_runs(run, run)) -- "
+        "shadow_divergence_ratio and regressions. Labelled self-reproducibility: "
+        "both sides are this tree. Added because `regressions_none` guards "
+        "l3_canary and nothing in the repository could satisfy it"
+    ),
+    "rollback": (
+        "release_ladder.get_default_ledger().as_dict() -- how far back a rollback "
+        "reaches in this process's own ledger. Added because "
+        "`rollback_target_available` guards l3_canary and l4_live and had no "
+        "computable source, so the only way through it was to type a count"
+    ),
 }
 
 
@@ -1160,10 +1189,23 @@ def _app_measurements(sources: list[str]) -> dict[str, Any]:
     admin measuring a test run should not also pay for 21 flow simulations they
     did not ask for. Each source returns its own keys and the caller decides the
     merge order -- app-computed last, so a hand-typed number never shadows one.
+
+    The flow run set is computed **at most once per call** and shared by
+    ``flows``, ``completeness`` and ``divergence``. All three need it, and
+    requesting two of them used to pay for 42 flow-persona pairs instead of 21 --
+    a cost that reads as "the measurement endpoint is slow" rather than as the
+    duplication it is.
     """
     from app import main as main_module  # local: app.main imports this module
 
     computed: dict[str, Any] = {}
+    run_cache: dict[str, Any] = {}
+
+    def runs() -> Any:
+        if "runs" not in run_cache:
+            run_cache["runs"] = real_life_flows.run_all_flows()
+        return run_cache["runs"]
+
     for source in sources:
         if source == "authz":
             computed.update(
@@ -1177,8 +1219,24 @@ def _app_measurements(sources: list[str]) -> dict[str, Any]:
 
             computed.update(offer_outcomes.care_loop_measurements())
         elif source == "flows":
-            runs = real_life_flows.run_all_flows()
-            computed.update(real_life_flows.flow_gate_measurements(runs))
+            computed.update(real_life_flows.flow_gate_measurements(runs()))
+        elif source == "completeness":
+            report = real_life_flows.capability_report(runs())
+            computed.update(
+                real_life_flows.completeness_measurements(report, for_level="l4_live")
+            )
+        elif source == "divergence":
+            # Self-reproducibility, and labelled as such: both sides are this
+            # tree. It answers "would two runs of the same code agree", which is
+            # the precondition for a shadow comparison meaning anything -- it is
+            # not itself a shadow comparison, and reading it as one would make a
+            # green ratio look like evidence about live traffic.
+            comparison = real_life_flows.compare_runs(runs(), runs())
+            computed.update(
+                real_life_flows.divergence_measurements(
+                    {**comparison, "kind": "self_reproducibility"}
+                )
+            )
         elif source == "shadow":
             verdict = shadow_env.evaluate_isolation(
                 shadow_env.build_process_observations()
@@ -1187,6 +1245,27 @@ def _app_measurements(sources: list[str]) -> dict[str, Any]:
                 {
                     "shadow_isolated": bool(verdict["isolated"]),
                     "shadow_blocking_failures": list(verdict["blocking_failures"]),
+                }
+            )
+        elif source == "rollback":
+            # How far back a rollback reaches in *this process's* ledger. A
+            # caller cannot know this without reading the ledger, which is
+            # exactly why it was previously hand-typed.
+            ledger = release_ladder.get_default_ledger()
+            as_dict = ledger.as_dict()
+            # The gate reads a **count**. `as_dict["rollback_targets"]` is the list
+            # of event ids and `window_reach` is how many there are, so coercing the
+            # list raised `TypeError: int() argument must be ... not 'list'` and the
+            # measurement endpoint answered 500 for every caller that asked for this
+            # source. The cast was there to be forgiving about `None`; the wrong
+            # field is what made it a crash rather than a default.
+            computed.update(
+                {
+                    "rollback_targets": len(as_dict.get("rollback_targets") or []),
+                    "rollback_window_reach": int(as_dict.get("window_reach") or 0),
+                    "rollback_window": release_ladder.ROLLBACK_WINDOW,
+                    "rollback_window_satisfied": bool(as_dict.get("window_satisfied")),
+                    "min_rollback_targets": release_ladder.MIN_ROLLBACK_TARGETS,
                 }
             )
     return computed
@@ -1275,7 +1354,12 @@ async def rollback_deployment(
         message = str(exc)
         if "no such deployment event" in message:
             raise _not_found(message) from exc
-        if "rollback window" in message:
+        # Both remaining refusals are 409 rather than 400: the ledger is fine and
+        # the request is well-formed, it just cannot be acted on from where the
+        # sequence currently sits. `already the version being served` is checked
+        # in the service ahead of the window check precisely so it does not arrive
+        # dressed as the window check.
+        if "rollback window" in message or "already the version being served" in message:
             raise _conflict(message) from exc
         raise _bad_request(message) from exc
     return {"event": event, "ledger": ledger.as_dict()}

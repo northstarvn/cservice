@@ -1683,6 +1683,334 @@ class TestNegativeControls:
 
         assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
 
+    # -----------------------------------------------------------------------
+    # The six that were unguarded.
+    #
+    # Everything above this banner breaks a module global and watches the flow
+    # run notice. Everything below does the same for the six probes that had no
+    # control at all, in descending order of what a false pass would cost.
+    #
+    # Two of these -- `shadow_is_one_way` especially -- had *adjacent* controls
+    # that called the engine directly rather than through the probe. That is the
+    # gap this banner closes: the engine was proven, and the probe's ability to
+    # notice was not.
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _restore(module, name, value):
+        setattr(module, name, value)
+
+    def test_a_planner_that_drops_a_recovery_action_is_caught(self):
+        """`recovery_never_withholds_a_fix` had no control at all.
+
+        This is the most expensive false pass available: a planner that quietly
+        stops proposing the goodwill credit, against a rule table that says it
+        must never withhold one. The probe exists precisely for this and nothing
+        ever proved it could see it.
+        """
+        from app import real_life_flows
+        from app.services import recovery_playbooks
+
+        saved = recovery_playbooks.plan_recovery_actions
+
+        def withholding(*args, **kwargs):
+            actions = saved(*args, **kwargs)
+            if isinstance(actions, dict):
+                return {**actions, "actions": []}
+            return []
+
+        recovery_playbooks.plan_recovery_actions = withholding
+        try:
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+            assert blockages, (
+                "a planner that planned nothing at all raised no finding. This is "
+                "the failure the probe is named for and it used to pass silently"
+            )
+            assert all(row.subflow_id == "recovery_never_withholds_a_fix"
+                       for row in blockages), [row.subflow_id for row in blockages]
+            assert any(
+                "cannot be optional" in str(row.error) or "withholding" in str(row.error)
+                for row in blockages
+            ), [row.error for row in blockages]
+        finally:
+            recovery_playbooks.plan_recovery_actions = saved
+
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_an_unmeasurable_escalation_guard_folds_the_verdict_to_review(self):
+        """`complaint_verdict_is_explained` had no control.
+
+        The claim is that a verdict arrives in {accept, review} and that no guard
+        is silently unmeasured. A guard made unmeasurable has to move the verdict,
+        not merely appear in the payload.
+
+        The assertion is written against the *category the classifier assigns*,
+        which turned out to be ``unexplained_verdict`` rather than anything to do
+        with consent -- the first draft of this control asserted a category the
+        classifier never emits for this probe, so it could not have passed even
+        when the defect was caught. That is the same class of mistake as a probe
+        asserting a subflow id it does not emit: the test is grading a name.
+        """
+        from app import real_life_flows
+        from app.services import complaints
+
+        saved = complaints.evaluate_escalation_guards
+        complaints.evaluate_escalation_guards = lambda metrics, **_kw: [
+            {
+                "guard_id": "forced_unmeasurable",
+                "metric": "has_owner",
+                "op": "is_true",
+                "op_meaning": "has an owner",
+                "threshold": True,
+                "actual": None,
+                "observed": None,
+                "severity": "review",
+                "holds": False,
+                "reason": "metric_missing",
+                "rationale": "forced by a negative control",
+                "waivable": True,
+            }
+        ]
+        try:
+            runs = real_life_flows.run_all_flows()
+            blockages = real_life_flows.collect_blockages(runs)
+            found = self._blockers_with(blockages, "unexplained_verdict")
+            assert found, [row.category for row in blockages]
+            # `warning`, deliberately: an unmeasurable guard is not yet a customer
+            # being wronged. Asserted against the severity the policy table
+            # publishes rather than the one that reads alarming, because a control
+            # that insists on a blocker would push somebody to upgrade the severity
+            # rather than fix the detector.
+            assert {row.severity for row in found} == {"warning"}, [
+                (row.severity, row.category) for row in blockages
+            ]
+            # And the guard has to be *named*, so a reader knows which metric to go
+            # and measure. This probe narrates into `summary` and leaves `error`
+            # empty, which is why the first draft of this control asserted on
+            # `error`, found nothing, and would have been deleted rather than fixed.
+            verdicts = [
+                outcome
+                for run in runs
+                for outcome in run.outcomes
+                if outcome.subflow_id == "complaint_verdict_is_explained"
+            ]
+            assert verdicts, "the probe did not run"
+            assert all(
+                "forced_unmeasurable" in outcome.observed.get("guards_unmeasured", [])
+                for outcome in verdicts
+            ), [outcome.observed for outcome in verdicts]
+            assert any("unmeasured" in outcome.summary.lower() for outcome in verdicts), [
+                outcome.summary for outcome in verdicts
+            ]
+        finally:
+            complaints.evaluate_escalation_guards = saved
+
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_shadow_pointed_at_live_is_caught_through_the_probe(self):
+        """`shadow_is_one_way` -- the isolation category, reached the long way round.
+
+        ``test_a_shadow_pointed_at_live_is_caught`` calls
+        ``shadow_env.evaluate_isolation`` **directly**. That proves the engine and
+        says nothing about the probe, which is why ``isolation_violation`` -- a
+        blocking severity in the blockage policy -- had no test that reached it
+        through the flow path at all.
+
+        The planted violation is the one that cannot be argued with: the shadow
+        resolves to the same database identity as live. ``evaluate_isolation``
+        folds an unconfigured environment into a fail-closed verdict, so the
+        probe deliberately does not assert that verdict -- it reads
+        ``shadow_database_url`` and compares identities itself. Pointing *that* at
+        live is what the probe is built to notice.
+        """
+        from app import real_life_flows, shadow_env
+
+        # Both sides are pinned, not just the shadow. `live_database_url()` reads
+        # the ambient environment, and an earlier test in a full-suite run leaves
+        # the process without `CSERVICE_DATABASE_URL` -- at which point the probe
+        # correctly reports "not configured" and passes. That is the probe being
+        # honest about a checkout with no shadow, not a defect, so the control has
+        # to supply both URLs rather than rely on what the machine happens to have.
+        saved_shadow = shadow_env.shadow_database_url
+        saved_live = shadow_env.live_database_url
+        shadow_env.shadow_database_url = lambda: LIVE_URL
+        shadow_env.live_database_url = lambda: LIVE_URL
+        try:
+            runs = real_life_flows.run_all_flows(flow_ids=["admin_governance_review"])
+            blockages = real_life_flows.collect_blockages(runs)
+            found = self._blockers_with(blockages, "isolation_violation")
+            assert found, [
+                (row.flow_id, row.persona_id, row.category, row.subflow_id)
+                for row in blockages
+            ]
+            assert found[0].severity == "blocker"
+            # The category alone does not prove the *collision* was seen: the
+            # probe can fail for a forbidden channel direction too. So assert the
+            # probe's own evidence field, which is where the collision is recorded.
+            shadows = [
+                outcome
+                for run in runs
+                for outcome in run.outcomes
+                if outcome.subflow_id == "shadow_is_one_way"
+            ]
+            assert shadows, "the probe did not run"
+            assert all(
+                outcome.observed.get("collision_with_live") is True for outcome in shadows
+            ), [outcome.observed for outcome in shadows]
+            assert all(
+                outcome.observed.get("configured") is True for outcome in shadows
+            ), [outcome.observed for outcome in shadows]
+        finally:
+            shadow_env.shadow_database_url = saved_shadow
+            shadow_env.live_database_url = saved_live
+
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_band_the_catalog_does_not_publish_is_caught(self):
+        """`retention_health_bands` had no control.
+
+        The probe's oracle is the band list ``build_retention_catalog()``
+        publishes; the claim is that the resolver never returns a band outside
+        it. So the control makes the two disagree -- the catalog is left alone and
+        the resolver is made to invent a band. That is the drift that matters, and
+        it is checkable precisely because the probe reads the band list
+        independently of the resolver.
+
+        The first draft of this control removed the ``health_no_data`` rule
+        instead, which proved nothing: the probe always supplies two snapshots, so
+        the no-data rule never fires for it, and deleting it changed no answer.
+        A control that deletes a rule nobody reaches is a control that would pass
+        against a broken harness.
+        """
+        from app import real_life_flows
+        from app.services import retention
+
+        saved = retention.resolve_retention_health
+        published = set(
+            retention.build_retention_catalog().get("bands", ()) or ()
+        )
+        invented = "catastrophically_recovered"
+        assert invented not in published, "the invented band is really published"
+        retention.resolve_retention_health = lambda context, **_kw: {
+            "band": invented,
+            "health": invented,
+            "rule_id": "default",
+            "actions": [],
+            "matched_fields": {},
+        }
+        try:
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+            assert blockages, (
+                "a resolver emitting a band the catalog never publishes raised no "
+                "finding; the probe cannot see drift"
+            )
+            assert self._blockers_with(blockages, "vocabulary_drift") or self._blockers_with(
+                blockages, "invariant_violated"
+            ), [(row.category, row.error) for row in blockages]
+        finally:
+            retention.resolve_retention_health = saved
+
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_decay_field_put_back_in_the_status_table_is_caught(self):
+        """`status_never_decays` had no control.
+
+        The probe asserts structure as well as behaviour, so this control attacks
+        the structure: reintroduce `decay` on a rule row and the guard must object
+        even though no behaviour has changed *yet*.
+        """
+        from app import real_life_flows
+        from app.services import loyalty_status
+
+        saved = loyalty_status.LOYALTY_STATUS_RULES
+        rows = [dict(row) for row in saved]
+        rows[0]["decay"] = {"after_days": 90, "to_status": "member"}
+        loyalty_status.LOYALTY_STATUS_RULES = tuple(rows)
+        try:
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+            assert blockages, "a `decay` field on a status rule raised no finding"
+            assert any("decay" in str(row.conclusion) or "decay" in str(row.error)
+                       for row in blockages), [
+                (row.category, row.conclusion) for row in blockages
+            ]
+        finally:
+            loyalty_status.LOYALTY_STATUS_RULES = saved
+
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_fully_trusted_device_unlocking_a_money_step_is_caught(self):
+        """`trusted_device_never_overreaches` had no control.
+
+        "Recognition shortens authentication, not permission" is the invariant, so
+        the control grants the resolver as much trust as it will award and then
+        asserts the unattended-contact step is still refused.
+
+        The category this lands in is ``probe_raised``, not a named product
+        category. That is worth knowing: ``_classify`` has no branch for this
+        subflow, so every overreach is filed under the generic bucket and the
+        reader loses the fact that it was a permission overreach specifically. The
+        assertion therefore checks the message, which does say what happened.
+        """
+        from app import real_life_flows
+        from app.services import care_personalization
+
+        saved = care_personalization.resolve_care_paths
+
+        def overreaching(trust, *, gate=None, **_kwargs):
+            held = saved(trust, gate=gate)
+            return {
+                **held,
+                "permitted_step_ids": list(held["permitted_step_ids"])
+                + ["send_message_unattended"],
+            }
+
+        care_personalization.resolve_care_paths = overreaching
+        try:
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+            assert blockages, "a device permitted to message unattended raised no finding"
+            assert all(row.subflow_id == "trusted_device_never_overreaches"
+                       for row in blockages), [row.subflow_id for row in blockages]
+            assert any("unattended" in str(row.error) for row in blockages), [
+                row.error for row in blockages
+            ]
+        finally:
+            care_personalization.resolve_care_paths = saved
+
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_every_probe_the_governance_flow_depends_on_has_a_control(self):
+        """The reason the six above exist, as a standing check.
+
+        ``TestNegativeControls`` was worth having and was not read. This asserts
+        the thing that would have surfaced it: the probes on the flow whose
+        failure mode is a promotion nobody can justify. Kept as a *set* of ids
+        rather than a count, because a count tripwire passes when the probes are
+        renamed.
+        """
+        from app import real_life_flows
+
+        governance = next(
+            flow for flow in real_life_flows.FLOW_CATALOG
+            if flow["flow_id"] == "admin_governance_review"
+        )
+        governed = set(governance["probe_ids"])
+        controlled = {
+            # Broken by an adjacent control that calls the engine directly.
+            "shadow_is_one_way",
+            "authz_routes_classified",
+            # Broken by a control that edits the module global the probe reads.
+            "policy_motion_needs_evidence",
+            "contact_hour_is_local",
+            # Read-only invariants: nothing to break, they assert what the tree
+            # already publishes.
+            "broken_promise_is_visible",
+            "status_never_decays",
+        }
+        assert governed <= controlled, (
+            f"the governance flow depends on {sorted(governed - controlled)} and no "
+            f"control proves this harness would notice if they broke"
+        )
+
     def test_every_category_has_a_policy_row(self):
         """A category with no policy is a finding with no conclusion or suggestion."""
         from app import real_life_flows
@@ -2741,9 +3069,39 @@ class TestEndpoints:
         # `care` joined Stage D: it counts offer outcomes and journey stuckness from
         # the rows, so a gate about the care loop cannot be satisfied by typing a
         # number into a request body.
-        assert set(sources) == {"authz", "flows", "shadow", "care"}
+        #
+        # The other three exist because every blocking gate guarding `l3_canary`
+        # and `l4_live` -- the first levels at which a customer can be affected --
+        # had **no computable source**, so the only route past them was to POST
+        # `{"regressions": 0, "rollback_targets": 5, "capability_blocking": 0}`. The
+        # ladder still reported `advanced: true` and put the candidate at live, so
+        # two of its five rungs were decoration that looked like a promotion path.
+        # `completeness` and `divergence` both read the flow run set, which is why
+        # they are checked here rather than discovered through a slow endpoint.
+        assert set(sources) == {
+            "authz",
+            "flows",
+            "shadow",
+            "care",
+            "completeness",
+            "divergence",
+            "rollback",
+        }
         for name, description in sources.items():
             assert len(description) > 30, name
+        # Every name the schema accepts must be listed, and vice versa. A Literal
+        # that has drifted from the catalogue is either a source a caller can name
+        # and get nothing for, or one the catalogue advertises and the schema
+        # rejects with a 422. Both are silent: the first returns 200 with the
+        # measurement absent, the second fails before the handler runs.
+        from typing import get_args
+
+        from app.routers.kaizen import MeasureIn
+
+        accepted = set(get_args(get_args(MeasureIn.model_fields["from_app"].annotation)[0]))
+        assert accepted == set(sources), (
+            "the schema and the catalogue disagree about the measurement sources"
+        )
 
     def test_the_shadow_endpoint_reports_the_per_check_breakdown(self, admin_client):
         response = admin_client.get("/kaizen/admin/shadow")

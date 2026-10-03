@@ -109,6 +109,51 @@ class Persona:
     consent_recovery: bool = True
     consent_analytics: bool = False
     is_admin: bool = False
+    #: Which region this persona is in, so a probe can vary *place* rather than
+    #: inventing a persona-id-keyed lookup table.
+    #:
+    #: This field exists because four probes used to branch on ``persona_id``
+    #: through a local dict, and every one of those dicts carried a key naming a
+    #: persona that does not exist. A branch keyed on an id that can never arrive
+    #: is not a slow test, it is a false negative that reads as a passing test:
+    #: ``contact_hour_is_local`` mapped three personas, two of the three fell
+    #: through to the same default, and the probe reported one distinct
+    #: expectation while its own docstring claimed the personas "differ *only* in
+    #: region". Putting the region on the persona makes the variation a property
+    #: of the persona rather than a lookup somebody has to remember to extend.
+    region_id: str = "us_east"
+    #: The experiential tier this relationship has earned, which is what a status
+    #: is derived from. ``resolve_loyalty_status`` reads *only* this and never a
+    #: points balance, so a probe that hard-codes one tier for every persona is
+    #: checking a quarter of the status table and calling it coverage.
+    experiential_tier: str = "bronze"
+    #: Evidence attached to a proposed change to what somebody is owed. Three
+    #: kinds on purpose: a measured outcome, a bare observation, and an opinion.
+    #: An opinion with four hundred samples behind it must still be refused.
+    motion_evidence: tuple[dict[str, Any], ...] = ()
+    #: How many times this persona's device has been seen. One sighting is not
+    #: trust and twelve is; a probe reporting the same permitted set for both is
+    #: not testing whether recognition stops at authentication.
+    device_recognitions: int = 0
+    #: Whether this persona granted the ``personalization`` consent. This is the
+    #: one boolean that moves a personalization answer, which is why it lives on
+    #: the persona rather than in a probe-local dict.
+    personalization_consent: bool = False
+    #: What this persona's own messages said, as ``(label, score)``.
+    #:
+    #: Added because ``recovery_never_withholds_a_fix`` built its context by hand
+    #: from six persona fields, and the playbook rule table reads ten. The three
+    #: it was missing -- ``recovery_readiness``, ``sentiment_label`` and
+    #: ``dissatisfaction_score`` -- are all derived from how the customer spoke,
+    #: which the persona had no way to express. No rule could match, the plan came
+    #: back empty for all five personas, and a probe named "never withholds a fix"
+    #: reported the invariant held while the planner withheld every fix.
+    sentiment: tuple[str, float] = ("neutral", 0.0)
+    #: The insights a real analysis would have raised for this persona, as
+    #: ``(area, score)``. These are what move ``dissatisfaction_score``, and
+    #: through it ``recovery_readiness`` -- the label every "is this bad enough to
+    #: act" playbook rule branches on. An empty tuple means a quiet account.
+    insights: tuple[tuple[str, float], ...] = ()
 
     def within_score_scale(self) -> bool:
         low, high = SCORE_SCALE
@@ -131,6 +176,13 @@ PERSONAS: tuple[Persona, ...] = (
         consent_service=True,
         consent_recovery=True,
         consent_analytics=False,
+        region_id="us_east",
+        experiential_tier="gold",
+        motion_evidence=({"kind": "measured_outcome", "samples": 400},),
+        device_recognitions=12,
+        personalization_consent=True,
+        sentiment=("positive", 0.4),
+        insights=(),
     ),
     Persona(
         persona_id="abandoned_pending",
@@ -145,6 +197,13 @@ PERSONAS: tuple[Persona, ...] = (
         consent_service=True,
         consent_recovery=True,
         consent_analytics=False,
+        region_id="oceania_auckland",
+        experiential_tier="silver",
+        motion_evidence=({"kind": "observation", "samples": 40},),
+        device_recognitions=1,
+        personalization_consent=False,
+        sentiment=("neutral", -0.1),
+        insights=(("follow_up", 4.0),),
     ),
     Persona(
         persona_id="repeatedly_cancelled",
@@ -159,6 +218,17 @@ PERSONAS: tuple[Persona, ...] = (
         consent_service=True,
         consent_recovery=True,
         consent_analytics=True,
+        region_id="europe_london",
+        experiential_tier="bronze",
+        motion_evidence=(),
+        device_recognitions=5,
+        personalization_consent=False,
+        # Three cancellations, a negative reading and six repeat messages: the
+        # only persona on this tree whose profile reaches `recovery_readiness`
+        # high, and therefore the only one the goodwill and guardrail playbooks
+        # can fire for.
+        sentiment=("negative", -0.8),
+        insights=(("booking_flow", 4.5), ("pricing", 3.0), ("follow_up", 4.0)),
     ),
     Persona(
         persona_id="dormant_45_days",
@@ -173,6 +243,18 @@ PERSONAS: tuple[Persona, ...] = (
         consent_service=True,
         consent_recovery=True,
         consent_analytics=False,
+        region_id="us_west",
+        # `unscored`, so this persona resolves to the *lowest* status rung. Three
+        # of five personas sitting on `trusted` is how a four-rung status table
+        # gets reported as one rung's worth of coverage.
+        experiential_tier="unscored",
+        # An opinion, with four hundred samples behind it. The case this exists
+        # for: volume is not measurement.
+        motion_evidence=({"kind": "opinion", "samples": 400},),
+        device_recognitions=5,
+        personalization_consent=False,
+        sentiment=("negative", -0.6),
+        insights=(("booking_flow", 3.0),),
     ),
     Persona(
         persona_id="admin_console",
@@ -188,6 +270,13 @@ PERSONAS: tuple[Persona, ...] = (
         consent_recovery=True,
         consent_analytics=True,
         is_admin=True,
+        region_id="us_east",
+        experiential_tier="platinum",
+        motion_evidence=({"kind": "measured_outcome", "samples": 400},),
+        device_recognitions=12,
+        personalization_consent=True,
+        sentiment=("neutral", 0.0),
+        insights=(),
     ),
 )
 PERSONA_BY_ID: dict[str, Persona] = {row.persona_id: row for row in PERSONAS}
@@ -267,7 +356,8 @@ def _outcome(
 
 #: Capability id -> resolution, for the parts that are positively absent. Built
 #: lazily and cached per process, because it costs an import per engine and the
-#: simulator runs 21 flows x 3 probes.
+#: simulator runs 21 flow-persona pairs x up to 7 probes each, twice per sweep
+#: (once for the flows, once for the divergence comparison).
 _DEFERABLE: dict[str, dict[str, Any]] | None = None
 
 
@@ -500,7 +590,7 @@ def _probe_posture_adjustment(persona: Persona) -> ProbeOutcome:
         mismatched.append(f"{len(default_rows)} default rows in the table")
 
     return _outcome(
-        "posture_adjustment_matches_its_row",
+        "posture_adjustment_is_effective",
         persona,
         bool(applied)
         and not mismatched
@@ -819,44 +909,152 @@ def _probe_recovery_lifecycle(persona: Persona) -> ProbeOutcome:
 
 
 def _probe_recovery_actions(persona: Persona) -> ProbeOutcome:
-    """Planned actions must respect the consent gate for marketing, and never
-    withhold a *service* or *recovery* action from a customer who reported a
-    problem.
+    """A playbook that matched must deliver its actions, and a fix must not be
+    withheld from somebody who reported a problem.
 
-    That second half is the documented invariant in ``BLOCKAGES.md`` -- "the
-    consent gate must never suppress service or recovery outreach" -- and it is
-    pinned here against a persona with analytics consent withdrawn.
+    **This probe used to assert nothing, and it is worth recording how.** It built
+    a six-key context by hand, then asked the planner for actions and complained
+    about any service/recovery action in the plan aimed at a persona who had
+    withdrawn the relevant consent. Two failures in that shape:
+
+    * The rule table reads ten fields and the hand-built context carried six.
+      ``recovery_readiness``, ``sentiment_label`` and ``dissatisfaction_score`` are
+      all derived from what the customer *wrote*, which the persona could not
+      express, so **no playbook could ever match**. The plan was empty for all
+      five personas and the probe held. A planner returning nothing passed a probe
+      named "never withholds a fix".
+    * Even given a matching plan, "suppressed" was computed by filtering the
+      actions that *were* planned. An empty list is not a suppression, so the one
+      failure that matters -- the plan going empty -- was invisible by
+      construction. The name and the check pointed at opposite directions.
+
+    So the claim is now stated in the direction that can fail: compare
+    ``evaluate_recovery_playbooks`` against ``plan_recovery_actions``. Every action
+    a matched playbook declares must appear in the plan, and every matched playbook
+    must appear in the plan\'s ``playbook_id`` column. Both halves are checkable
+    and both are breakable, which is the property that was missing.
+
+    The consent half is kept, and it is the *other* direction: planning service or
+    recovery outreach at somebody who withdrew that consent is over-contact, and it
+    is still a defect.
     """
-    from app.services import recovery_playbooks
+    from app.schemas.chat import InteractionInsight, InteractionSummary, Sentiment
+    from app.services import chat_analytics, recovery_playbooks
 
-    context = {
-        "churn_risk": persona.churn_risk,
-        "loyalty_score": persona.loyalty_score,
-        "days_since_last_activity": persona.days_since_last_activity,
-        "consent_service": persona.consent_service,
-        "consent_recovery": persona.consent_recovery,
-        "consent_analytics": persona.consent_analytics,
-    }
+    # Built through the same two functions production uses, so this cannot drift
+    # from the shape `plan_recovery_actions` is actually called with. A hand-built
+    # dict is how this probe came to be vacuous.
+    counts: dict[str, int] = {}
+    for state in persona.booking_states:
+        counts[str(state)] = counts.get(str(state), 0) + 1
+    summary = InteractionSummary(
+        user_id=1000 + len(persona.persona_id),
+        messages_analyzed=1 + len(persona.insights) * 3 + counts.get("cancelled", 0) * 2,
+        bookings_analyzed=max(1, sum(counts.values())),
+        churn_risk=persona.churn_risk,
+        loyalty_score=persona.loyalty_score,
+        monetization_readiness=round(persona.loyalty_score / 2.0, 2),
+        value_tier=(
+            "premium"
+            if persona.loyalty_score >= 70.0
+            else "growth"
+            if persona.loyalty_score >= 35.0
+            else "standard"
+        ),
+        customer_classification=persona.churn_risk,
+        top_issues=[str(area) for area, _score in persona.insights],
+        strengths=[],
+        insights=[
+            InteractionInsight(
+                area=str(area),
+                priority="high",
+                score=float(score),
+                evidence=[f"{persona.display_name} wrote about {area}"],
+                evidence_summary=f"{persona.display_name} wrote about {area}",
+                source="persona",
+                recommendation="acknowledge and fix",
+                next_step="resolve the issue",
+            )
+            for area, score in persona.insights
+        ],
+        metadata={
+            "booking_states": counts,
+            "repeated_messages": max(0, counts.get("cancelled", 0) * 3 - 1),
+        },
+        generated_at=datetime(2026, 9, 30, tzinfo=timezone.utc),
+    )
+    sentiment = Sentiment(
+        label=str(persona.sentiment[0]), score=float(persona.sentiment[1])
+    )
+    dissatisfaction = chat_analytics.build_dissatisfaction_recovery_report(
+        summary, sentiment
+    )
+    context = recovery_playbooks.build_realtime_recovery_context(
+        summary, sentiment, dissatisfaction
+    )
+
+    matched = recovery_playbooks.evaluate_recovery_playbooks(context)
+    matched_ids = {str(row.get("playbook_id")) for row in matched}
+    owed = sorted(
+        {
+            str(action.get("action"))
+            for row in matched
+            for action in row.get("actions", [])
+            if str(action.get("action"))
+        }
+    )
     planned = recovery_playbooks.plan_recovery_actions(context)
-    purposes = [str(action.get("purpose") or "") for action in planned]
-    service_actions = [action for action in planned if str(action.get("purpose")) in {"service", "recovery"}]
-    suppressed = [
-        action
-        for action in service_actions
-        if not persona.consent_service or not persona.consent_recovery
-    ]
+    delivered_actions = {str(entry.get("action")) for entry in planned}
+    delivered_ids = {str(entry.get("playbook_id")) for entry in planned}
+    withheld_actions = [name for name in owed if name not in delivered_actions]
+    withheld_playbooks = sorted(matched_ids - delivered_ids)
+    over_contact = sorted(
+        {
+            str(entry.get("action"))
+            for entry in planned
+            if str(entry.get("purpose")) in {"service", "recovery"}
+            and not (persona.consent_service and persona.consent_recovery)
+        }
+    )
+    reasons: list[str] = []
+    if withheld_actions:
+        reasons.append(
+            f"playbook(s) {sorted(matched_ids)} matched but the plan delivered "
+            f"{sorted(delivered_actions)}, withholding {withheld_actions}. A fix "
+            "the rules asked for is the one fix that cannot be optional"
+        )
+    if withheld_playbooks:
+        reasons.append(
+            f"playbook(s) {withheld_playbooks} matched and no action reached the "
+            "plan at all, so the match had no effect"
+        )
+    if over_contact:
+        reasons.append(
+            f"{over_contact} planned at a customer who withdrew the service or "
+            "recovery consent"
+        )
     return _outcome(
         "recovery_never_withholds_a_fix",
         persona,
-        not suppressed,
-        f"{len(planned)} action(s), purposes {sorted(set(purposes))}, "
-        f"{len(service_actions)} service/recovery",
+        not reasons,
+        f"readiness {context['recovery_readiness']!r}, "
+        f"{len(matched_ids)} playbook(s) {sorted(matched_ids)}, "
+        f"{len(planned)} action(s) {sorted(delivered_actions)}",
         observed={
-            "count": len(planned),
-            "purposes": sorted(set(purposes)),
-            "suppressed_service_actions": [str(a.get("action_id")) for a in suppressed],
+            "recovery_readiness": context["recovery_readiness"],
+            "dissatisfaction_score": context["dissatisfaction_score"],
+            "matched_playbooks": sorted(matched_ids),
+            "planned_actions": sorted(delivered_actions),
+            "withheld_actions": withheld_actions,
+            "withheld_playbooks": withheld_playbooks,
+            "over_contact": over_contact,
         },
-        expected={"suppressed_service_actions": []},
+        expected={
+            "matched_playbooks_delivered": sorted(matched_ids),
+            "owed_actions_delivered": owed,
+            "over_contact": [],
+        },
+        error="; ".join(reasons),
     )
 
 
@@ -935,7 +1133,7 @@ def _probe_rule_pack_selection(persona: Persona) -> ProbeOutcome:
         rules = selected.get("rules") if isinstance(selected, dict) else selected
         selected_per_pack[pack_name] = len(rules or [])
     return _outcome(
-        "rule_packs_select",
+        "rule_pack_selects",
         persona,
         bool(available) and not errors,
         f"{len(available)} pack(s) selected {selected_per_pack}",
@@ -1053,6 +1251,24 @@ def _probe_shadow_isolation(persona: Persona) -> ProbeOutcome:
 # ---------------------------------------------------------------------------
 
 
+#: Region -> the local hour that region reads at 23:00Z on 1 October 2026.
+#:
+#: Hand-computed from each region's declared UTC offset, and the probe's own
+#: independent oracle. Deliberately *not* derived from ``region_windows``: an
+#: expectation computed by the engine under test cannot fail, whatever the
+#: engine does. These are the numbers a reader can check against a clock.
+#:
+#: Only regions a persona actually occupies are listed. An undeclared region is
+#: reported as unjudgeable rather than guessed at.
+_EXPECTED_LOCAL_HOUR: dict[str, int] = {
+    "oceania_auckland": 12,   # UTC+13 -> noon the next day, inside 09:00-17:00
+    "asia_tokyo": 8,          # UTC+9  -> 08:00, before the window
+    "europe_london": 0,       # UTC+1  -> midnight the next day, outside
+    "us_east": 19,            # UTC-4  -> 19:00, after the window
+    "us_west": 16,            # UTC-7  -> 16:00, inside the window
+}
+
+
 def _probe_local_contact_hour(persona: Persona) -> ProbeOutcome:
     """Quiet hours must be evaluated where the customer is, not where the server is.
 
@@ -1065,6 +1281,18 @@ def _probe_local_contact_hour(persona: Persona) -> ProbeOutcome:
     the hour were read at UTC, every persona would agree and the constant-answer
     detector would grade this part ``partial`` rather than ``complete`` -- which is
     the honest outcome, not a passing test.
+
+    **The region comes from the persona, and that is load-bearing.** This probe
+    used to carry a local ``regions`` dict keyed on ``persona_id``. Two of its
+    three keys named personas no flow ever ran it for -- including
+    ``at_risk_high_value``, which is in no ``PERSONAS`` tuple at all -- so every
+    persona that actually reached the probe fell through the ``.get`` default to
+    ``us_east``. The probe reported **one** distinct expectation across three
+    personas while this docstring claimed they differed in region, and
+    ``capability_audit``'s constant-answer detector correctly graded it blind
+    without anybody reading that as a defect. ``Persona.region_id`` makes the
+    variation a property of the persona, so a new persona is either in a region
+    or explicitly not, and there is no lookup table left to forget.
     """
     from app.services import region_windows
 
@@ -1072,29 +1300,64 @@ def _probe_local_contact_hour(persona: Persona) -> ProbeOutcome:
     # Every persona is given the *same* stated window. Only the region varies.
     window = {"contact_window_start_hour": 9, "contact_window_end_hour": 17,
               "quiet_hours_enabled": True}
-    regions = {
-        "abandoned_pending": "oceania_auckland",   # 12:00 local -- inside
-        "loyal_with_points": "us_east",            # 19:00 local -- outside
-        "at_risk_high_value": "europe_london",     # 00:00 local -- outside
-    }
-    region = regions.get(persona.persona_id, "us_east")
+    region = persona.region_id
     observed = region_windows.evaluate_contact_window(
         preferences_map=window, region_id=region, moment=moment
     )
     hour = int(observed["local_hour"])
     within = bool(observed["within_declared_window"])
-    # The expectation is derived from the *stated window*, not from the engine.
-    expected_within = 9 <= hour < 17
+
+    # The expected local hour is a **hand-computed literal per region**, not a
+    # boolean derived from the observation. This is the difference between a
+    # probe and a tautology.
+    #
+    # A boolean expectation -- `local_hour_not_utc_hour`, `matches_stated_window`
+    # -- is derived *from the value being checked*, so it is true for every
+    # observation the engine could possibly return. Four personas in four regions
+    # agreed on it, `capability_audit` graded the probe blind, and the two facts
+    # sat next to each other without anybody reading the pair as a defect.
+    #
+    # These numbers are 23:00Z plus each region's declared offset: Auckland is
+    # UTC+13 so it is noon the next day, London is UTC+1 so it is midnight, the
+    # US coasts are behind. Typed out here on purpose: they are the independent
+    # oracle the probe deliberately does not have anywhere else, and a reader who
+    # suspects one is wrong can check it against a clock without running anything.
+    expected_hour = _EXPECTED_LOCAL_HOUR.get(region)
+    if expected_hour is None:
+        # An undeclared region gets no opinion from this probe. Reporting a
+        # near-miss is worse than reporting nothing, because "we checked" would
+        # be a claim nobody made.
+        return _outcome(
+            "contact_hour_is_local",
+            persona,
+            False,
+            f"no published local-hour expectation for region {region!r}",
+            observed={"region": region, "local_hour": hour,
+                      "within_declared_window": within,
+                      "utc_hour": moment.hour},
+            expected={"region_declared": False},
+            error=(
+                f"region {region!r} has no entry in the probe's own expectation "
+                f"table, so this probe cannot judge it"
+            ),
+        )
+    expected_within = 9 <= expected_hour < 17
     reasons: list[str] = []
-    if hour == 23:
+    if hour == moment.hour:
         reasons.append(
-            f"resolved 23:00 local in {region}, which is the UTC hour: the local-hour "
-            "arithmetic is not being applied"
+            f"resolved {moment.hour:02d}:00 local in {region}, which is the UTC "
+            "hour: the local-hour arithmetic is not being applied"
+        )
+    if hour != expected_hour:
+        reasons.append(
+            f"23:00Z in {region} is {expected_hour:02d}:00 local, not "
+            f"{hour:02d}:00"
         )
     if within != expected_within:
         reasons.append(
             f"{hour:02d}:00 local against a 09:00-17:00 window should be "
-            f"{'inside' if expected_within else 'outside'}"
+            f"{'inside' if expected_within else 'outside'}, not "
+            f"{'inside' if within else 'outside'}"
         )
     return _outcome(
         "contact_hour_is_local",
@@ -1105,8 +1368,12 @@ def _probe_local_contact_hour(persona: Persona) -> ProbeOutcome:
         observed={"region": region, "local_hour": hour,
                   "within_declared_window": within,
                   "utc_hour": moment.hour},
-        expected={"local_hour_not_utc_hour": hour != 23,
-                  "matches_stated_window": within == expected_within},
+        # Carries the literal hour, so two personas in two regions produce two
+        # different expectations and the constant-answer detector can see the
+        # difference it exists to detect.
+        expected={"local_hour": expected_hour,
+                  "within_declared_window": expected_within,
+                  "region_declared": True},
         error="; ".join(reasons),
     )
 
@@ -1122,11 +1389,7 @@ def _probe_purpose_limited_personalization(persona: Persona) -> ProbeOutcome:
     """
     from app.services import care_personalization
 
-    granted = {
-        "loyal_with_points": True,
-        "abandoned_pending": False,
-        "at_risk_high_value": False,
-    }.get(persona.persona_id, False)
+    granted = persona.personalization_consent
     consents = {"personalization": granted}
     recovery = care_personalization.resolve_personalization(
         purpose="recovery", consents=consents
@@ -1162,10 +1425,31 @@ def _probe_purpose_limited_personalization(persona: Persona) -> ProbeOutcome:
                   "recovery_allowed": list(recovery["allowed"]),
                   "marketing_allowed": list(marketing["allowed"]),
                   "marketing_refused": list(marketing["refused"])},
+        # The expectation is the persona's own consent, not a restatement of the
+        # answer. `marketing_follows_consent: should_have_history == granted`
+        # reads like the same claim and is not: it is `True` for every value the
+        # engine can return, so a persona with consent and a persona without it
+        # produced one fingerprint and the constant-answer detector called the
+        # probe blind. Stating the consent *as* the expectation is a claim the
+        # engine can contradict.
         expected={"recovery_allows_history": True,
-                  "marketing_follows_consent": should_have_history == granted},
+                  "marketing_allows_history_reference": granted},
         error="; ".join(reasons),
     )
+
+
+#: Sighting count -> the trust band that count should earn.
+#:
+#: Hand-computed from the published bands: one sighting is a device we have met,
+#: five is one we have seen repeatedly, twelve is one we would call long-standing.
+#: Kept beside the probe rather than read from ``resolve_trust_band`` so the probe
+#: has an opinion that the engine can contradict.
+_EXPECTED_TRUST_BAND: dict[int, str] = {
+    0: "unknown",
+    1: "recognized",
+    5: "elevated",
+    12: "trusted",
+}
 
 
 def _probe_trusted_device_respects_the_gate(persona: Persona) -> ProbeOutcome:
@@ -1178,9 +1462,7 @@ def _probe_trusted_device_respects_the_gate(persona: Persona) -> ProbeOutcome:
     """
     from app.services import care_personalization
 
-    recognitions = {"abandoned_pending": 1, "loyal_with_points": 12}.get(
-        persona.persona_id, 5
-    )
+    recognitions = int(persona.device_recognitions or 0)
     trust = care_personalization.resolve_trust_band(
         recognized=True, recognitions=recognitions, signals_matched=3
     )
@@ -1208,8 +1490,19 @@ def _probe_trusted_device_respects_the_gate(persona: Persona) -> ProbeOutcome:
         observed={"trust_band": trust["band"], "recognitions": recognitions,
                   "permitted": list(held["permitted_step_ids"]),
                   "refused": list(held["refused_step_ids"])},
-        expected={"contact_still_gated": True,
-                  "own_account_steps_permitted": True},
+        # Two claims. `unattended_contact_permitted: False` is the invariant and
+        # is stated as a literal, so a `trusted` device that unlocks a message
+        # contradicts it directly. `trust_band` is this probe's own oracle for
+        # how many sightings earn which band -- hand-computed, not read back from
+        # `resolve_trust_band`, so the engine cannot agree with itself.
+        #
+        # Both matter because the previous expectation was two `True`s, which is
+        # what a `recognized` device and a `trusted` one both produced, and
+        # "trust never widens permission" is a claim about the *difference*
+        # between them.
+        expected={"unattended_contact_permitted": False,
+                  "own_account_steps_permitted": True,
+                  "trust_band": _EXPECTED_TRUST_BAND.get(recognitions)},
         error="; ".join(reasons),
     )
 
@@ -1225,8 +1518,6 @@ def _probe_relationship_view_default_pane(persona: Persona) -> ProbeOutcome:
 
     requested = {
         "loyal_with_points": "history",
-        "abandoned_pending": "",
-        "at_risk_high_value": "history",
     }.get(persona.persona_id, "")
     explicit = persona.persona_id == "loyal_with_points"
     view = relationship_view.build_relationship_view(
@@ -1268,6 +1559,22 @@ def _probe_relationship_view_default_pane(persona: Persona) -> ProbeOutcome:
 # ---------------------------------------------------------------------------
 
 
+#: Experiential tier -> the status that tier is supposed to earn.
+#:
+#: Hand-written from the published status rules: an unscored customer is a
+#: `member`, bronze and silver are `established`, gold is `trusted`, platinum is
+#: `principal`. This is the oracle ``status_never_decays`` checks against, and it
+#: is deliberately a second transcription of the mapping -- a probe that imported
+#: the table would be grading the table with itself.
+_EXPECTED_STATUS_BY_TIER: dict[str, str] = {
+    "unscored": "member",
+    "bronze": "established",
+    "silver": "established",
+    "gold": "trusted",
+    "platinum": "principal",
+}
+
+
 def _probe_status_never_decays(persona: Persona) -> ProbeOutcome:
     """A status must not fall for inactivity, whatever the rule table says.
 
@@ -1296,14 +1603,33 @@ def _probe_status_never_decays(persona: Persona) -> ProbeOutcome:
                 "the shape the invariant exists to forbid"
             )
     away = int(persona.days_since_last_activity or 0)
+    # The ledger carries *this* persona's earned tier. It used to hard-code
+    # `gold` for everybody, which meant three of five personas resolved to
+    # `trusted` and the fourth rung of the status table -- `principal`, and the
+    # `member` floor an unscored customer falls back to -- was never resolved by
+    # this probe at all. A guard that only ever sees one rung is a guard on one
+    # rung.
+    tier = persona.experiential_tier
+    unscored = tier == "unscored"
     ledger = {
-        "tier": "gold",
-        "reported_tier": "gold",
-        "unscored": False,
+        "tier": tier,
+        "reported_tier": tier,
+        "unscored": unscored,
         "days_since_last_activity": away,
     }
     now = resolve_loyalty_status(ledger)
     decade = resolve_loyalty_status({**ledger, "days_since_last_activity": 3650})
+    expected_status = _EXPECTED_STATUS_BY_TIER.get(tier)
+    if expected_status is None:
+        reasons.append(
+            f"no published status expectation for tier {tier!r}, so this probe "
+            f"cannot judge {persona.persona_id!r}"
+        )
+    elif now.get("status_id") != expected_status:
+        reasons.append(
+            f"tier {tier!r} resolved to {now.get('status_id')!r}, not "
+            f"{expected_status!r}"
+        )
     if decade.get("status_id") != now.get("status_id"):
         reasons.append(
             f"a ten-year absence moved {now.get('status_id')!r} to "
@@ -1316,10 +1642,17 @@ def _probe_status_never_decays(persona: Persona) -> ProbeOutcome:
         not reasons,
         f"absent {away}d -> {now.get('status_id')!r}; absent 3650d -> "
         f"{decade.get('status_id')!r}",
-        observed={"days_away": away, "status": now.get("status_id"),
+        observed={"days_away": away, "experiential_tier": tier,
+                  "status": now.get("status_id"),
                   "status_after_10y": decade.get("status_id"),
                   "decays_on_inactivity": loyalty_status.STATUS_DECAYS_ON_INACTIVITY},
-        expected={"status_after_10y": now.get("status_id")},
+        # The persona's own tier, and the status that tier is supposed to earn.
+        # `status_after_10y: now.get("status_id")` was a restatement of the
+        # observation, so it agreed with the engine by construction and three
+        # personas on one rung produced one fingerprint.
+        expected={"experiential_tier": tier,
+                  "status": expected_status,
+                  "status_after_10y": expected_status},
         error="; ".join(reasons),
     )
 
@@ -1330,16 +1663,18 @@ def _probe_policy_motion_needs_evidence(persona: Persona) -> ProbeOutcome:
     Personas differ in the evidence they attach, so a ledger that accepted
     everything -- or refused everything -- would produce a constant answer and be
     graded partial rather than complete.
+
+    The evidence lives on the persona now, for the same reason ``region_id``
+    does. It used to sit in a local dict, and the two flows that ran this probe
+    happened to name personas whose entries were both empty, so two different
+    customers produced one fingerprint and the probe was blind. The interesting
+    case -- an *opinion* carrying four hundred samples -- was attached to a
+    persona id that no flow ever ran this probe for, so the one input that
+    separates "measured" from "well-attested" was never executed.
     """
     from app.services import policy_motion
 
-    attachments = {
-        "loyal_with_points": [{"kind": "measured_outcome", "samples": 400}],
-        "abandoned_pending": [{"kind": "observation", "samples": 40}],
-        "at_risk_high_value": [{"kind": "opinion", "samples": 400}],
-        "repeatedly_cancelled": [],
-    }
-    evidence = attachments.get(persona.persona_id, [])
+    evidence = [dict(item) for item in persona.motion_evidence]
     motion = policy_motion.build_motion(
         target="app.services.loyalty_status.LOYALTY_STATUS_RULES",
         evidence=evidence,
@@ -1363,7 +1698,12 @@ def _probe_policy_motion_needs_evidence(persona: Persona) -> ProbeOutcome:
         f"{len(evidence)} evidence item(s) -> {motion['verdict']}",
         observed={"evidence": evidence, "verdict": motion["verdict"],
                   "class_id": motion["class_id"]},
-        expected={"verdict": "sufficient" if sufficient else "insufficient"},
+        # States the evidence the persona carries, so the expectation is a
+        # property of the persona rather than a restatement of the engine's word
+        # for it. Two personas both carrying `[]` legitimately agree here; a
+        # persona carrying an opinion with 400 samples behind it does not.
+        expected={"verdict": "sufficient" if sufficient else "insufficient",
+                  "applied": False},
         error="; ".join(reasons),
     )
 
@@ -1661,12 +2001,18 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "actor": "customer",
         "personas": ("loyal_with_points", "repeatedly_cancelled", "dormant_45_days"),
         "subflows": ("aggregate_sections", "build_communication", "explain_decisions"),
+        # `policy_motion_needs_evidence` is here because "why has this person's
+        # value changed, and may it change again" is part of reading a 360 -- and
+        # because this flow runs three personas with three different evidence
+        # attachments, where the two flows that also name the probe run two
+        # personas whose evidence is identical.
         "probe_ids": (
             "retention_health_bands",
             "recovery_lifecycle_stage",
             "copilot_is_the_default_pane",
             "status_never_decays",
             "broken_promise_is_visible",
+            "policy_motion_needs_evidence",
         ),
         "surfaces": ("/chat/customer-360", "/chat/me/explanations"),
         "invariant": "a section that could not be built is named rather than omitted",
@@ -1811,11 +2157,38 @@ def run_all_flows(
     Flows that name an admin persona run for that persona alone -- the
     governance flow is not something ``chiara`` does, and pretending otherwise
     would put an admin-only probe in a customer journey.
+
+    ``flow_ids`` filters, and **used to be accepted and ignored**: the loop read
+    ``FLOW_CATALOG`` unconditionally, so ``run_all_flows(flow_ids=[one_flow])``
+    returned all twenty-one runs across all twelve flows. No caller and no test
+    passed it, which is exactly why it survived -- a parameter nobody exercises
+    is not a parameter anybody notices is broken. It is honoured now, and
+    ``test_run_all_flows_honours_its_flow_ids`` pins it, because the failure mode
+    of a silently ignored filter is a caller who believes it ran a subset and
+    reads the whole-set result as if it were the subset's.
+
+    An unknown id is refused by name, listing what exists. Silently dropping a
+    misspelled flow id would return an empty list, which reads as "everything
+    passed" rather than "you asked for something that does not exist".
     """
+    wanted: tuple[str, ...] | None
+    if flow_ids is None:
+        wanted = None
+    else:
+        wanted = tuple(_str_tuple(flow_ids))
+        unknown = [name for name in wanted if name not in FLOW_BY_ID]
+        if unknown:
+            raise ValueError(
+                f"unknown flow(s) {', '.join(sorted(unknown))}; known: "
+                f"{', '.join(FLOW_IDS)}"
+            )
     runs: list[FlowRun] = []
     for flow in FLOW_CATALOG:
+        flow_id = str(flow["flow_id"])
+        if wanted is not None and flow_id not in wanted:
+            continue
         for persona_id in _str_tuple(flow.get("personas")):
-            runs.append(run_flow(str(flow["flow_id"]), persona_id, environment=environment))
+            runs.append(run_flow(flow_id, persona_id, environment=environment))
     return runs
 
 
@@ -2356,11 +2729,43 @@ def _default_tolerance() -> float:
 
 
 def divergence_measurements(comparison: Mapping[str, Any]) -> dict[str, Any]:
-    """The ``shadow_divergence_within_tolerance`` gate's inputs, verbatim."""
+    """The ``shadow_divergence_within_tolerance`` gate's inputs, verbatim.
+
+    Plus ``regressions``, for ``regressions_none`` -- the gate that guards the
+    first level at which a customer can be affected, and the only blocking gate in
+    the ladder that **nothing in this repository could previously satisfy**.
+
+    ``compare_runs`` produced the evidence the whole time: an ``outcome_flip``
+    carries ``baseline_held`` and ``candidate_held``. Only the *regressions*
+    half of it is a regression, though. A flip from held to not-held is one;
+    a flip the other way is a fix, and counting it as a regression would mean a
+    change that repairs two broken probes is blocked until the fix is reverted,
+    which is the gate inverting its own purpose.
+    """
+    flips = list(comparison.get("outcome_flips") or [])
+    regressions = [
+        flip
+        for flip in flips
+        if bool(flip.get("baseline_held")) and not bool(flip.get("candidate_held"))
+    ]
+    improvements = [
+        flip
+        for flip in flips
+        if not bool(flip.get("baseline_held")) and bool(flip.get("candidate_held"))
+    ]
     return {
         "shadow_divergence_ratio": comparison.get("divergence_ratio", 0.0),
         "divergence_tolerance": comparison.get("tolerance"),
-        "outcome_flips": len(comparison.get("outcome_flips") or []),
+        "outcome_flips": len(flips),
+        "regressions": len(regressions),
+        "regressions_detail": [
+            f"{flip.get('flow_id')}/{flip.get('persona_id')}/{flip.get('subflow_id')}"
+            for flip in regressions
+        ],
+        # Reported beside the count rather than folded into it, so "the comparison
+        # found nothing" and "the comparison found only improvements" are
+        # distinguishable. Both satisfy the gate; only one is a quiet release.
+        "regressions_improvements": len(improvements),
     }
 
 
@@ -2538,6 +2943,99 @@ def _default_blockages_path() -> Optional[Path]:
 # Validation & catalog
 
 
+def check_probe_sharpness() -> dict[str, Any]:
+    """Probes that could not fail, and the personas that would have caught them.
+
+    ``capability_audit`` already reports ``blind_probes``: a probe every persona
+    answered identically, so a constant engine would pass. That is the right
+    measurement and it is only useful if somebody reads it, so this is the
+    standing question -- *"is this probe still able to fail?"* -- with the answer
+    attached to each probe.
+
+    Two kinds are reported separately, because they are different problems:
+
+    * ``constant_expectation`` -- every persona produced the same ``expected``.
+      Fixed for ``contact_hour_is_local`` by making the expected local hour a
+      hand-computed literal per region; its expectation now carries the number
+      rather than a boolean derived from the number under test.
+    * ``single_persona`` -- only one persona ever runs the probe, so there is no
+      contrast to draw even in principle. The remedy is to name a second persona
+      in a flow, and the remedy is a catalog edit rather than a probe edit.
+
+    Blindness is not automatically a defect. A probe asserting a *universal*
+    invariant -- every booking state is a real booking state -- genuinely is the
+    same for everybody, and making it persona-dependent would weaken it. What is
+    a defect is a probe whose docstring claims persona sensitivity it does not
+    have, which is why each row carries ``docstring_claims_variation``.
+    """
+    from app.capability_audit import _blind_probes
+
+    outcomes = [
+        outcome
+        for run in run_all_flows()
+        for outcome in run.outcomes
+        if not str(getattr(outcome, "error", "") or "")
+    ]
+    blind = _blind_probes(outcomes)
+
+    by_probe: dict[str, list[Any]] = {}
+    for outcome in outcomes:
+        by_probe.setdefault(str(outcome.subflow_id), []).append(outcome)
+
+    rows: list[dict[str, Any]] = []
+    for probe_id in PROBE_IDS:
+        probe_outcomes = by_probe.get(probe_id, [])
+        expectations = {
+            repr(sorted((str(k), repr(v)) for k, v in dict(o.expected).items()))
+            for o in probe_outcomes
+        }
+        docstring = str(PROBES[probe_id].__doc__ or "").lower()
+        claims_variation = any(
+            phrase in docstring
+            for phrase in ("persona matters", "personas differ", "differ *only*")
+        )
+        rows.append(
+            {
+                "probe_id": probe_id,
+                "personas": len({str(o.persona_id) for o in probe_outcomes}),
+                "distinct_expectations": len(expectations),
+                "constant_expectation": probe_id in blind,
+                "single_persona": len({str(o.persona_id) for o in probe_outcomes}) < 2,
+                "docstring_claims_variation": claims_variation,
+                # The defect: a probe that advertises persona sensitivity and
+                # cannot deliver it. This is what went unnoticed for four probes
+                # whose local lookup tables named a persona that does not exist.
+                "cannot_detect_its_own_bug": claims_variation and probe_id in blind,
+                "observed": {str(o.persona_id): dict(o.expected) for o in probe_outcomes},
+            }
+        )
+
+    unsharp = [row for row in rows if row["cannot_detect_its_own_bug"]]
+    return {
+        "generated_at": _now_iso(),
+        "probes": len(rows),
+        "sharp": len(rows) - len([r for r in rows if r["constant_expectation"]]),
+        "constant_expectation": sorted(
+            row["probe_id"] for row in rows if row["constant_expectation"]
+        ),
+        "single_persona": sorted(
+            row["probe_id"] for row in rows if row["single_persona"]
+        ),
+        "claims_variation_but_constant": sorted(
+            row["probe_id"] for row in unsharp
+        ),
+        "valid": not unsharp,
+        "rows": rows,
+        "note": (
+            "constant_expectation is not a verdict of uselessness: a universal "
+            "invariant is legitimately the same for everybody. What invalidates "
+            "the check is a probe whose own docstring claims the personas differ "
+            "and which cannot tell you how -- those are listed under "
+            "claims_variation_but_constant, and there must be none of them."
+        ),
+    }
+
+
 def validate_flows() -> dict[str, Any]:
     """Errors are catalog defects that would silently under-report; warnings are
     thin coverage."""
@@ -2602,6 +3100,29 @@ def validate_flows() -> dict[str, Any]:
                 probe_usage[probe_id] = probe_usage.get(probe_id, 0) + 1
         if not _str_tuple(flow.get("subflows")):
             errors.append(f"FLOW_CATALOG[{flow_id or index}] has no subflows")
+        # Declared business steps vs the checks that run. A warning rather than an
+        # error, deliberately, and the reason is worth recording.
+        #
+        # The two vocabularies are disjoint by construction: `subflows` holds
+        # business steps (`register`, `create_booking`, `event_log`) and the
+        # probes emit check ids (`access_band_resolves`, `complaint_is_routed`).
+        # Not one string is shared across the whole catalog -- 55 declared, 24
+        # executed, overlap empty -- so "55 of 55" is not a coverage ratio and
+        # any report that divides one by the other is dividing two languages.
+        #
+        # Promoting this to an error needs a threshold, and any threshold chosen
+        # today is a number picked to make the current tree pass. The honest
+        # version is the warning that names both counts, so the over-declaring is
+        # visible on every sweep, plus the error that already exists for the
+        # unambiguous case: a flow that exercises no probes at all.
+        declared_steps = len(_str_tuple(flow.get("subflows")))
+        declared_probes = len(probe_ids)
+        if declared_steps and declared_probes and declared_steps > declared_probes * 2:
+            warnings.append(
+                f"FLOW_CATALOG[{flow_id or index}] declares {declared_steps} "
+                f"business steps and names {declared_probes} probe(s); a reader "
+                f"comparing the two totals would read this as coverage"
+            )
         if not flow.get("invariant"):
             warnings.append(f"FLOW_CATALOG[{flow_id or index}] has no invariant")
         if not _str_tuple(flow.get("surfaces")):

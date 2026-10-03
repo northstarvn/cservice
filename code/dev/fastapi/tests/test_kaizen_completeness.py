@@ -407,17 +407,136 @@ class TestAssessment:
     def test_probe_coverage_is_reported_in_both_directions(self):
         """A registry that overstates its own coverage is a hole in the tests.
 
-        Two probes on this tree are registered, classified and never invoked by
-        any flow -- written, wired, and dead. The mirror image is a capability
-        nobody probes.
+        **This assertion used to assert the opposite, and it was wrong.** It
+        pinned ``posture_adjustment_is_effective`` and ``rule_pack_selects`` as
+        orphans, under a docstring reading "registered, classified and never
+        invoked by any flow -- written, wired, and dead." Both *were* invoked:
+        ``points_and_arrears_payment`` and ``support_agent_triage`` name them. The
+        audit derives "exercised" from the ``subflow_id`` a probe emits and
+        "registered" from its ``PROBES`` key, and both probes emitted a
+        *different* string from their key -- ``posture_adjustment_matches_its_row``
+        and ``rule_packs_select``. So two wired probes read as dead ones, and the
+        test was reporting the audit's bug as a fact about the product.
+
+        That is why this now asserts the direction that matters: **no registered
+        probe may be an orphan**, with a planted orphan as the negative control.
+        A registry check that only runs on a healthy tree proves nothing about the
+        registry.
         """
         from app import real_life_flows
 
         runs = real_life_flows.run_all_flows()
         report = real_life_flows.capability_report(runs)
-        assert "posture_adjustment_is_effective" in report["orphan_probes"]
-        assert "rule_pack_selects" in report["orphan_probes"]
+        assert report["orphan_probes"] == [], (
+            "a registered probe reported as never exercised: "
+            f"{report['orphan_probes']}"
+        )
         assert "topics" in report["untested"]
+
+    def test_a_probe_that_really_is_orphaned_is_still_reported(self):
+        """The negative control for the test above.
+
+        Remove a probe from every flow that names it and the audit has to notice.
+        Without this, "no orphans" is indistinguishable from an audit that cannot
+        detect one.
+
+        Note the two indexes: ``run_flow`` resolves a flow through
+        ``FLOW_BY_ID``, not by scanning ``FLOW_CATALOG``, so a test that edits
+        only the tuple edits nothing that runs. Both are patched here, and the
+        reason is worth knowing before writing the next one.
+        """
+        from app import real_life_flows
+
+        saved_catalog = real_life_flows.FLOW_CATALOG
+        saved_index = real_life_flows.FLOW_BY_ID
+        drop = "consent_gate_excludes_service"
+        flows = [
+            {
+                **flow,
+                "probe_ids": tuple(p for p in flow["probe_ids"] if p != drop),
+            }
+            for flow in saved_catalog
+        ]
+        real_life_flows.FLOW_CATALOG = tuple(flows)
+        real_life_flows.FLOW_BY_ID = {str(f["flow_id"]): f for f in flows}
+        try:
+            report = real_life_flows.capability_report(real_life_flows.run_all_flows())
+            assert drop in report["orphan_probes"], report["orphan_probes"]
+        finally:
+            real_life_flows.FLOW_CATALOG = saved_catalog
+            real_life_flows.FLOW_BY_ID = saved_index
+
+    def test_every_probe_emits_the_subflow_id_it_is_registered_under(self):
+        """The invariant the orphan list was quietly measuring.
+
+        A probe whose emitted ``subflow_id`` differs from its registry key is
+        invisible to two systems at once: ``capability_audit`` cannot match it to
+        a capability, and ``_classify`` has no branch for it, so it falls through
+        to ``invariant_violated`` instead of the category that names the defect.
+        Checked directly, per persona, because "every persona agrees" is not the
+        claim.
+        """
+        from app import real_life_flows
+
+        for probe_id, probe in real_life_flows.PROBES.items():
+            for persona in real_life_flows.PERSONAS:
+                outcome = probe(persona)
+                assert outcome.subflow_id == probe_id, (
+                    f"{probe_id} emits {outcome.subflow_id!r} for "
+                    f"{persona.persona_id!r}"
+                )
+
+    def test_every_probe_that_claims_persona_variation_can_actually_detect_it(self):
+        """A probe that advertises sensitivity and cannot deliver it is a false negative.
+
+        Four probes carried docstrings saying "personas differ ..." while every
+        persona produced one identical expectation, because each branched on a
+        local dict keyed on ``persona_id`` -- and two of the keys in each dict
+        named a persona that does not exist, so the branch could never execute.
+        The audits reported them blind; nobody read that as a defect.
+        """
+        from app import real_life_flows
+
+        report = real_life_flows.check_probe_sharpness()
+        assert report["claims_variation_but_constant"] == [], report[
+            "claims_variation_but_constant"
+        ]
+        assert report["valid"] is True
+
+    def test_a_probe_whose_expectation_cannot_fail_is_reported_blind(self):
+        """The negative control for the sharpness check above.
+
+        Replace one probe with a constant, and the check has to notice. Otherwise
+        ``check_probe_sharpness()["valid"] is True`` is a claim about a function
+        that returns True.
+        """
+        from app import real_life_flows
+
+        saved = real_life_flows.PROBES["contact_hour_is_local"]
+
+        def constant(persona):
+            """Personas differ *only* in region, at one fixed UTC moment."""
+            return saved(persona).__class__(
+                subflow_id="contact_hour_is_local",
+                persona_id=persona.persona_id,
+                held=True,
+                summary="constant",
+                observed={},
+                expected={"local_hour": 9},
+            )
+
+        # The docstring is copied deliberately. `check_probe_sharpness` decides
+        # whether a probe *claims* persona variation by reading it, so a stand-in
+        # without the claim would pass the check and the negative control would
+        # be measuring the wrong thing.
+        constant.__doc__ = saved.__doc__
+        real_life_flows.PROBES["contact_hour_is_local"] = constant
+        try:
+            report = real_life_flows.check_probe_sharpness()
+            assert "contact_hour_is_local" in report["constant_expectation"]
+            assert report["valid"] is False, report["claims_variation_but_constant"]
+        finally:
+            real_life_flows.PROBES["contact_hour_is_local"] = saved
 
     def test_every_unfinished_row_carries_its_evidence(self):
         """A completeness verdict with no evidence is an oracle with no audit trail."""
@@ -1002,3 +1121,114 @@ class TestSweepEndpoint:
         body = response.json()
         assert body["autorun_enabled"] is False
         assert "interval_seconds" in body
+
+# ===========================================================================
+# The flow filter
+# ===========================================================================
+
+
+class TestRunAllFlowsHonoursItsFlowIds:
+    """``run_all_flows(flow_ids=...)`` used to be accepted and ignored.
+
+    Two things made it survive. The loop read ``FLOW_CATALOG`` unconditionally,
+    so a filtered call returned every run in the catalogue; and no caller and no
+    test passed the argument, so there was nothing to fail. The parameter's own
+    docstring claims this test by name, which is why it exists -- a docstring
+    citing a test is a promise, and a promise with no test is the same defect one
+    layer down.
+
+    The failure mode being guarded against is specific and worth stating: a
+    caller who asks for one flow, gets twenty-one runs, and reads the aggregate
+    as if it were their subset's. Every aggregate this function produces --
+    ``flows_run``, ``flows_failed``, ``subflows_deferred`` -- is then a
+    whole-set number wearing a subset's label.
+    """
+
+    def test_a_filtered_call_returns_only_the_flows_asked_for(self):
+        from app import real_life_flows
+
+        wanted = "admin_governance_review"
+        assert wanted in real_life_flows.FLOW_IDS, sorted(real_life_flows.FLOW_IDS)
+
+        runs = real_life_flows.run_all_flows(flow_ids=[wanted])
+
+        assert runs, "the filter returned nothing at all"
+        assert {run.flow_id for run in runs} == {wanted}, (
+            "the filter did not filter: "
+            f"{sorted({run.flow_id for run in runs})}"
+        )
+
+    def test_no_filter_still_returns_the_whole_catalogue(self):
+        """The other direction, so the first test cannot pass by breaking the default.
+
+        Without this, a filter that returned exactly one flow always would satisfy
+        the test above while ``run_all_flows()`` -- which every gate measurement
+        depends on -- returned a single row.
+        """
+        from app import real_life_flows
+
+        every = real_life_flows.run_all_flows()
+        one = real_life_flows.run_all_flows(flow_ids=[real_life_flows.FLOW_IDS[0]])
+
+        assert len({run.flow_id for run in every}) == len(real_life_flows.FLOW_IDS)
+        assert len(every) > len(one), (
+            f"filtering one flow left {len(one)} of {len(every)} runs"
+        )
+
+    def test_two_flows_return_the_union_and_nothing_more(self):
+        from app import real_life_flows
+
+        pair = list(real_life_flows.FLOW_IDS[:2])
+        runs = real_life_flows.run_all_flows(flow_ids=pair)
+
+        assert {run.flow_id for run in runs} == set(pair), sorted(
+            {run.flow_id for run in runs}
+        )
+        # A repeated id collapses rather than running the flow twice, because two
+        # copies of the same run would double every count the caller derives.
+        again = real_life_flows.run_all_flows(flow_ids=pair + [pair[0]])
+        assert len(again) == len(runs), (len(again), len(runs))
+
+    def test_an_unknown_flow_id_is_refused_by_name(self):
+        """An empty result would read as "everything passed".
+
+        The caller asked for something that does not exist, and the answer they
+        would otherwise get is an empty list -- which every aggregate built from
+        it turns into ``flows_run: 0`` and, for several gates, into a pass.
+        """
+        from app import real_life_flows
+
+        with pytest.raises(ValueError) as excinfo:
+            real_life_flows.run_all_flows(flow_ids=["no_such_flow"])
+
+        message = str(excinfo.value)
+        assert "no_such_flow" in message, message
+        assert "known:" in message, (
+            "the refusal does not say what does exist, so it is not actionable: "
+            f"{message}"
+        )
+
+    def test_one_unknown_id_among_known_ones_still_refuses(self):
+        """Refusing only the unknown half would run a subset and call it the request."""
+        from app import real_life_flows
+
+        with pytest.raises(ValueError) as excinfo:
+            real_life_flows.run_all_flows(
+                flow_ids=[real_life_flows.FLOW_IDS[0], "typoed_flow"]
+            )
+
+        assert "typoed_flow" in str(excinfo.value), excinfo.value
+
+    def test_an_empty_filter_runs_nothing_rather_than_everything(self):
+        """``flow_ids=[]`` is a question about zero flows, not about all of them.
+
+        Worth pinning because the obvious implementation -- ``if flow_ids:`` --
+        treats the empty list as "no filter given" and returns everything, which
+        is the exact inversion.
+        """
+        from app import real_life_flows
+
+        assert real_life_flows.run_all_flows(flow_ids=[]) == []
+        assert real_life_flows.run_all_flows(flow_ids=None), (
+            "`None` must still mean 'no filter'"
+        )

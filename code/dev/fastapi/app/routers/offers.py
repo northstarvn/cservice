@@ -341,10 +341,21 @@ async def admin_record_outcome(
 ):
     """Mark an accepted offer fulfilled, or close one as expired.
 
-    Refuses both from ``offered``. An offer nobody accepted cannot be fulfilled
-    and one that has not been fulfilled has not expired -- recording either
-    would let an operator close an offer the customer is about to accept, which
-    is the one race in this subsystem worth naming.
+    Refuses ``fulfil`` from ``offered`` but **allows** ``expire`` from it. The
+    asymmetry is the design and the old comment here got it backwards, which is
+    worth recording because "refuses both" sounds stricter than the code is:
+
+    * ``offered -> fulfilled`` is refused because an offer nobody accepted has
+      not been given, and marking it delivered would credit value for a decision
+      the customer never made. That is the race this endpoint exists to close.
+    * ``offered -> expired`` is allowed because an offer whose own clock ran out
+      *is* expired, whether or not anybody acted on it. ``expire_offers_due``
+      does exactly this move in the background; refusing it here would leave an
+      operator unable to tidy up what the sweeper already considers finished.
+
+    Both refusals return **200 with ``recorded: false`` and the reason**, not an
+    error, for the same reason accepts do: the operator asked whether an offer
+    closed and the answer is "no, and here is why".
     """
     try:
         result = await customer_offers.record_outcome(

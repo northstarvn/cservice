@@ -1011,6 +1011,17 @@ class DeploymentLedger:
         target = self.event(target_event_id)
         if target is None:
             raise ValueError(f"no such deployment event {target_event_id!r}")
+        current = self.current()
+        if current is not None and self._version_pair(target) == self._version_pair(current):
+            # Checked before the window check, because the window check's message
+            # would be wrong in exactly this case: the event is inside the window
+            # and ineligible for a different reason, and an operator told "outside
+            # the window" would go looking for a pruning bug that does not exist.
+            raise ValueError(
+                f"{target_event_id} is already the version being served "
+                f"({target['code_version']}, {target['data_version']}); rolling back to it "
+                "would append a no-op to the audit trail"
+            )
         eligible = self.rollback_targets()
         if not any(row["event_id"] == target_event_id for row in eligible):
             raise ValueError(
@@ -1045,9 +1056,22 @@ class DeploymentLedger:
     def rollback_targets(self) -> list[dict[str, Any]]:
         """The events a rollback may restore, newest first.
 
-        Excludes the event that is currently live: rolling back to where you
-        already are is not a rollback, it is a no-op that would append a
-        misleading event to the audit trail.
+        Excludes any event whose code+data pair is **already being served**, not
+        just the last event. Rolling back to where you already are is not a
+        rollback, it is a no-op that would append a misleading event to the audit
+        trail.
+
+        Excluding only the last event was enough until the first rollback happened.
+        A rollback appends rather than rewrites, so it leaves the restored event
+        last-but-one while a *later* event carrying the same pair sits behind it --
+        and then the ledger would happily offer that event, restoring the version
+        already running and writing a `rollback` event onto the sequence to say so.
+        ``POST /deployments/{id}/rollback`` answered 201 for the second rollback of
+        an already-rolled-back event, leaving `current()` unchanged and the audit
+        trail claiming two undos where there was one. The pair is the comparison
+        rather than the position because the pair is what a rollback restores: two
+        events with equal pairs are indistinguishable to everything downstream of
+        this ledger.
         """
         live = self.live_events()
         if len(live) <= 1:
@@ -1057,8 +1081,16 @@ class DeploymentLedger:
         # event -- the one furthest outside the window and the least likely to be
         # wanted -- while offering a rollback to where you already are, which is
         # the one thing that must never be offered.
-        historical = live[:-1]
+        served = self._version_pair(live[-1])
+        historical = [
+            row for row in live[:-1] if self._version_pair(row) != served
+        ]
         return [dict(row) for row in reversed(historical[-ROLLBACK_WINDOW:])]
+
+    @staticmethod
+    def _version_pair(row: Mapping[str, Any]) -> tuple[str, str]:
+        """The identity a rollback restores: code and data together, or neither."""
+        return (str(row.get("code_version") or ""), str(row.get("data_version") or ""))
 
     def window_reach(self) -> int:
         """How far back a rollback currently reaches, in events."""

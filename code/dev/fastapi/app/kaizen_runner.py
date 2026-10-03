@@ -40,9 +40,11 @@ KAIZEN_AUTORUN = os.getenv("CSERVICE_KAIZEN_AUTORUN", "0").strip().lower() in {
     "yes",
     "on",
 }
-#: How often, once enabled. Generous on purpose: a sweep runs 21 flows, resolves
-#: twelve modules and walks the route table, and there is no value in re-deciding
-#: on a loop tight enough to show up in a profile.
+#: How often, once enabled. Generous on purpose: a sweep runs 21 flow-persona
+#: pairs across 12 flows, resolves twelve modules and walks the route table, and
+#: there is no value in re-deciding on a loop tight enough to show up in a
+#: profile. (21 is pairs, not flows. The two numbers were conflated in a comment
+#: here for a while, which is harmless until somebody greps for "21 flows".)
 KAIZEN_INTERVAL_SECONDS = float(os.getenv("CSERVICE_KAIZEN_INTERVAL", "900"))
 #: Whether the scheduled run may write to BLOCKAGES.md. Off by default; see the
 #: module docstring for why an automatic writer is worse than no writer.
@@ -124,6 +126,50 @@ def run_sweep(
         flows_section["ok"] = False
         flows_section["error"] = f"{type(exc).__name__}: {exc}"
         runs = []
+
+    # --- 1b. what would change between two runs of the same tree.
+    #
+    # This exists because `shadow_divergence_within_tolerance` was unreachable
+    # from anywhere the product runs: it needs `compare_runs`, and nothing in
+    # `app/` called it. Every sweep therefore reported the gate as `unmeasured`,
+    # `GATE_OPS` folds unmeasured to *fail*, and the canary rung could not be
+    # reached by construction -- while an unmeasured gate and a passing one look
+    # identical in the daily summary.
+    #
+    # **What this measurement is, stated exactly:** with no candidate tree to
+    # compare against, both sides are the same tree, so this is a *reproducibility*
+    # check, not a live-versus-shadow comparison. It catches a probe that reads
+    # the wall clock, iterates a set, or depends on module state another flow
+    # left behind -- all of which are real defects, and all of which would make a
+    # later real comparison meaningless. It does **not** tell you a change is
+    # safe.
+    #
+    # The `kind` key is on the payload so nobody has to guess which of the two
+    # they are reading, and the measurements are only folded into the ladder when
+    # the comparison actually ran -- failing to compare must not hand the gate a
+    # zero it did not earn.
+    divergence_section: dict[str, Any] = {}
+    try:
+        comparison = real_life_flows.compare_runs(
+            runs, real_life_flows.run_all_flows(environment=environment)
+        )
+        divergence_section = {
+            "ok": True,
+            "kind": "self_reproducibility",
+            "note": (
+                "both sides are the same tree: this measures whether the flows "
+                "reproduce, which is a precondition for a real shadow comparison "
+                "and is not one"
+            ),
+            "comparison": comparison,
+            "measurements": real_life_flows.divergence_measurements(comparison),
+        }
+    except Exception as exc:  # noqa: BLE001 - a sweep must finish
+        divergence_section = {
+            "ok": False,
+            "kind": "self_reproducibility",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     # --- 2. completeness, from the same run set
     completeness_section: dict[str, Any] = {}
@@ -217,6 +263,12 @@ def run_sweep(
         )
         if shadow_section.get("ok"):
             measurements["shadow_isolated"] = bool(shadow_section["isolated"])
+        # The divergence ratio reaches the ladder only when the comparison ran.
+        # A sweep that could not compare leaves the gate unmeasured, which is the
+        # honest outcome: a gate fed a default zero here would read as "the
+        # candidate and live agreed" when in fact nothing was compared.
+        if divergence_section.get("ok"):
+            measurements.update(divergence_section["measurements"])
         candidate = release_ladder.ReleaseCandidate(
             candidate_id="sweep",
             code_version="code:this-process",
@@ -249,6 +301,7 @@ def run_sweep(
         ladder_section = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     payload["flows"] = flows_section
+    payload["divergence"] = divergence_section
     payload["completeness"] = completeness_section
     payload["blockages"] = blockages_section
     payload["shadow"] = shadow_section
@@ -318,7 +371,15 @@ def exit_code(payload: Mapping[str, Any]) -> int:
     return the same number. A CI job that reads 0 as both green and broken is a
     CI job that has stopped running.
     """
-    sections = ("flows", "completeness", "blockages", "shadow", "authorization", "ladder")
+    sections = (
+        "flows",
+        "divergence",
+        "completeness",
+        "blockages",
+        "shadow",
+        "authorization",
+        "ladder",
+    )
     for name in sections:
         section = payload.get(name)
         if isinstance(section, Mapping) and section.get("ok") is False:
@@ -352,6 +413,20 @@ def summarize(payload: Mapping[str, Any]) -> str:
         )
     else:
         lines.append(f"flows          FAILED: {flows.get('error')}")
+
+    # The reproducibility check gets its own line, and names what kind of
+    # comparison it is. Without the label a reader sees "divergence 0.0" and
+    # concludes a candidate was compared against live, which nothing did.
+    divergence = payload.get("divergence") or {}
+    if divergence.get("ok"):
+        dm = divergence.get("measurements") or {}
+        lines.append(
+            f"divergence     {dm.get('shadow_divergence_ratio')} "
+            f"(self-reproducibility, tolerance {dm.get('divergence_tolerance')}, "
+            f"{dm.get('outcome_flips')} outcome flip(s))"
+        )
+    else:
+        lines.append(f"divergence     FAILED: {divergence.get('error')}")
 
     comp = payload.get("completeness") or {}
     if comp.get("ok"):

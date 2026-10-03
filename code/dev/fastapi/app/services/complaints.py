@@ -3010,7 +3010,23 @@ async def assign_complaint(
 
     previous_owner = case.owner_user_id
     previous_team = str(case.owner_team or "")
-    case.owner_user_id = None if owner_user_id is None else int(owner_user_id)
+    # `owner_user_id` is now treated the same way `owner_team` already was: a
+    # field you did not send is a field you are not changing.
+    #
+    # It used to be `case.owner_user_id = None if owner_user_id is None else
+    # int(owner_user_id)`, so **omitting the owner cleared it**. The observable
+    # consequence: `acknowledge_complaint` auto-puts the acting operator on the
+    # case, and the natural next call -- route it to the team that owns billing --
+    # is `{"owner_team": "billing_ops"}`, which silently produced an unowned case.
+    # The case then appears in `/complaints/admin/queue`'s `unowned` list, which is
+    # the surface whose entire job is telling an operator a case has nobody on
+    # it. Two optional fields in one schema, one replace-if-sent and one always
+    # replace, and no way to express "change the team, keep me on it".
+    #
+    # Clearing is still available: pass `owner_user_id=0`, which is not a user id
+    # and so cannot be meant as "assign nobody" by accident.
+    if owner_user_id is not None:
+        case.owner_user_id = int(owner_user_id)
     if owner_team:
         case.owner_team = str(owner_team)
     case.tier = target_tier

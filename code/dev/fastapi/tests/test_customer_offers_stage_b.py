@@ -22,6 +22,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from pathlib import Path
+from tests._doubles import SqliteHarness
+
 
 # ===========================================================================
 # Fakes
@@ -100,6 +103,102 @@ class _Db:
         return [row for row in self.added if type(row).__name__ == "CustomerOfferEvent"]
 
 
+# ===========================================================================
+# Real-database helpers, for the tests that mutate
+# ===========================================================================
+#
+# Anything that *changes* an offer needs a real database, because the change is
+# now made by a conditional ``UPDATE`` and the correctness of the whole
+# subsystem is the row count that comes back. ``_Db`` cannot answer that -- it
+# returns its canned rows for every statement -- so a mutator test on ``_Db``
+# would assert the service's own assumption back at itself and call it a pass.
+# The queries are still built for real either way, so the ``_Db`` tests below
+# keep doing what they are good at: pinning which predicates the service emits.
+
+
+@pytest.fixture()
+def harness():
+    """A real in-memory database per test. See ``tests/_doubles.SqliteHarness``."""
+    h = SqliteHarness()
+    h.run(h.setup())
+    try:
+        yield h
+    finally:
+        h.run(h.teardown())
+        h.close()
+
+
+async def _offer_row(session, reference: str):
+    from sqlalchemy import select
+
+    from app import models
+
+    result = await session.execute(
+        select(models.CustomerOffer).where(models.CustomerOffer.reference == reference)
+    )
+    return result.scalars().first()
+
+
+async def _event_kinds(session, reference: str) -> list[str]:
+    from sqlalchemy import select
+
+    from app import models
+
+    row = await _offer_row(session, reference)
+    result = await session.execute(
+        select(models.CustomerOfferEvent)
+        .where(models.CustomerOfferEvent.offer_id == int(row.id))
+        .order_by(models.CustomerOfferEvent.id)
+    )
+    return [event.kind for event in result.scalars().all()]
+
+
+async def _wallet_balance(session, user_id: int = 1) -> float:
+    from sqlalchemy import select
+
+    from app import models
+
+    result = await session.execute(
+        select(models.PointsWallet).where(models.PointsWallet.user_id == int(user_id))
+    )
+    wallet = result.scalars().first()
+    return float(getattr(wallet, "balance", 0.0) or 0.0)
+
+
+def _row_double(**overrides):
+    """A plain-object offer row for the ``_Db`` query-building tests.
+
+    Deliberately not an ORM instance. ``_Db`` never executes SQL, so the claim
+    these tests carry is which *predicates the service builds* -- "one customer
+    cannot accept another's offer" is a statement about the lookup, and a fake
+    that ignored the ``user_id`` clause would make it unassertable.
+    """
+    values = {
+        "id": 1,
+        "user_id": 1,
+        "reference": "OFF-00000001",
+        "offer_kind": "goodwill",
+        "source_offer_id": "save_high",
+        "status": "offered",
+        "headline": "A credit from us",
+        "points": 250.0,
+        "discount_percent": 0.0,
+        "waiver_type": "",
+        "priority": "",
+        "generosity_scale": 1.0,
+        "expires_at": None,
+        "issued_at": datetime(2026, 10, 1, tzinfo=timezone.utc),
+        "accepted_at": datetime(2026, 10, 1, tzinfo=timezone.utc),
+        "declined_at": None,
+        "fulfilled_at": None,
+        "decline_reason": "",
+        "follow_up_due_at": datetime(2026, 10, 3, tzinfo=timezone.utc),
+    }
+    values.update(overrides)
+    row = type("_Row", (), values)()
+    return row
+
+
 class _Select:
     def where(self, *a, **k):
         return self
@@ -109,10 +208,25 @@ class _Select:
 
 
 @pytest.fixture(autouse=True)
-def _statement_is_fake(monkeypatch):
-    """Make ``select`` return a chainable fake so the tests need no database."""
+def _statement_is_fake(monkeypatch, request):
+    """Make ``select`` return a chainable fake so the tests need no database.
+
+    **Backs off for any test that asks for the ``harness`` fixture.** That opt-out
+    is not a convenience -- it was added because this fixture was quietly applying
+    to tests that needed a real database, and a file-wide fake is invisible from
+    inside any one test. A test that swaps out the ORM's statement builder cannot
+    assert anything about how a statement is evaluated, so every such test was
+    passing on the service's own assumptions: the ``WHERE status = 'offered'`` on
+    the conditional write that makes concurrent accept and decline safe was not
+    being checked by anything, in this file or any other.
+
+    The fixture stays for the tests it suits. What those tests are actually for
+    is pinned in the comment above the real-database helpers.
+    """
     from app.services import customer_offers
 
+    if "harness" in request.fixturenames:
+        return
     monkeypatch.setattr(customer_offers, "select", lambda *a, **k: _Select())
 
 
@@ -687,75 +801,100 @@ class TestIssuing:
 
 
 class TestAccept:
-    def _offer(self, **kwargs):
-        from app.services import customer_offers
+    """Accept, against a real database.
 
-        class _Row:
-            id = 1
-            user_id = 1
-            reference = "OFF-00000001"
-            offer_kind = "goodwill"
-            source_offer_id = "save_high"
-            status = "offered"
-            headline = "A credit from us"
-            points = 250.0
-            discount_percent = 15.0
-            waiver_type = ""
-            priority = ""
-            generosity_scale = 1.0
-            expires_at = datetime(2026, 10, 5, tzinfo=timezone.utc)
-            issued_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
-            accepted_at = None
-            declined_at = None
-            fulfilled_at = None
-            decline_reason = ""
-            follow_up_due_at = datetime(2026, 10, 3, tzinfo=timezone.utc)
+    These were on the ``_Db`` double until the conditional write landed, and the
+    double could not survive it -- ``_Db.execute`` returns its canned rows for
+    *any* statement, so ``UPDATE ... WHERE status = 'offered'`` came back as a
+    result with no row count and the invariant under test simply evaporated.
+    That is the ``_Db`` docstring's own point ("a session double asserts your own
+    assumptions back at you") arriving as a concrete failure rather than as a
+    philosophy, so these tests now use ``SqliteHarness`` and the ``WHERE`` clause
+    is genuinely evaluated.
 
-        for key, value in kwargs.items():
-            setattr(_Row, key, value)
-        return _Row()
+    The doubles are still the right tool for the query-*building* tests below,
+    where the claim is about which predicates the service emits.
+    """
+
+    @staticmethod
+    async def _seed(harness, **overrides):
+        """A real ``goodwill`` offer row, and the reference to act on."""
+        from app import models
+
+        values = {
+            "user_id": 1,
+            "reference": "OFF-00000001",
+            "offer_kind": "goodwill",
+            "source_offer_id": "save_high",
+            "status": "offered",
+            "headline": "A credit from us",
+            "points": 250.0,
+            "discount_percent": 15.0,
+            "waiver_type": "",
+            "priority": "",
+            "generosity_scale": 1.0,
+            "expires_at": datetime(2026, 10, 5, tzinfo=timezone.utc),
+            "issued_at": datetime(2026, 10, 1, tzinfo=timezone.utc),
+            "accepted_at": None,
+            "declined_at": None,
+            "fulfilled_at": None,
+            "decline_reason": "",
+            "follow_up_due_at": datetime(2026, 10, 3, tzinfo=timezone.utc),
+        }
+        values.update(overrides)
+        session = harness.session
+        session.add(models.User(id=1, username="u1", email="u1@e.com", full_name="U", hashed_password="x"))
+        await session.flush()
+        session.add(models.CustomerOffer(**values))
+        await session.commit()
+        return session, values["reference"]
 
     @pytest.mark.asyncio
-    async def test_one_tap_accepts(self):
+    async def test_one_tap_accepts(self, harness):
         from app.services import customer_offers
 
-        db = _Db([self._offer()], scope_user_id=1)
-        result = await customer_offers.accept_offer(db, "OFF-00000001", user_id=1)
+        db, reference = await self._seed(harness)
+        result = await customer_offers.accept_offer(db, reference, user_id=1)
         assert result["accepted"] is True
+        assert result["found"] is True
         assert result["status"] == "accepted"
         assert result["awaiting_fulfilment"] is True
+        # And the row really moved, which the double could not have told us.
+        await db.refresh(await _offer_row(db, reference))
+        assert (await _offer_row(db, reference)).status == "accepted"
 
     @pytest.mark.asyncio
-    async def test_pressing_twice_is_not_an_error(self):
+    async def test_pressing_twice_is_not_an_error(self, harness):
         """The customer asked "did that work?" and the answer must never be a
         stack trace.
         """
         from app.services import customer_offers
 
-        db = _Db([self._offer()], scope_user_id=1)
-        await customer_offers.accept_offer(db, "OFF-00000001", user_id=1)
-        again = await customer_offers.accept_offer(db, "OFF-00000001", user_id=1)
+        db, reference = await self._seed(harness)
+        await customer_offers.accept_offer(db, reference, user_id=1)
+        again = await customer_offers.accept_offer(db, reference, user_id=1)
         assert again["accepted"] is False
+        assert again["found"] is True
         assert again["status"] == "accepted"
         assert "cannot be accepted" in again["reason"]
 
     @pytest.mark.asyncio
-    async def test_accepting_an_expired_offer_says_so_and_persists_the_expiry(self):
+    async def test_accepting_an_expired_offer_says_so_and_persists_the_expiry(self, harness):
         from app.services import customer_offers
 
-        db = _Db(
-            [self._offer(expires_at=datetime(2026, 9, 1, tzinfo=timezone.utc))],
-            scope_user_id=1,
+        db, reference = await self._seed(
+            harness, expires_at=datetime(2026, 9, 1, tzinfo=timezone.utc)
         )
         result = await customer_offers.accept_offer(
-            db, "OFF-00000001", user_id=1,
+            db, reference, user_id=1,
             now=datetime(2026, 10, 1, tzinfo=timezone.utc),
         )
         assert result["accepted"] is False
         assert result["status"] == "expired"
         # The row stops claiming to be open, so no later read rediscovers it.
-        assert db._rows[0].status == "expired"
-        assert "expired" in [event.kind for event in db.events()]
+        row = await _offer_row(db, reference)
+        assert row.status == "expired"
+        assert "expired" in await _event_kinds(db, reference)
 
     @pytest.mark.asyncio
     async def test_an_unknown_reference_is_reported_not_raised(self):
@@ -772,42 +911,45 @@ class TestAccept:
         from app.services import customer_offers
 
         result = await customer_offers.accept_offer(
-            _Db([self._offer()], scope_user_id=999), "OFF-00000001", user_id=999
+            _Db([_row_double()], scope_user_id=999), "OFF-00000001", user_id=999
         )
         assert result["found"] is False
 
 
 class TestDecline:
     @pytest.mark.asyncio
-    async def test_declining_records_the_free_text_reason(self):
+    async def test_declining_records_the_free_text_reason(self, harness):
         from app.services import customer_offers
 
-        db = _Db([TestAccept()._offer()], scope_user_id=1)
+        db, reference = await TestAccept._seed(harness)
         result = await customer_offers.decline_offer(
-            db, "OFF-00000001", user_id=1, reason="I still have not had the repair"
+            db, reference, user_id=1, reason="I still have not had the repair"
         )
         assert result["declined"] is True
-        assert db._rows[0].decline_reason == "I still have not had the repair"
+        assert result["found"] is True
+        assert (await _offer_row(db, reference)).decline_reason == (
+            "I still have not had the repair"
+        )
         assert result["reason_recorded"] is True
 
     @pytest.mark.asyncio
-    async def test_the_response_tells_them_the_problem_is_not_resolved(self):
+    async def test_the_response_tells_them_the_problem_is_not_resolved(self, harness):
         """People read declining an apology as "the matter is closed", and then
         stop telling us about the thing that is still broken.
         """
         from app.services import customer_offers
 
-        db = _Db([TestAccept()._offer()], scope_user_id=1)
-        result = await customer_offers.decline_offer(db, "OFF-00000001", user_id=1)
+        db, reference = await TestAccept._seed(harness)
+        result = await customer_offers.decline_offer(db, reference, user_id=1)
         assert "not a statement that the problem is resolved" in result["next"]
 
     @pytest.mark.asyncio
-    async def test_a_declined_offer_cannot_then_be_accepted(self):
+    async def test_a_declined_offer_cannot_then_be_accepted(self, harness):
         from app.services import customer_offers
 
-        db = _Db([TestAccept()._offer()], scope_user_id=1)
-        await customer_offers.decline_offer(db, "OFF-00000001", user_id=1)
-        after = await customer_offers.accept_offer(db, "OFF-00000001", user_id=1)
+        db, reference = await TestAccept._seed(harness)
+        await customer_offers.decline_offer(db, reference, user_id=1)
+        after = await customer_offers.accept_offer(db, reference, user_id=1)
         assert after["accepted"] is False
         assert after["status"] == "declined"
 
@@ -818,58 +960,49 @@ class TestDecline:
 
 
 class TestRecordOutcome:
+    """Fulfil and expire, against a real database.
+
+    Real here for two reasons. The conditional write needs a real row count, as
+    in :class:`TestAccept`. And the fulfilment path now *moves a wallet balance*,
+    which a session double cannot represent at all -- so this class is where the
+    second defect's fix is actually pinned.
+    """
+
     @staticmethod
-    def _offer(status="accepted"):
-        """An offer row with a settable status, as a plain class for the fake."""
-
-        class _Row:
-            id = 1
-            user_id = 1
-            reference = "OFF-00000001"
-            offer_kind = "goodwill"
-            points = 250.0
-            discount_percent = 0.0
-            waiver_type = ""
-            priority = ""
-            generosity_scale = 1.0
-            expires_at = None
-            issued_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
-            accepted_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
-            declined_at = None
-            fulfilled_at = None
-            decline_reason = ""
-            follow_up_due_at = datetime(2026, 10, 3, tzinfo=timezone.utc)
-
-        _Row.status = status
-        return _Row()
+    async def _seed(harness, status="accepted", **overrides):
+        return await TestAccept._seed(
+            harness, status=status, discount_percent=0.0, **overrides
+        )
 
     @pytest.mark.asyncio
-    async def test_fulfilling_an_accepted_offer_records_it(self):
+    async def test_fulfilling_an_accepted_offer_records_it(self, harness):
         from app.services import customer_offers
 
-        db = _Db([self._offer()])
+        db, reference = await self._seed(harness)
         result = await customer_offers.record_outcome(
-            db, "OFF-00000001", "fulfil", actor="admin:ana"
+            db, reference, "fulfil", actor="admin:ana"
         )
         assert result["recorded"] is True
         assert result["status"] == "fulfilled"
+        assert (await _offer_row(db, reference)).status == "fulfilled"
+        assert await _event_kinds(db, reference) == ["fulfilled"]
 
     @pytest.mark.asyncio
-    async def test_an_offer_nobody_accepted_cannot_be_fulfilled(self):
+    async def test_an_offer_nobody_accepted_cannot_be_fulfilled(self, harness):
         """Otherwise an operator could close an offer the customer is mid-tap on,
         and the loser of that race is a customer pressing accept on an error.
         """
         from app.services import customer_offers
 
-        db = _Db([self._offer(status="offered")])
+        db, reference = await self._seed(harness, status="offered")
         result = await customer_offers.record_outcome(
-            db, "OFF-00000001", "fulfil", actor="admin:ana"
+            db, reference, "fulfil", actor="admin:ana"
         )
         assert result["recorded"] is False
         assert "offered -> fulfilled" in result["reason"]
 
     @pytest.mark.asyncio
-    async def test_an_open_offer_can_be_expired_but_not_fulfilled(self):
+    async def test_an_open_offer_can_be_expired_but_not_fulfilled(self, harness):
         """The asymmetry, which is the design.
 
         Expiry from `offered` is legitimate and has to be expressible twice over:
@@ -880,14 +1013,19 @@ class TestRecordOutcome:
         """
         from app.services import customer_offers
 
-        db = _Db([self._offer(status="offered")])
+        db, reference = await self._seed(harness, status="offered")
         result = await customer_offers.record_outcome(
-            db, "OFF-00000001", "expire", actor="admin:ana"
+            db, reference, "expire", actor="admin:ana"
         )
         assert result["recorded"] is True
         assert result["status"] == "expired"
         # Expiring clears the follow-up clock: there is nothing left to chase.
-        assert db._rows[0].follow_up_due_at is None
+        assert (await _offer_row(db, reference)).follow_up_due_at is None
+        # ...and expiry applies no effect, so there is nothing to report having
+        # done. Asserted because `effect` is deliberately absent here: a customer
+        # whose offer expired did not receive anything, and a response that said
+        # otherwise would be the original bug wearing a different hat.
+        assert "effect" not in result
 
     def test_the_transitions_allow_expiry_but_refuse_fulfilment_from_offered(self):
         """Pinned as data, because the asymmetry is easy to "tidy" away."""
@@ -912,7 +1050,7 @@ class TestRecordOutcome:
                 )
 
     @pytest.mark.asyncio
-    async def test_a_fulfil_on_an_open_offer_leaves_the_row_open(self):
+    async def test_a_fulfil_on_an_open_offer_leaves_the_row_open(self, harness):
         """The refusal must be a no-op, not a write of the refused status.
 
         Recording `fulfilled` onto a row that is still `offered` would satisfy a
@@ -921,12 +1059,31 @@ class TestRecordOutcome:
         """
         from app.services import customer_offers
 
-        db = _Db([self._offer(status="offered")])
+        db, reference = await self._seed(harness, status="offered")
         assert (await customer_offers.record_outcome(
-            db, "OFF-00000001", "fulfil", actor="admin:ana"
+            db, reference, "fulfil", actor="admin:ana"
         ))["recorded"] is False
-        assert db._rows[0].status == "offered"
-        assert db.events() == []
+        assert (await _offer_row(db, reference)).status == "offered"
+        assert await _event_kinds(db, reference) == []
+
+    @pytest.mark.asyncio
+    async def test_a_refused_fulfilment_does_not_credit_anything(self, harness):
+        """The refusal must be a no-op in *both* directions.
+
+        The row not moving is the half that was always checked. The wallet not
+        moving is the half that matters now that fulfilment has an effect to
+        apply: a refusal that credited the points and then declined to record the
+        status would be a customer given money for an offer still sitting open in
+        their inbox.
+        """
+        from app.services import customer_offers
+
+        db, reference = await self._seed(harness, status="offered")
+        await customer_offers.record_outcome(db, reference, "fulfil", actor="admin:ana")
+        assert await _wallet_balance(db) == 0.0
+        assert "effect" not in (
+            await customer_offers.record_outcome(db, reference, "fulfil", actor="admin:ana")
+        )
 
 
 # ===========================================================================
@@ -1111,3 +1268,265 @@ class TestRoutes:
             "waiver",
             "priority",
         }
+
+# ===========================================================================
+# Negative controls for the validator's structural concurrency checks
+# ===========================================================================
+#
+# `customer_offers.validate_offers()` asserts that every mutator calls
+# `_claim_transition` and that the two customer actions require an unexpired
+# offer. Those checks are structural, and a structural check is worthless unless
+# it is shown to fail.
+#
+# Each control loads a *reverted copy* of the module from disk and asks the
+# validator. Copied-and-patched rather than monkeypatched, because the checks
+# read the function's own source through `inspect.getsource`: patching a live
+# attribute leaves the source intact, so the check would pass on a function that
+# no longer does the thing. That is precisely the failure these controls exist to
+# rule out, and it means a monkeypatch cannot test this at all.
+
+
+#: Renaming this call in a copy is how the "mutator stops claiming" control is
+#: written. Same signature as the real helper, so the reverted module still runs --
+#: the point is only that the AST no longer contains the call.
+_REVERTED_HELPER = (
+    "async def _claim_transition(",
+    "async def _reverted_noop(\n"
+    "    db, row, target, *, values=None, now=None, require_unexpired=False\n"
+    ") -> bool:\n"
+    "    return False\n\n\n"
+    "async def _claim_transition(",
+)
+
+
+def _load_reverted(tmp_path, replacements, *, only_in=None, hide_source_of=None):
+    """A patched copy of ``customer_offers``, importable and independent.
+
+    ``replacements`` is a list of ``(old, new)`` applied in order. ``only_in``
+    scopes every replacement to the body of one top-level function, which matters
+    here because several calls are textually identical in more than one place --
+    a bare ``replace(..., 1)`` against the first occurrence patches whichever
+    function happens to come first in the file, and the control then quietly
+    tests something other than what it claims.
+    """
+    import importlib.util
+    import sys
+
+    from app.services import customer_offers as live
+
+    source = Path(live.__file__).read_text()
+    if only_in is not None:
+        head, sep, body = source.partition(f"async def {only_in}(")
+        assert sep, f"{only_in} is gone; this control needs updating"
+        for old, new in replacements:
+            assert old in body, (
+                f"{old[:60]!r} is not in {only_in} any more; the control is stale"
+            )
+            body = body.replace(old, new, 1)
+        source = head + sep + body
+    else:
+        for old, new in replacements:
+            assert old in source, f"negative control no longer applies: {old[:60]!r}"
+            source = source.replace(old, new, 1)
+
+    source = source.replace(*_REVERTED_HELPER, 1)
+    target = tmp_path / "reverted_offers.py"
+    target.write_text(source)
+    spec = importlib.util.spec_from_file_location("reverted_offers", target)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["reverted_offers"] = module
+    spec.loader.exec_module(module)
+    if hide_source_of is not None:
+        # Make `inspect.getsource(hide_source_of)` raise `OSError` for *that
+        # function only*. `getsource` reads through `linecache` using the code
+        # object's `co_filename`, so pointing that at a name with no file behind
+        # it is the honest plant -- and it has to be per-function, because the
+        # first version deleted the whole file and thereby hid every function in
+        # the module. That version "passed" for the wrong reason: the other three
+        # mutators became unmeasurable too, so it was testing the validator's
+        # skip path four times and its reachability zero times.
+        #
+        # A realistic source of per-function unreadability is a decorator or
+        # wrapper that returns a function object defined elsewhere.
+        original = getattr(module, hide_source_of)
+        original.__code__ = original.__code__.replace(co_filename="<unavailable>")
+    return module
+
+
+class TestTheStructuralChecksCanFail:
+    """A structural check nobody has seen fail is a comment with an assert."""
+
+    def test_the_live_module_validates(self):
+        from app.services import customer_offers
+
+        report = customer_offers.validate_offers()
+        assert report["valid"] is True, report["errors"]
+        assert report["errors"] == []
+
+    def test_a_mutator_that_stops_claiming_its_transition_is_caught(self, tmp_path):
+        """The defect, planted: ``record_outcome`` reads then writes again.
+
+        This is the control that matters most, because it is the only way to know
+        the check is doing anything rather than passing vacuously. It was written
+        twice and failed twice before it worked:
+
+        * The first version wrapped the call in ``if False and ...``, which leaves
+          the call node in the AST -- so the check correctly reported the module as
+          still guarded. The control was wrong, not the check.
+        * A substring version of the check (looking for ``_claim_transition`` in
+          the source text) *was* satisfied by the reverted function's own comment,
+          and reported ``valid: True``.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    "if not await _claim_transition(\n        db,\n        row,\n        target,",
+                    "if not await _reverted_noop(\n        db,\n        row,\n        target,",
+                )
+            ],
+            only_in="record_outcome",
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False, "the validator accepted an unguarded mutator"
+        assert any(
+            "record_outcome does not call _claim_transition" in e
+            for e in report["errors"]
+        ), report["errors"]
+        # And it is the *only* complaint, so the control is not passing for a
+        # reason unrelated to what it claims to test.
+        assert len(report["errors"]) == 1, report["errors"]
+
+    def test_a_customer_action_that_drops_the_clock_check_is_caught(self, tmp_path):
+        """``accept_offer`` without ``require_unexpired``.
+
+        The silent half of the guard: without the clock predicate, an offer whose
+        validity elapsed between the read and the write can still be accepted, and
+        nothing anywhere reports it.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    'db, row, "accepted", values={"accepted_at": moment}, '
+                    "now=moment, require_unexpired=True",
+                    'db, row, "accepted", values={"accepted_at": moment}, now=moment',
+                )
+            ],
+            only_in="accept_offer",
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False
+        assert any(
+            "accept_offer is a customer action but does not require an unexpired offer"
+            in e
+            for e in report["errors"]
+        ), report["errors"]
+
+    def test_the_sweep_demanding_an_unexpired_offer_is_caught(self, tmp_path):
+        """``expire_offers_due`` with the flag it must never have.
+
+        The worst failure mode of the three, because it is completely silent:
+        the sweep selects *on* expiry, so requiring "unexpired" would refuse every
+        row it selected, and offers would never close with no error anywhere. This
+        is the check that has to catch it, and the control exists because a check
+        whose failure mode is silence needs to be seen failing.
+        """
+        # Scoped to the sweep's own body, not the bare call: the same claim appears
+        # inside `accept_offer`'s expiry-persistence branch, and a bare
+        # `replace(..., 1)` patches whichever comes first in the file -- which is a
+        # legitimate claim, just not the one this control is about.
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    'if await _claim_transition(db, row, "expired", now=moment):',
+                    'if await _claim_transition(db, row, "expired", '
+                    "now=moment, require_unexpired=True):",
+                )
+            ],
+            only_in="expire_offers_due",
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False
+        assert any(
+            "expire_offers_due requires an unexpired offer" in e
+            for e in report["errors"]
+        ), report["errors"]
+
+    def test_the_check_skips_rather_than_raises_when_it_cannot_read_the_source(
+        self, tmp_path
+    ):
+        """A validator that cannot read itself must not take the sweep down.
+
+        A function with no retrievable source -- a wrapper defined elsewhere, an
+        extension function, a build without sources -- is unmeasurable. The choice
+        is between saying nothing and raising, and saying nothing is right: a
+        sweep that dies because it could not introspect one function is worse than
+        one that checks less.
+
+        Two earlier attempts at this control were wrong in the direction of looking
+        fine, which is the only direction worth recording:
+
+        * Replacing the function with a one-line stub. The stub is valid Python,
+          so `getsource` returns it, the AST parses it, no claim is found and the
+          mutator is reported unguarded. Correct diagnosis, wrong premise — and it
+          read as a passing control for "unreadable source is skipped".
+        * Deleting the module file, so `getsource` raises. But `getsource` reads
+          through the file, so that hid *all four* mutators, and the control
+          exercised the skip path four times and the reachability of the check
+          zero times.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    "if not await _claim_transition(\n        db,\n        row,\n        target,",
+                    "if not await _reverted_noop(\n        db,\n        row,\n        target,",
+                )
+            ],
+            only_in="record_outcome",
+            hide_source_of="record_outcome",
+        )
+        import inspect
+
+        with pytest.raises(OSError):
+            inspect.getsource(module.record_outcome)  # the precondition
+        # ... and the other three are still readable, which is what makes the
+        # next test's assertion about them meaningful.
+        for readable in (module.accept_offer, module.decline_offer, module.expire_offers_due):
+            assert "async def" in inspect.getsource(readable)
+
+        report = module.validate_offers()  # must not raise
+        assert report["valid"] is True, (
+            "an unreadable function should be skipped, not reported as unguarded "
+            f"-- got {report['errors']}"
+        )
+        assert report["errors"] == [], report["errors"]
+
+    def test_an_unreadable_function_still_leaves_the_others_checked(self, tmp_path):
+        """Skipping one must not skip the rest.
+
+        The failure mode of any "can't check this one" path is that it becomes
+        "can't check any of this one". Here one function is unreadable and three
+        are readable, one of them reverted -- and the control above proves an
+        unreadable function is silently passed, so this proves the two coexist.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    'db, row, "accepted", values={"accepted_at": moment}, '
+                    "now=moment, require_unexpired=True",
+                    'db, row, "accepted", values={"accepted_at": moment}, now=moment',
+                )
+            ],
+            only_in="accept_offer",
+            hide_source_of="record_outcome",
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False, "the readable revert should still be caught"
+        assert [e for e in report["errors"] if "accept_offer" in e], report["errors"]
+        assert not [e for e in report["errors"] if "record_outcome" in e], (
+            "the unreadable function was reported despite being unmeasurable"
+        )

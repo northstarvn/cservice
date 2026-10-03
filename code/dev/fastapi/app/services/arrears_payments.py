@@ -845,12 +845,26 @@ async def waive_arrears_interest(
         raise ValueError("Only open arrears entries can have interest waived.")
     if bool(getattr(row, "interest_waived", False)):
         raise ValueError("Interest has already been waived for this entry.")
-    now = as_of or _now()
+    # `_as_utc` on both sides, and the reason is not tidiness.
+    #
+    # `opened_at` comes back from the database, and a database without a time
+    # zone -- which SQLite is, and which a test harness is -- hands back a naive
+    # datetime. Subtracting that from an aware `now` raises `TypeError`, which the
+    # global handler turns into a bare 500. `settle_arrears_entry` already
+    # normalised both sides and `waive_arrears_fees` never subtracts at all, so
+    # this one line made `POST /chat/admin/payments/arrears/{id}/waive-interest`
+    # the only mutator on this subsystem that 500s on a naive row: the operator
+    # could settle a debt but not forgive the interest on it.
+    #
+    # `as_of` is normalised too, because a caller passing a naive `as_of` got the
+    # same 500 through a different door.
+    now = _as_utc(as_of) or _now()
+    opened_at = _as_utc(getattr(row, "opened_at", None))
     principal = float(getattr(row, "principal", 0.0) or 0.0)
     accrued = compute_arrears_interest(
         principal,
         float(getattr(row, "annual_rate", 0.0) or 0.0),
-        max(0, (now - getattr(row, "opened_at", now)).days) if getattr(row, "opened_at", None) else 0,
+        max(0, (now - opened_at).days) if opened_at else 0,
         grace_days=int(getattr(row, "grace_days", 0) or 0),
         compounding=str(getattr(row, "compounding", "simple") or "simple"),
         cap_pct=float(getattr(row, "interest_cap_pct", 100.0) or 100.0),
@@ -894,7 +908,7 @@ async def waive_arrears_fees(
         raise ValueError("Only open arrears entries can have fees waived.")
     if bool(getattr(row, "fees_waived", False)):
         raise ValueError("Fees have already been waived for this entry.")
-    now = as_of or _now()
+    now = _as_utc(as_of) or _now()
     principal = float(getattr(row, "principal", 0.0) or 0.0)
     fee_terms = {
         "late_fee_amount": float(getattr(row, "late_fee_amount", 0.0) or 0.0),

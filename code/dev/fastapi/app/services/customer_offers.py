@@ -67,7 +67,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models
@@ -186,6 +186,29 @@ OFFER_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "expired": (),
     "fulfilled": (),
 }
+
+#: Which wallet a goodwill offer's points land in when it is fulfilled.
+#:
+#: Named here rather than inlined so the credit this module writes is visibly the
+#: same one ``recovery_playbooks`` writes: ``credit_recovery_points`` takes a
+#: ``point_type`` argument, and a fulfilment that quietly used a different string
+#: than the playbook path would create a second wallet for the same customer and
+#: split their balance across two rows that each look correct.
+OFFER_POINTS_TYPE = "loyalty_points"
+
+
+def offer_credit_reference(row: Any) -> str:
+    """The ledger ``reference`` for this offer's credit, and its idempotency key.
+
+    Derived from the offer's own reference, so it is unique per offer by
+    construction and needs no new column to stay unique across restarts -- the
+    same reasoning that made ``CustomerOffer.reference`` a rendered primary key
+    rather than a counter (``CustomerOffer``'s own docstring records that the
+    counter version reissued values after every redeploy).
+    """
+    reference = str(getattr(row, "reference", "") or "").strip()
+    return f"offer:{reference}" if reference else "offer:unreferenced"
+
 
 #: How much the investment/LTV signal may scale a goodwill offer.
 #:
@@ -1001,13 +1024,143 @@ async def issue_offer(
 
 
 async def _load_offer(
-    db: AsyncSession, reference: str, *, user_id: Optional[int] = None
+    db: AsyncSession,
+    reference: str,
+    *,
+    user_id: Optional[int] = None,
+    fresh: bool = False,
 ) -> Optional[models.CustomerOffer]:
+    """Load one offer, optionally forcing a read past the session's identity map.
+
+    ``fresh`` exists for :func:`_loses_race` and only that caller. SQLAlchemy keys
+    loaded objects by primary key and, by default, a SELECT that returns a row it
+    has *already loaded in this session* hands back the existing instance with its
+    attributes untouched rather than overwriting them -- correct for a
+    request-scoped session, and actively wrong when another transaction has just
+    changed the row, because the caller is asking precisely "what is it now?" and
+    gets the answer from before the change. Without ``populate_existing`` a losing
+    racer re-read the offer and was told it was still ``offered``, having just
+    lost the right to say so because somebody else had accepted it.
+
+    So a read that has to reflect another writer's commit says so explicitly here
+    instead of every caller remembering that it might matter.
+    """
     stmt = select(models.CustomerOffer).where(models.CustomerOffer.reference == str(reference))
     if user_id is not None:
         stmt = stmt.where(models.CustomerOffer.user_id == int(user_id))
+    if fresh:
+        stmt = stmt.execution_options(populate_existing=True)
     result = await db.execute(stmt)
     return result.scalars().first()
+
+
+async def _claim_transition(
+    db: AsyncSession,
+    row: models.CustomerOffer,
+    target: str,
+    *,
+    values: Optional[Mapping[str, Any]] = None,
+    now: Optional[datetime] = None,
+    require_unexpired: bool = False,
+) -> bool:
+    """Move this offer from the status the caller read to ``target``, or report
+    that somebody else got there first.
+
+    Returns ``True`` when *this* caller now owns the transition. ``False`` means
+    the row was no longer in the state the caller's read found, nothing has been
+    written, and no event recorded -- so the caller must re-read and report rather
+    than retry, because retrying is exactly the double-write this exists to stop.
+
+    Every state change to an offer goes through here: ``accept_offer``,
+    ``decline_offer``, ``record_outcome`` and ``expire_offers_due``. That is not
+    tidiness, it is the fix. Each of the four used to read the row, decide in
+    Python against ``OFFER_TRANSITIONS``, and then assign -- and two callers doing
+    that concurrently both read ``offered``, both decided, and both wrote. The
+    state machine was enforced only against callers that did not overlap in time,
+    which is a weaker guarantee than the comment above :data:`OFFER_TRANSITIONS`
+    claims to give. Accept and decline on one offer in the same tick both
+    committed, and the append-only trail recorded both mutually exclusive
+    decisions for it.
+
+    **Why a conditional UPDATE and not ``with_for_update()``.** A row lock is the
+    obvious answer and it would have been a bad one. ``SELECT ... FOR UPDATE`` is
+    *silently ignored by SQLite*, which is the database this entire test suite
+    runs on -- a lock-based fix would go green here and be unprotected in
+    production, with the tests asserting the lock's presence and measuring nothing.
+    This invariant is better served by a predicate than by a lock, because it does
+    not need the transaction to last long enough for a lock to matter: the state
+    being protected is one column, and the check and the write are the same
+    statement. ``services/transfers.py`` uses ``with_for_update()`` for a wallet,
+    where a read-modify-write over a *balance* spans several statements and
+    genuinely needs serialising; this is a single-column status change.
+
+    **Why every precondition goes in the WHERE clause.** The state-machine check
+    above this call has already run, and between it and this write another
+    request can do anything at all. Putting ``status`` -- and, when the caller
+    asks for it, ``expires_at`` -- into the predicate is what makes the row count
+    an answer to "were all my preconditions still true one statement ago". So a
+    row count of zero is never ambiguous and never needs a retry loop: it means the
+    caller lost, and the only correct next step is to re-read and answer from the
+    state that actually exists.
+
+    ``require_unexpired`` is opt-in because the clock is a precondition only for
+    the two *customer* actions. An operator closing an offer late or early must be
+    able to, and :func:`expire_offers_due` is selecting on expiry, so demanding
+    the opposite of its own criterion there would refuse every row it selected.
+    """
+    moment = _aware(now or _now())
+    assignments: dict[str, Any] = {"status": str(target)}
+    assignments.update(dict(values or {}))
+    stmt = (
+        update(models.CustomerOffer)
+        .where(
+            models.CustomerOffer.id == int(row.id),
+            # The status *as stored*, because that is what the caller's
+            # state-machine decision ran against. `effective_status` is a
+            # clock-dependent reading of the row, not something the database can
+            # evaluate in a predicate, so it cannot appear here.
+            models.CustomerOffer.status == str(row.status),
+        )
+        .values(**assignments)
+        .execution_options(synchronize_session=False)
+    )
+    if require_unexpired:
+        stmt = stmt.where(
+            or_(
+                models.CustomerOffer.expires_at.is_(None),
+                models.CustomerOffer.expires_at > moment,
+            )
+        )
+    result = await db.execute(stmt)
+    if int(result.rowcount or 0) != 1:
+        return False
+    # `synchronize_session=False` above leaves the loaded instance stale on
+    # purpose. Every caller needs the post-transition values -- they go into the
+    # event payload and the response -- so refresh here rather than making four
+    # call sites remember to. The refresh is also what makes the subsequent
+    # `_record_event` report the transition that actually happened rather than the
+    # one that was attempted.
+    await db.refresh(row)
+    return True
+
+
+async def _loses_race(
+    db: AsyncSession, reference: str, *, user_id: Optional[int] = None
+) -> Optional[models.CustomerOffer]:
+    """Re-read an offer after a lost claim, or ``None`` if it has since gone.
+
+    Called only on the ``_claim_transition`` ``False`` path. It exists so the
+    refusal a losing racer gives is the *same* refusal a sequential caller would
+    have got for the same final state -- "this offer is accepted" rather than a
+    race-flavoured message the customer has no way to interpret.
+
+    ``fresh=True`` is not optional here. The session already holds this offer,
+    loaded before the losing write, and SQLAlchemy would otherwise hand that
+    cached instance straight back -- so the loser would be told the offer was
+    still ``offered``, the one answer that is both wrong and the most likely to
+    be acted on, because it invites the customer to tap the button again.
+    """
+    return await _load_offer(db, reference, user_id=user_id, fresh=True)
 
 
 async def list_offers_for_user(
@@ -1087,12 +1240,19 @@ async def accept_offer(
         # be open. A read-only view of a stale status would be re-discovered as
         # wrong on every subsequent read.
         if status == "expired" and str(row.status) != "expired":
-            await _record_event(
-                db, offer_id=int(row.id), user_id=int(user_id), kind="expired",
-                from_status=str(row.status), to_status="expired", actor="system:expiry",
-            )
-            row.status = "expired"
-            await db.flush()
+            # Claimed like every other write. Two racers both noticing the clock
+            # ran out used to both write `expired` and both record an `expired`
+            # event for one offer -- a convergent value, so the row was harmless,
+            # but a trail that reports the same expiry twice is a trail nobody can
+            # read. Losing this claim is not an error: the other racer recorded it.
+            if await _claim_transition(db, row, "expired", now=moment):
+                await _record_event(
+                    db, offer_id=int(row.id), user_id=int(user_id), kind="expired",
+                    from_status="offered", to_status="expired", actor="system:expiry",
+                    note="the offer's own validity window elapsed",
+                )
+            else:
+                row = await _loses_race(db, reference, user_id=user_id) or row
         return {
             "accepted": False,
             "found": True,
@@ -1106,9 +1266,26 @@ async def accept_offer(
     move = resolve_offer_transition(str(row.status), "accepted")
     if not move["allowed"]:
         return {"accepted": False, "found": True, "reason": move["reason"]}
-    row.status = "accepted"
-    row.accepted_at = moment
-    await db.flush()
+    if not await _claim_transition(
+        db, row, "accepted", values={"accepted_at": moment}, now=moment, require_unexpired=True
+    ):
+        # Lost. Answer from the state that exists, exactly as if the other caller
+        # had finished first -- which is the case this method already handled,
+        # so there is one refusal shape rather than two.
+        settled = await _loses_race(db, reference, user_id=user_id)
+        if settled is None:
+            return {
+                "accepted": False, "found": False,
+                "reason": f"no offer {reference!r} for this customer",
+            }
+        now_status = effective_status(settled, now=moment)
+        return {
+            "accepted": False,
+            "found": True,
+            "reference": settled.reference,
+            "status": now_status,
+            "reason": f"this offer is {now_status}, so it cannot be accepted",
+        }
     await _record_event(
         db,
         offer_id=int(row.id),
@@ -1126,6 +1303,21 @@ async def accept_offer(
     )
     return {
         "accepted": True,
+        # `found` is what the router checks before it commits, and it was missing
+        # from this branch. Every other return in this function carries it --
+        # `found: False` for a miss, `found: True` for a status that forbids the
+        # move -- and the success path omitted it, so
+        # `POST /chat/me/offers/{reference}/accept` raised 404 for *every
+        # successful accept*: the customer pressed accept, the offer was accepted,
+        # and they were told it was not theirs. The status change survived because
+        # the flush had already run, so the row read back as `accepted` and the
+        # next tap correctly reported "already accepted" -- which is why this reads
+        # as a permissions problem at the second tap rather than as a missing key
+        # at the first.
+        #
+        # The service-level tests assert `result["accepted"] is True` and never
+        # look at `found`, so they passed throughout.
+        "found": True,
         "reference": row.reference,
         "offer_id": int(row.id),
         "status": "accepted",
@@ -1173,10 +1365,29 @@ async def decline_offer(
     move = resolve_offer_transition(str(row.status), "declined")
     if not move["allowed"]:
         return {"declined": False, "found": True, "reason": move["reason"]}
-    row.status = "declined"
-    row.declined_at = moment
-    row.decline_reason = str(reason or "")
-    await db.flush()
+    if not await _claim_transition(
+        db,
+        row,
+        "declined",
+        values={"declined_at": moment, "decline_reason": str(reason or "")},
+        now=moment,
+        require_unexpired=True,
+    ):
+        # The same refusal as the sequential case, from the same helper. Before
+        # this, accept and decline on one offer in the same tick both committed:
+        # the trail carried `accepted (offered -> accepted)` and then
+        # `declined (offered -> declined)` for a single offer, so the row and the
+        # audit trail disagreed about what one person did in one instant.
+        settled = await _loses_race(db, reference, user_id=user_id)
+        if settled is None:
+            return {"declined": False, "found": False, "reason": f"no offer {reference!r}"}
+        now_status = effective_status(settled, now=moment)
+        return {
+            "declined": False,
+            "found": True,
+            "status": now_status,
+            "reason": f"this offer is {now_status}, so it cannot be declined",
+        }
     await _record_event(
         db,
         offer_id=int(row.id),
@@ -1190,6 +1401,11 @@ async def decline_offer(
     )
     return {
         "declined": True,
+        # See the note on the same key in `accept_offer`. Every non-success
+        # branch here carries `found`; the success branch did not, so the router
+        # raised 404 *after* the decline had been flushed. A customer who said no
+        # was told the offer was not theirs.
+        "found": True,
         "reference": row.reference,
         "status": "declined",
         "reason_recorded": bool(reason),
@@ -1249,12 +1465,38 @@ async def record_outcome(
             "status": status,
             "reason": move["reason"],
         }
-    row.status = target
-    if target == "fulfilled":
-        row.fulfilled_at = moment
-    else:
-        row.follow_up_due_at = None
-    await db.flush()
+    if not await _claim_transition(
+        db,
+        row,
+        target,
+        values=(
+            {"fulfilled_at": moment}
+            if target == "fulfilled"
+            # Not a clock precondition: an operator closing an offer late or early
+            # is the legitimate case, and `expire_offers_due` selects *on* expiry,
+            # so demanding "unexpired" here would refuse every row it selected.
+            else {"follow_up_due_at": None}
+        ),
+        now=moment,
+    ):
+        settled = await _loses_race(db, reference)
+        if settled is None:
+            return {"recorded": False, "found": False, "reason": f"no offer {reference!r}"}
+        now_status = effective_status(settled, now=moment)
+        return {
+            "recorded": False,
+            "found": True,
+            "status": now_status,
+            "reason": f"this offer is {now_status}, so {verb!r} cannot be recorded",
+        }
+    # The effect, applied. Claimed first on purpose: `_apply_offer_effect` moves a
+    # wallet balance, and it must only run for the caller that actually owns the
+    # fulfilment. Two racers both reaching here would credit twice.
+    effect = (
+        await _apply_offer_effect(db, row, now=moment)
+        if target == "fulfilled"
+        else {"applied": False, "components": {}, "requires_out_of_band": []}
+    )
     await _record_event(
         db,
         offer_id=int(row.id),
@@ -1264,20 +1506,219 @@ async def record_outcome(
         to_status=target,
         actor=str(actor),
         note=str(note or ""),
-        payload={"automated": str(actor).startswith("system:")},
+        payload={
+            "automated": str(actor).startswith("system:"),
+            # What actually moved, in the trail. The note field is the operator's
+            # own record of work done out of band; this is the machine's record of
+            # what it did itself. Keeping them in one payload is what makes
+            # `requires_out_of_band` answerable months later.
+            "effect": effect,
+        },
     )
     return {
         "recorded": True,
+        # The third of the three. `record_outcome` was the one that made this
+        # hardest to spot, because a *refused* transition (`offered -> fulfilled`)
+        # carries `found: True` and returns 200, while the successful one
+        # 404'd. So "fulfil this offer" failed and "try to fulfil it twice" both
+        # look like refusals from the outside, and only the row moving separates
+        # them. The router docstring for this endpoint claims it "refuses both
+        # from ``offered``"; it refuses `fulfil` from `offered` and allows
+        # `expire` from it, which the state machine permits -- noted in the doc
+        # fix below rather than changed here, because an operator closing an
+        # unaccepted offer on time is the ordinary case.
+        "found": True,
         "reference": row.reference,
         "status": target,
         "kind": target,
+        # Present only on a fulfilment, and always. `fulfilled` is defined as
+        # "the effect landed" (see :data:`OFFER_STATUSES`), so a response that
+        # says `recorded: true` without saying what landed is a machine
+        # answering a question nobody asked it.
+        **({"effect": effect} if target == "fulfilled" else {}),
+    }
+
+
+async def _prior_offer_credit(
+    db: AsyncSession, row: models.CustomerOffer
+) -> Optional[models.PointsTransaction]:
+    """Has this offer's wallet credit already been written? Defence in depth.
+
+    :func:`_claim_transition` is the real guarantee -- ``fulfilled`` is terminal
+    and can only be claimed once -- and this is the second belt. It exists because
+    a double credit is the kind of error that is invisible until a customer's
+    balance is wrong by an amount nobody can explain, and because the wallet
+    writer it calls (:func:`recovery_playbooks.credit_recovery_points`) has no
+    idempotency guard of its own and is shared with the playbook path, where
+    repeated credits are the point.
+
+    The caller treats a hit here as an **error to refuse**, not as a credit to
+    skip. Silently skipping would leave ``fulfilled`` recorded against an offer
+    whose effect was applied an unknown number of times, which is the exact shape
+    of bug this document was written about.
+    """
+    stmt = select(models.PointsTransaction).where(
+        models.PointsTransaction.user_id == int(row.user_id),
+        models.PointsTransaction.reference == offer_credit_reference(row),
+    )
+    return (await db.execute(stmt)).scalars().first()
+
+
+async def _apply_offer_effect(
+    db: AsyncSession, row: models.CustomerOffer, *, now: Optional[datetime] = None
+) -> dict[str, Any]:
+    """Apply what this offer promised, and report exactly what moved.
+
+    **Why this function exists.** ``fulfilled`` is defined as *"the effect landed"*
+    (:data:`OFFER_STATUSES`), and ``OFFER_EXPLANATIONS`` tells the customer in the
+    present perfect that it already has -- "We put {points} points on your
+    account", "We have removed {waiver_type} from your account". Before this,
+    fulfilling an offer moved the status, wrote an event, and returned
+    ``recorded: true`` while touching no balance anywhere. The endpoint took a
+    ``note`` field reading "250 points added" and reported success for work it had
+    not verified and could not see. That is a machine answering "yes" to a question
+    nobody asked it, and it is why the whole backlog surface
+    (:func:`follow_ups_due`) could report an empty queue over a set of effects
+    nobody had ever received.
+
+    **What is automatic, and what is honestly not.** One of the three kinds has an
+    effect this codebase can apply:
+
+    * ``goodwill`` -- the points go onto the wallet through
+      :func:`recovery_playbooks.credit_recovery_points`, the same canonical writer
+      the playbook path uses, so there is one place that moves a balance.
+    * ``waiver`` -- the effect is an arrears entry, and
+      :attr:`CustomerOffer.arrears_entry_id` is populated by nothing in this
+      module (grep: no reader outside ``transfers.py``). There is no entry to
+      waive, so this reports ``requires_out_of_band`` rather than guessing.
+    * ``priority`` -- the effect is a queue position. Queue urgency is not modelled
+      as a value anything reads, so there is nothing to apply.
+
+    The ``discount_percent`` on a goodwill offer is the same story: the column is
+    carried through the offer catalogue and **no pricing engine in this repository
+    consumes it** (``grep discount_percent app/`` returns this module and the
+    playbook that composes the offer, and nothing that prices anything). So it is
+    reported as requiring out-of-band action instead of being silently marked
+    delivered.
+
+    Reporting the un-appliable parts is not a shrug. It is the difference between
+    an operator reading ``requires_out_of_band: []`` and knowing the customer has
+    their points, and reading ``requires_out_of_band: ["discount_percent"]`` and
+    knowing to go and apply the discount by hand. The response and the event
+    payload carry the same structure, so the trail answers "did this actually
+    happen?" months later -- which is :func:`build_offer_admin_report`'s stated
+    job and was not answerable before.
+    """
+    kind = str(getattr(row, "offer_kind", "") or "")
+    points = round(float(getattr(row, "points", 0.0) or 0.0), 2)
+    discount = round(float(getattr(row, "discount_percent", 0.0) or 0.0), 2)
+    waiver_type = str(getattr(row, "waiver_type", "") or "")
+    components: dict[str, Any] = {}
+    requires_out_of_band: list[str] = []
+
+    if kind != "goodwill":
+        components[kind or "unknown"] = {
+            "automatic": False,
+            "why": (
+                "no effect in this codebase applies a "
+                f"{kind or 'unknown'} offer; it is a change to a system outside "
+                "this service and an operator records it in the note"
+            ),
+        }
+        if waiver_type:
+            components["waiver"] = {
+                "waiver_type": waiver_type,
+                "automatic": False,
+                "why": (
+                    "this offer carries no arrears entry, so there is no charge to "
+                    "remove from here; waive it in the arrears system and note it"
+                ),
+            }
+        return {
+            "applied": False,
+            "components": components,
+            "requires_out_of_band": sorted(components),
+        }
+
+    if points > 0:
+        existing = await _prior_offer_credit(db, row)
+        if existing is not None:
+            # Refused rather than skipped: see `_prior_offer_credit`.
+            return {
+                "applied": False,
+                "double_credit_refused": True,
+                "components": {
+                    "points": {
+                        "offered": points,
+                        "automatic": False,
+                        "why": (
+                            "a credit for this offer is already in the ledger "
+                            f"(transaction {int(existing.id)}), so applying another "
+                            "would overpay; this needs a human, not a second call"
+                        ),
+                    }
+                },
+                "requires_out_of_band": ["points"],
+            }
+        credited = await recovery_playbooks.credit_recovery_points(
+            db,
+            int(row.user_id),
+            OFFER_POINTS_TYPE,
+            points,
+            reference=offer_credit_reference(row),
+        )
+        components["points"] = {
+            "offered": points,
+            "credited": round(float(credited.get("points_credited") or 0.0), 2),
+            "wallet_balance": round(float(credited.get("new_balance") or 0.0), 2),
+            "point_type": OFFER_POINTS_TYPE,
+            "transaction_id": int(credited.get("transaction_id") or 0),
+            "automatic": True,
+        }
+    else:
+        components["points"] = {
+            "offered": 0.0,
+            "credited": 0.0,
+            "automatic": True,
+            "why": "this offer promises no points, so there is nothing to credit",
+        }
+
+    if discount > 0:
+        components["discount_percent"] = {
+            "offered": discount,
+            "automatic": False,
+            "why": (
+                "no pricing engine in this service consumes discount_percent; it is "
+                "recorded on the offer and the discount is applied where the next "
+                "service is priced, if it is applied at all"
+            ),
+        }
+        requires_out_of_band.append("discount_percent")
+
+    return {
+        "applied": any(bool(c.get("automatic")) and c.get("credited", 0.0) for c in components.values()),
+        "credited_points": round(
+            float(components.get("points", {}).get("credited") or 0.0), 2
+        ),
+        "components": components,
+        "requires_out_of_band": requires_out_of_band,
     }
 
 
 async def expire_offers_due(
     db: AsyncSession, *, now: Optional[datetime] = None, limit: int = 200
 ) -> dict[str, Any]:
-    """Close offers whose own clock has run out. The background half of expiry."""
+    """Close offers whose own clock has run out. The background half of expiry.
+
+    Claimed per row rather than assigned, and that is the whole reason this
+    function is safe to run next to a customer tapping accept. This sweep
+    selecting an offer is not a reservation: between the SELECT and the write the
+    customer can accept it, and a sweep that then assigned ``expired`` would
+    silently undo an acceptance the customer had just been told succeeded -- the
+    worst possible answer to "did that work?". So each row is claimed on its
+    stored status, and a row the customer beat to it is counted and named below
+    rather than overwritten.
+    """
     moment = _aware(now or _now())
     stmt = (
         select(models.CustomerOffer)
@@ -1287,20 +1728,33 @@ async def expire_offers_due(
         .limit(int(limit))
     )
     rows = list((await db.execute(stmt)).scalars().all())
+    expired: list[str] = []
+    beat_us: list[str] = []
     for row in rows:
-        row.status = "expired"
-        await _record_event(
-            db,
-            offer_id=int(row.id),
-            user_id=int(row.user_id),
-            kind="expired",
-            from_status="offered",
-            to_status="expired",
-            actor="system:expiry",
-            note="the offer's own validity window elapsed",
-        )
+        if await _claim_transition(db, row, "expired", now=moment):
+            await _record_event(
+                db,
+                offer_id=int(row.id),
+                user_id=int(row.user_id),
+                kind="expired",
+                from_status="offered",
+                to_status="expired",
+                actor="system:expiry",
+                note="the offer's own validity window elapsed",
+            )
+            expired.append(row.reference)
+        else:
+            # Somebody acted on it between the sweep's SELECT and this write. Not
+            # an error and not retried: reporting it is the useful part, because
+            # "the sweep nearly expired an offer the customer had just accepted"
+            # is a thing an operator wants to know happened.
+            beat_us.append(row.reference)
     await db.flush()
-    return {"expired": len(rows), "references": [row.reference for row in rows]}
+    return {
+        "expired": len(expired),
+        "references": expired,
+        "claimed_elsewhere": beat_us,
+    }
 
 
 async def follow_ups_due(
@@ -1493,6 +1947,152 @@ def validate_offers() -> dict[str, Any]:
         for field in ("what", "why", "legal"):
             if not str(template.get(field) or "").strip():
                 errors.append(f"OFFER_EXPLANATIONS[{kind}].{field} is empty")
+
+    # Two structural invariants about the concurrency fix, checked against the
+    # *parsed call* rather than the source text.
+    #
+    # **Why not a substring.** The first version of this check read each mutator's
+    # source and looked for `_claim_transition` in it. Its own negative control --
+    # revert one mutator, revalidate, expect an error -- reported `valid: True`,
+    # because `record_outcome` mentions the name in a comment and still called it.
+    # A check that a comment can satisfy is not a check. The same lesson then
+    # recurred in the test suite's own lock assertion, which grepped for
+    # `with_for_update` and matched the docstring explaining why this path does
+    # *not* lock.
+    #
+    # **Why structural at all.** A behavioural check cannot distinguish "claims its
+    # transition" from "gets away with it this time", which is exactly why the
+    # defect this guards survived: every test in this module passed while the guard
+    # was absent. What *can* be asserted without a race is that the guard is
+    # reachable from every mutator, and that is a property of the call tree.
+    #
+    # **Why "before the write" is not asserted here.** "Calls it" and "calls it
+    # before writing" are different claims, and the ordering one needs the race
+    # tests. `tests/test_e2e_adversarial.py` owns whether it happens early enough;
+    # this owns whether it happens at all.
+    #
+    # It lives here rather than only in the suite because a module that can
+    # validate its own integrity should, and `validate_offers()` is what ships in
+    # the kaizen sweep.
+    import ast as _ast
+    import inspect as _inspect
+    import textwrap as _textwrap
+
+    def _parsed(fn: Any) -> Optional[Any]:
+        """The function's own AST, or ``None`` if its source is unavailable.
+
+        ``None`` means "cannot check", which is skipped rather than failed. A
+        validator that raises because it cannot read itself is worse than one
+        that says nothing, because it takes the whole sweep down with it.
+
+        Real causes of unavailability: a wrapper produced by a decorator whose
+        code object names a different file, an extension function, a source-less
+        install. Two things that *look* like causes but are not, both learned by
+        writing the control for this the wrong way first:
+
+        * A one-line stub body is readable source, and it genuinely contains no
+          claim -- so diagnosing it as unguarded is correct, not a skip.
+        * `inspect.getsource` resolves through the code object's ``co_filename``,
+          so making the module file unreadable hides *every* function in it. The
+          skip is therefore per-function only if the unavailability is.
+        """
+        try:
+            return _ast.parse(_textwrap.dedent(_inspect.getsource(fn)))
+        except (OSError, TypeError, IndentationError, SyntaxError):
+            return None
+
+    def _claim_calls(fn: Any) -> list[Any]:
+        """Every ``_claim_transition(...)`` call in the function's own body.
+
+        "Own body" means: the statements of the function, excluding any ``def``
+        nested inside it. A nested helper that reaches the claim does not count,
+        because the offer's state change has to be claimed in the function that
+        *decides* it -- that is where the caller's belief about the row already
+        lives, and a helper would be reaching it without it.
+
+        Walking this correctly needed two attempts, and both failures were silent
+        (the check reported every mutator unguarded, or reported a reverted one as
+        guarded). ``TestTheStructuralChecksCanFail`` in
+        ``tests/test_customer_offers_stage_b.py`` plants both regressions and pins
+        them, because a control that only proves the check passes cannot tell a
+        vacuous check from a working one:
+
+        * ``inspect.getsource(fn)`` returns the whole definition, so ``tree.body``
+          is a single ``AsyncFunctionDef`` and *its* statements are what to walk.
+          Walking ``tree.body`` itself finds nothing -- the node being defined
+          contains no calls of its own.
+        * Skipping ``AsyncFunctionDef`` while iterating ``tree.body`` skips the
+          entire function, because the function *is* one. Only a ``def`` nested
+          *within* it is excluded.
+        """
+        tree = _parsed(fn)
+        if tree is None:
+            return []
+        found: list[Any] = []
+        for definition in tree.body:
+            if not isinstance(
+                definition, (_ast.FunctionDef, _ast.AsyncFunctionDef)
+            ):  # pragma: no cover - getsource always yields the definition
+                continue
+            for statement in definition.body:
+                if isinstance(statement, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    continue  # a nested helper; its calls are its own business
+                found.extend(
+                    inner
+                    for inner in _ast.walk(statement)
+                    if (
+                        isinstance(inner, _ast.Call)
+                        and isinstance(inner.func, _ast.Name)
+                        and inner.func.id == "_claim_transition"
+                    )
+                )
+        return found
+
+    for _mutator in (accept_offer, decline_offer, record_outcome, expire_offers_due):
+        # An unparseable function returns no calls and no error, because there is
+        # nothing to complain about that we know. Saying "cannot check" here would
+        # be worse than silence, so the unmeasurable case is the quiet one and only
+        # a *parsed* function with no claim is an error.
+        if _parsed(_mutator) is not None and not _claim_calls(_mutator):
+            errors.append(
+                f"{_mutator.__name__} does not call _claim_transition; an "
+                "unguarded mutator re-opens the concurrent-decision defect, and "
+                "every test in this module passes while it is unguarded"
+            )
+
+    # `require_unexpired` is opt-in for a reason: `expire_offers_due` selects *on*
+    # expiry, so demanding "unexpired" of it would refuse every row it selected.
+    # Getting that backwards fails closed and silently expires nothing, which is
+    # the kind of bug that only shows up as an offer that never closes -- so it is
+    # asserted here, on the keyword argument, for the same reason as above: the
+    # flag has to actually be passed, not merely be mentioned.
+    def _has_unexpired_claim(fn: Any) -> Optional[bool]:
+        """Does any claim pass ``require_unexpired=True``? ``None`` = unknown."""
+        calls = _claim_calls(fn)
+        if _parsed(fn) is None:
+            return None
+        if not calls:
+            return False
+        return any(
+            kw.arg == "require_unexpired"
+            and isinstance(kw.value, _ast.Constant)
+            and kw.value.value is True
+            for call in calls
+            for kw in call.keywords
+        )
+
+    for _needs_clock in (accept_offer, decline_offer):
+        if _has_unexpired_claim(_needs_clock) is False:
+            errors.append(
+                f"{_needs_clock.__name__} is a customer action but does not require "
+                "an unexpired offer; the clock check would be a read another request "
+                "can invalidate before the write"
+            )
+    if _has_unexpired_claim(expire_offers_due) is True:
+        errors.append(
+            "expire_offers_due requires an unexpired offer, but it selects on "
+            "expiry; this would expire nothing"
+        )
 
     # The two existing PRIORITY_RANK copies. This module deliberately added no
     # third, but the two it inherited are still independent and can drift.

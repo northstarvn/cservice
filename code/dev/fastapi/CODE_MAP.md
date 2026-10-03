@@ -1356,8 +1356,11 @@ leaves** (60 → 65 internal nodes).
 modules that are about *changes to the other code*, so the map says so rather
 than presenting them as business engines beside the ones they simulate:
 
-- `flow_simulation` (`app/real_life_flows.py`) — 5 personas, 17 probes, 12 flows,
-  41 subflow executions. Every expectation is read from the engine's own config
+- `flow_simulation` (`app/real_life_flows.py`) — 5 personas, 24 probes, 12 flows,
+  21 flow-persona pairs, 70 subflow executions. (The 55 declared `subflows` are
+  *business steps* and share no name with any probe; the two vocabularies are
+  disjoint, so no ratio between them is a coverage number. See
+  `FLOW_ASSURANCE.md` §8.5.) Every expectation is read from the engine's own config
   (`policy_scoring.POSTURE_ADJUSTMENTS`, `preferences.CONSENT_GATED_PURPOSES`,
   `rule_engine.RULE_PACK_BY_NAME`) rather than hardcoded, because a simulation
   with wrong assumptions manufactures confident false findings: the first
