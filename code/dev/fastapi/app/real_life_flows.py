@@ -191,6 +191,15 @@ class Persona:
     #: persona carries: ``booking_states`` counts *bookings*, and merging a case
     #: is a different act from closing a booking.
     open_cases: int = 0
+    #: How many retention snapshots to generate for this persona in
+    #: `_probe_retention_health`. Defaults to 2 (the original probe behaviour).
+    #:
+    #: **This is the vocabulary lever for retention bands.** The retention rules
+    #: evaluate in priority order, and the `watch` rule at priority 60 fires for
+    #: `snapshot_count < 5`, blocking access to `stable` (priority 900).
+    #: `no_data` requires `snapshot_count <= 0`. By varying this per persona,
+    #: the simulator reaches more vocabulary cells without inventing new probes.
+    retention_snapshot_count: int = 2
 
     def within_score_scale(self) -> bool:
         low, high = SCORE_SCALE
@@ -345,6 +354,54 @@ PERSONAS: tuple[Persona, ...] = (
         personalization_consent=True,
         sentiment=("neutral", 0.0),
         insights=(),
+    ),
+    # Vocabulary coverage: reaches 'no_data' retention band (0 snapshots)
+    Persona(
+        persona_id="new_customer_no_snapshots",
+        display_name="eve",
+        summary="brand new customer with no retention history",
+        access_score=50.0,
+        system_score=55.0,
+        churn_risk="medium",
+        loyalty_score=60.0,
+        days_since_last_activity=0,
+        booking_states=(),
+        consent_service=True,
+        consent_recovery=True,
+        consent_analytics=False,
+        region_id="us_east",
+        experiential_tier="bronze",
+        sentiment=("neutral", 0.0),
+        insights=(),
+        # No snapshots -> 'no_data' retention band
+        retention_snapshot_count=0,
+        complaint_category="service_quality",
+        complaint_hours_remaining=72.0,
+        open_cases=0,
+    ),
+    # Vocabulary coverage: reaches 'stable' retention band (6 snapshots, low churn, high loyalty)
+    Persona(
+        persona_id="stable_high_loyalty",
+        display_name="fiona",
+        summary="long-term loyal customer with steady low churn",
+        access_score=85.0,
+        system_score=80.0,
+        churn_risk="low",
+        loyalty_score=85.0,
+        days_since_last_activity=10,
+        booking_states=("completed", "completed", "completed", "completed", "completed", "completed"),
+        consent_service=True,
+        consent_recovery=True,
+        consent_analytics=True,
+        region_id="us_east",
+        experiential_tier="gold",
+        sentiment=("positive", 0.3),
+        insights=(),
+        # 6 snapshots, low churn, high loyalty -> 'stable' band (bypasses 'watch' at priority 60)
+        retention_snapshot_count=6,
+        complaint_category="service_quality",
+        complaint_hours_remaining=72.0,
+        open_cases=0,
     ),
 )
 PERSONA_BY_ID: dict[str, Persona] = {row.persona_id: row for row in PERSONAS}
@@ -1313,26 +1370,21 @@ def _probe_retention_series(persona: Persona) -> ProbeOutcome:
 def _probe_retention_health(persona: Persona) -> ProbeOutcome:
     from app.services import retention
 
-    points = retention.snapshot_series_points(
-        [
-            {
-                "id": 1,
-                "snapshot_type": "scheduled",
-                "lifecycle_stage": "active",
-                "loyalty_score": persona.loyalty_score,
-                "churn_risk": persona.churn_risk,
-                "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-            },
-            {
-                "id": 2,
-                "snapshot_type": "scheduled",
-                "lifecycle_stage": "active",
-                "loyalty_score": persona.loyalty_score,
-                "churn_risk": persona.churn_risk,
-                "created_at": datetime(2026, 8, 15, tzinfo=timezone.utc),
-            },
-        ]
-    )
+    # The number of snapshots is now a persona property, so the simulator can
+    # reach different vocabulary cells (`no_data` with 0, `stable` with >=5,
+    # `watch` with <5) by varying this per persona rather than hardcoding 2.
+    snapshots = []
+    base = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    for i in range(persona.retention_snapshot_count):
+        snapshots.append({
+            "id": i + 1,
+            "snapshot_type": "scheduled",
+            "lifecycle_stage": "active",
+            "loyalty_score": persona.loyalty_score,
+            "churn_risk": persona.churn_risk,
+            "created_at": base + timedelta(days=i * 14),
+        })
+    points = retention.snapshot_series_points(snapshots)
     context = retention.build_retention_health_context(points)
     effective = datetime(2026, 9, 30, tzinfo=timezone.utc)
     report = retention.resolve_retention_health(context, effective_date=effective)
@@ -2847,7 +2899,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "flow_id": "new_customer_first_booking",
         "title": "A new customer registers and books for the first time",
         "actor": "customer",
-        "personas": ("abandoned_pending", "loyal_with_points"),
+        "personas": ("abandoned_pending", "loyal_with_points", "new_customer_no_snapshots"),
         "subflows": (
             "register",
             "authenticate",
@@ -2914,7 +2966,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "flow_id": "dormant_customer_win_back",
         "title": "A dormant customer is brought back",
         "actor": "system",
-        "personas": ("dormant_45_days",),
+        "personas": ("dormant_45_days", "stable_high_loyalty"),
         "subflows": ("snapshot_series", "health_band", "forecast", "win_back_offer"),
         "probe_ids": (
             "retention_series_builds",
@@ -2972,7 +3024,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "flow_id": "preference_and_consent_change",
         "title": "A customer changes how they are contacted",
         "actor": "customer",
-        "personas": ("loyal_with_points", "repeatedly_cancelled"),
+        "personas": ("loyal_with_points", "repeatedly_cancelled", "new_customer_no_snapshots"),
         "subflows": ("read_preferences", "save_preference", "grant_consent", "revoke_consent", "strategy_applies"),
         "probe_ids": ("consent_gate_excludes_service", "contact_hour_is_local", "personalization_is_purpose_limited", "trusted_device_never_overreaches"),
         "surfaces": ("/chat/me/preferences", "/chat/me/consent-history"),
@@ -3047,7 +3099,7 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         "flow_id": "customer_360_review",
         "title": "A customer and an agent read the same 360 view",
         "actor": "customer",
-        "personas": ("loyal_with_points", "repeatedly_cancelled", "dormant_45_days"),
+        "personas": ("loyal_with_points", "repeatedly_cancelled", "dormant_45_days", "stable_high_loyalty", "new_customer_no_snapshots"),
         "subflows": ("aggregate_sections", "build_communication", "explain_decisions"),
         # `policy_motion_needs_evidence` is here because "why has this person's
         # value changed, and may it change again" is part of reading a 360 -- and

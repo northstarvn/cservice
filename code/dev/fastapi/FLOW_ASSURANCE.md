@@ -1006,9 +1006,15 @@ The original eleven blind probes were fixed by:
   with the three allowed shapes (`universal`, `config`, `derived_no_contrast`),
   replacing the fragile docstring search. A probe without an entry there is
   reported as `unjustified_constant_expectation` rather than waved through.
-* Adding `vocabulary_coverage` to report gaps the personas cannot reach
-  (`loyal` stage in `RECOVERY_STAGE_RULES`; no persona clears both
-  `loyalty_score >= 80` and a completed booking).
+* Adding `vocabulary_coverage` to report gaps the personas cannot reach.
+
+**Vocabulary coverage now complete for retention** (resolved):
+* Added `retention_snapshot_count` persona field so the probe can vary snapshot
+  count per persona rather than hardcoding 2.
+* Added `new_customer_no_snapshots` persona (0 snapshots) → reaches `no_data`.
+* Added `stable_high_loyalty` persona (6 snapshots, low churn, high loyalty) →
+  reaches `stable` (bypasses the `watch` rule at priority 60).
+* All 5 retention bands now reached: `no_data`, `watch`, `at_risk`, `critical`, `stable`.
 
 **5. The divergence check is self-reproducibility, not a shadow comparison.**
 It proves the simulator is deterministic (ratio 0.0, tolerance 0.02) and that is
