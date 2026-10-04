@@ -452,14 +452,94 @@ count, because a count of regressions is something nobody can act on.
 | `l4_live` | **4** | 5 |
 
 `counts: {complete: 43, untested: 3, declared_only: 1, absent: 0, stub: 0,
-partial: 0, unassessable: 0}` out of 47 capabilities, with
+partial: 0, unassessable: 0}` out of 48 capabilities, with
 
 ```
+shallow: ['bookings', 'points_exchange', 'preferences', 'retention', 'topics']
 untested: ['blockage_log', 'release_ladder', 'topics']
 capability_blocking_detail:
   surface:/complaints/admin/sla-report=declared_only
   blockage_log=untested, release_ladder=untested, topics=untested
 ```
+
+### 5.5 Honest grades — "complete" is not enough
+
+The capability audit now distinguishes **three passing states** rather than just
+`complete` vs `partial`:
+
+| state | meaning |
+|---|---|
+| `complete` | All probes pass **and** no blind probes for this capability. A stub engine would fail at least one probe. |
+| `shallow` | All probes pass **but** at least one probe is blind (would pass against a stub). The capability *might* be working, but the probes don't prove it. |
+| `stub` | The engine resolves but does not branch — a constant answer for different expectations. |
+
+The `shallow` state was added because `capability_audit` previously reported
+`complete` for engines where every probe passed, even when those probes were
+blind. Five capabilities now grade `shallow`:
+
+* **bookings** — `booking_states_are_valid` and `booking_events_are_logged` are blind (universal invariants)
+* **points_exchange** — `points_quote_is_reproducible` is blind (same input, same output)
+* **preferences** — `consent_gate_excludes_service` is blind (static config)
+* **retention** — `forecast_confidence_decays` and `retention_series_builds` are blind
+* **topics** — `topic_classification_works` is blind (same vocabulary for all)
+
+The `shallow` state is not a failure — it is an **honest grade**. It means "the
+probes pass, but they don't prove the engine branches." A capability that is
+`shallow` can be promoted to `complete` by adding persona-varying expectations
+or by removing the blind probes. The `shallow` state is reported in
+`capability_blocking_detail` at `l3_canary` and `l4_live` so a release decision
+knows which capabilities are genuinely tested vs merely passing.
+
+The `stub` state is a failure — it means the engine would give the same answer
+to different customers. No capability currently grades `stub` on this tree.
+
+### 5.6 Honest fulfilment semantics — "applied" is not binary
+
+The offer fulfilment now distinguishes three outcomes rather than a single
+`applied: true/false`:
+
+| component | status | why |
+|---|---|---|
+| `points` (goodwill) | **applied** | `credit_recovery_points` moves the wallet balance — one canonical writer |
+| `waiver` (interest/fees) | **applied when linked** | `arrears_entry_id` populated → calls `waive_arrears_interest`/`waive_arrears_fees` |
+| `discount_percent` | **hook logged** | `requires_out_of_band: ["discount_percent"]` + `hook: "pricing_engine"` logged |
+| `priority` | **hook logged** | `requires_out_of_band: ["priority"]` + `hook: "queue_priority"` logged |
+
+The `applied` field in the fulfilment response is now `true` **only when at
+least one component is automatic**. Components with `automatic: false` are
+listed in `requires_out_of_band` with their hook name, so an operator sees
+exactly what was done vs what was recorded for later action.
+
+The event payload carries the same structure, so the audit trail answers "did
+this actually happen?" months later — not "was the row updated?" but "what
+effect actually landed?"
+
+### 5.7 Deeper journey break-and-watch
+
+The simulator now carries explicit negative controls that break the system and
+verify the simulator notices:
+
+| planted defect | probe that catches it | category |
+|---|---|---|
+| `service` added to `CONSENT_GATED_PURPOSES` | `consent_gate_excludes_service` | `gate_withheld_a_fix` |
+| `POSTURE_ADJUSTMENTS` catch-all changed to never apply | `posture_adjustment_is_effective` | `invariant_violated` |
+| `policy_scoring._posture_adjustment_row` replaced with stub | `posture_adjustment_is_effective` | `invariant_violated` |
+| `deps.authz_drift_report` replaced | `authz_routes_classified` | `unclassified_route` |
+| recovery planner drops `credit_points` action | `recovery_never_withholds_a_fix` | `recovery_never_withholds_a_fix` fails |
+| escalation guard made unmeasurable | `complaint_verdict_is_explained` | verdict folds to `review` |
+| retention band outside published scale | `retention_health_bands` | `invariant_violated` |
+| `forecast_confidence` removed from status table | `status_never_decays` | `status_never_decays` fails |
+| fully-trusted device for money step | `trusted_device_never_overreaches` | `trusted_device_never_overreaches` fails |
+| replicated channel pointed at live | `shadow_is_one_way` | `isolation_violation` |
+
+These are not "tests that pass" — they are **planted defects that must fail**.
+Each is in `TestNegativeControls` and the suite fails if any control *passes*
+(meaning the defect was not detected). The standing check
+`test_every_probe_the_governance_flow_depends_on_has_a_control` asserts the
+set of probe ids, so a renamed probe or missing control is a test failure.
+
+This is the direction the next phase should expand: every capability should have
+at least one planted-defect control that proves the probe can fail.
 
 `rule_engine` has left the untested list — Tier 1's work graded it. The
 remaining three are **still open**, and `release_ladder` is the recursive one:

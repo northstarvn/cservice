@@ -2827,18 +2827,18 @@ def _probe_blockage_log_renders(persona: Persona) -> ProbeOutcome:
 
     The `blockage_log` capability's `render_blockages_markdown` target must
     produce a non-empty markdown string that includes the expected sections.
-    The probe runs the renderer against a zero-finding run set and asserts
+    The probe runs the renderer against an empty finding set and asserts
     the output structure.
 
-    **The "Code map", "/meta/", "Tests" quartet only appears when a
-    `comparison` is provided.** The probe runs without one, so it asserts the
-    sections that are always present: the simulation header, the blockages list
-    (empty here), the flows-run line, and the ground-truth line.
+    **Does not run the flow** -- the previous version called
+    `run_all_flows(flow_ids=["admin_governance_review"])` which recursively
+    invoked this same probe, causing infinite recursion. The renderer works on
+    any run set, so an empty list is sufficient to test the structure.
     """
     from app import real_life_flows as FL
 
-    runs = FL.run_all_flows(flow_ids=["admin_governance_review"])
-    md = FL.render_blockages_markdown(runs, [])
+    # Empty run set -- tests the renderer structure without recursion
+    md = FL.render_blockages_markdown([], [])
     has_structure = (
         "### Real-life flow simulation" in md
         and "No blockage" in md

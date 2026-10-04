@@ -1564,6 +1564,80 @@ async def _prior_offer_credit(
     return (await db.execute(stmt)).scalars().first()
 
 
+async def _apply_arrears_waiver(
+    db: AsyncSession,
+    entry_id: int,
+    waiver_type: str,
+    now: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """Apply an arrears waiver for the given entry and type.
+
+    Delegates to the arrears payment module's waiver functions. Returns a dict
+    with the waived amounts, or None if the entry doesn't exist or isn't open.
+    """
+    from app.services import arrears_payments
+
+    waived: dict[str, Any] = {}
+    if waiver_type in ("interest", "all"):
+        interest_result = await arrears_payments.waive_arrears_interest(
+            db, entry_id, as_of=now
+        )
+        if interest_result:
+            waived["waived_interest"] = interest_result.waived_interest
+    if waiver_type in ("fees", "all"):
+        fees_result = await arrears_payments.waive_arrears_fees(
+            db, entry_id, as_of=now
+        )
+        if fees_result:
+            waived["waived_fees"] = fees_result.get("waived_fees")
+    return waived or None
+
+
+def _log_discount_hook(user_id: int, discount_pct: float, offer_id: int) -> None:
+    """Log a discount hook for the pricing engine to consume.
+
+    The pricing engine is not implemented in this repository. This function
+    logs the discount intent so an operator or external system knows what
+    should be applied. In a production system, this would call the pricing
+    engine's API or write to a message queue.
+    """
+    import logging
+
+    logger = logging.getLogger("customer_offers.discount_hook")
+    logger.info(
+        "discount_hook",
+        extra={
+            "user_id": user_id,
+            "discount_percent": discount_pct,
+            "offer_id": offer_id,
+            "hook": "pricing_engine",
+            "status": "pending_out_of_band",
+        },
+    )
+
+
+def _log_priority_hook(user_id: int, offer_id: int) -> None:
+    """Log a priority hook for the queue system to consume.
+
+    The queue priority system is not implemented in this repository. This
+    function logs the priority intent so an operator or external system knows
+    what should be prioritised. In a production system, this would call the
+    queue management system's API or write to a message queue.
+    """
+    import logging
+
+    logger = logging.getLogger("customer_offers.priority_hook")
+    logger.info(
+        "priority_hook",
+        extra={
+            "user_id": user_id,
+            "offer_id": offer_id,
+            "hook": "queue_priority",
+            "status": "pending_out_of_band",
+        },
+    )
+
+
 async def _apply_offer_effect(
     db: AsyncSession, row: models.CustomerOffer, *, now: Optional[datetime] = None
 ) -> dict[str, Any]:
@@ -1616,7 +1690,65 @@ async def _apply_offer_effect(
     components: dict[str, Any] = {}
     requires_out_of_band: list[str] = []
 
+    # Waiver kind: if we have an arrears_entry_id, we can actually apply the waiver
+    # using the arrears payment module. This closes the gap where the column existed
+    # but nothing ever populated or read it.
+    if kind == "waiver":
+        arrears_entry_id = int(getattr(row, "arrears_entry_id", 0) or 0)
+        if arrears_entry_id and waiver_type in ("interest", "fees", "all"):
+            waived = await _apply_arrears_waiver(db, arrears_entry_id, waiver_type, now)
+            if waived:
+                components["waiver"] = {
+                    "waiver_type": waiver_type,
+                    "arrears_entry_id": arrears_entry_id,
+                    "automatic": True,
+                    "waived_interest": waived.get("waived_interest"),
+                    "waived_fees": waived.get("waived_fees"),
+                    "why": f"waived {waiver_type} on arrears entry {arrears_entry_id}",
+                }
+                return {
+                    "applied": True,
+                    "credited_points": 0.0,
+                    "components": components,
+                    "requires_out_of_band": [],
+                }
+        # No arrears entry linked, or unknown waiver type - falls through to OOB
+        components["waiver"] = {
+            "waiver_type": waiver_type,
+            "automatic": False,
+            "why": (
+                "this offer carries no linked arrears entry, so there is no charge to "
+                "remove from here; waive it in the arrears system and note it"
+            ),
+        }
+        return {
+            "applied": False,
+            "components": components,
+            "requires_out_of_band": ["waiver"],
+        }
+
+    # Priority kind: queue urgency hook. No queue model exists in this repo,
+    # but we log the intent so an operator or external system knows what
+    # should be prioritised.
+    if kind == "priority":
+        _log_priority_hook(row.user_id, row.id)
+        components["priority"] = {
+            "automatic": False,
+            "hook": "queue_priority",
+            "why": (
+                "queue urgency is not modelled as a value anything reads in this "
+                "repository; the priority flag is recorded on the offer and the "
+                "queue system should prioritise this customer if implemented"
+            ),
+        }
+        return {
+            "applied": False,
+            "components": components,
+            "requires_out_of_band": ["priority"],
+        }
+
     if kind != "goodwill":
+        # Unknown kind
         components[kind or "unknown"] = {
             "automatic": False,
             "why": (
@@ -1625,15 +1757,6 @@ async def _apply_offer_effect(
                 "this service and an operator records it in the note"
             ),
         }
-        if waiver_type:
-            components["waiver"] = {
-                "waiver_type": waiver_type,
-                "automatic": False,
-                "why": (
-                    "this offer carries no arrears entry, so there is no charge to "
-                    "remove from here; waive it in the arrears system and note it"
-                ),
-            }
         return {
             "applied": False,
             "components": components,
@@ -1684,9 +1807,14 @@ async def _apply_offer_effect(
         }
 
     if discount > 0:
+        # Discount hook: record the discount for the pricing engine to consume.
+        # The pricing engine hook is not implemented in this repo; we record the
+        # intent so an operator knows what should happen.
+        _log_discount_hook(row.user_id, discount, row.id)
         components["discount_percent"] = {
             "offered": discount,
             "automatic": False,
+            "hook": "pricing_engine",
             "why": (
                 "no pricing engine in this service consumes discount_percent; it is "
                 "recorded on the offer and the discount is applied where the next "

@@ -725,6 +725,29 @@ def assess_capabilities(
             )
             continue
 
+        # Check for blind probes: all probes pass but some are blind (would pass against a stub)
+        blind_for_this = [
+            pid for pid in probe_ids if pid in stub.get("blind", [])
+        ]
+        if blind_for_this:
+            rows.append(
+                _row(
+                    capability_id=capability_id,
+                    kind="engine",
+                    title=str(engine.get("title") or capability_id),
+                    state="shallow",
+                    evidence=[
+                        f"{len(probe_rows)}/{len(probe_rows)} probe outcome(s) held",
+                        f"but {len(blind_for_this)} probe(s) are blind: {', '.join(sorted(blind_for_this))}",
+                        stub.get("detail", ""),
+                    ],
+                    probes=probe_ids,
+                    flows=tuple(_str_tuple(engine.get("flows"))),
+                    detail="all probes pass but blind probes mean a stub engine would also pass",
+                )
+            )
+            continue
+
         if not probe_rows:
             # Its own state. Grading this `complete` because nothing failed
             # would claim evidence that does not exist, and "we found nothing
