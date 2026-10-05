@@ -324,9 +324,73 @@ class TestTheCeilingIsReal:
         So this asserts all three of its blockers, by name. It is also the test
         that would fail if someone deleted a gate from ``MATURITY_LEVELS``, which
         is the way a ladder quietly loses a rung.
+
+        **The capability finding this used to rely on is planted, and that is a
+        change in kind rather than a repair.** This test's subject is *a typed
+        number must not override the app's own measurement* -- an operator who
+        posts ``capability_blocking: 0`` over a real finding must not reach a
+        level serving traffic. It expressed that by leaning on this checkout
+        honestly having a blocking capability, and asserting the app's number came
+        back ``> 0``.
+
+        Then the last untested capability got graded and there was nothing left to
+        block on: 44 ``complete`` plus 4 ``shallow``, none of which is a defect
+        state, so ``capability_blocking`` is a real 0. The test began failing on
+        the tree being *more* complete, which is the wrong direction for a test to
+        fail in.
+
+        The obvious repair -- assert ``== 0`` and that the gate now passes -- would
+        have deleted the subject. A forged ``0`` is only observable when the truth
+        is non-zero, so a tree with no findings cannot test this at all and the
+        test has to bring its own. One capability row is downgraded to ``partial``
+        (a defect state, so it blocks at every rung including ``l3_canary``) by
+        patching the report the router reads. Planted, named in the failure
+        message, and removed by ``monkeypatch`` -- the same discipline as
+        ``TestNegativeControls`` in the simulator suite.
         """
         for name, value in ISOLATED_SHADOW_ENV.items():
             monkeypatch.setenv(name, value)
+
+        from app import real_life_flows as flows_module
+
+        real_report = flows_module.capability_report
+        planted = {
+            "capability_id": "planted_partial_for_this_test",
+            "title": "planted defect: a capability that exists and is incomplete",
+        }
+
+        def report_with_one_planted_partial(*args, **kwargs):
+            """The real report, with exactly one row downgraded to ``partial``."""
+            report = real_report(*args, **kwargs)
+            rows = [dict(row) for row in report["capabilities"]]
+            for row in rows:
+                if str(row["capability_id"]) == planted["capability_id"]:
+                    break
+            else:
+                rows.append(
+                    {
+                        "capability_id": planted["capability_id"],
+                        "state": "partial",
+                        "kind": "probe",
+                        "title": planted["title"],
+                        "detail": (
+                            "planted by test_the_third_rung_is_gated_by_a_real_finding: "
+                            "this checkout has no blocking capability finding, so the "
+                            "test supplies one. Without it there is nothing for a typed "
+                            "capability_blocking: 0 to disagree with and the gate cannot "
+                            "be observed holding."
+                        ),
+                        "evidence": [],
+                        "probes": [],
+                        "flows": [],
+                    }
+                )
+            patched = dict(report)
+            patched["capabilities"] = rows
+            return patched
+
+        monkeypatch.setattr(flows_module, "capability_report", report_with_one_planted_partial)
+
         root = mounted(world, user_id=ROOT)
         ladder.register("e2e-l3")
         ladder.seed_deployments("a", "b", "c")
@@ -370,18 +434,26 @@ class TestTheCeilingIsReal:
             f"the ledger holds 2 reachable targets and the typed 99 survived: {measured}"
         )
         assert measured["capability_blocking"] > 0, (
-            "capability_blocking is a real count in this checkout and 0 was typed; "
-            f"the app's number must win: {measured}"
+            f"{planted['capability_id']!r} was planted as a `partial` defect, so the "
+            "app's number must beat the 0 that was typed: " + repr(measured)
         )
         assert measured["capability_blocking_detail"], (
             "a non-zero count with no detail is a number nobody can act on: "
             f"{measured}"
         )
+        assert any(
+            planted["capability_id"] in row for row in measured["capability_blocking_detail"]
+        ), (
+            "the planted defect is not in the detail, so the count is real but the "
+            f"reason for it is not: {measured}"
+        )
 
         blocked = root.json("post", "/kaizen/admin/candidates/e2e-l3/advance", json={})
         assert blocked["advanced"] is False, blocked
         # `backend_completeness_honest` is the one still failing, and it is failing
-        # on a real capability finding rather than on a missing number.
+        # on a capability finding rather than on a missing number -- the planted
+        # one, so the gate is observed holding for a reason rather than for absence
+        # of evidence.
         assert set(blocked["gate_report"]["blocking_failures"]) == {
             "backend_completeness_honest"
         }, blocked

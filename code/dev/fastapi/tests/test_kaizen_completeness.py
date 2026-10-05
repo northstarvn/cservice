@@ -422,6 +422,22 @@ class TestAssessment:
         probe may be an orphan**, with a planted orphan as the negative control.
         A registry check that only runs on a healthy tree proves nothing about the
         registry.
+
+        **The last assertion used to be ``assert "topics" in report["untested"]``,
+        and it is now the opposite.** That pin existed so the ``topics`` blindness
+        could not be quietly forgotten: the probe asked that the resolved theme was
+        a member of a known vocabulary, which every persona answered identically,
+        so a classifier that returned one hard-coded topic forever would have
+        passed. Pinning a *known weakness* is a real technique and it worked -- it
+        is why the weakness got fixed rather than absorbed.
+
+        But ``topics`` is now measured from the live classifier and carries three
+        distinct expectations, so the pin asserted a defect that no longer exists.
+        A test that keeps asserting a fixed bug is a test that has to be deleted
+        before the suite can be green, which is an argument for deleting it.
+        Replaced with the property it was standing in for: nothing is untested.
+        Strictly stronger, and it fails again by itself if any probe regresses --
+        and it needs no edit to keep being true.
         """
         from app import real_life_flows
 
@@ -431,7 +447,10 @@ class TestAssessment:
             "a registered probe reported as never exercised: "
             f"{report['orphan_probes']}"
         )
-        assert "topics" in report["untested"]
+        assert report["untested"] == [], (
+            "a capability the audit cannot grade at all: "
+            f"{report['untested']}"
+        )
 
     def test_a_probe_that_really_is_orphaned_is_still_reported(self):
         """The negative control for the test above.

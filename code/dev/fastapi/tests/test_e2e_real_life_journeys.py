@@ -29,6 +29,7 @@ customer row and a policy score, exactly as production would.
 
 from datetime import timedelta
 
+import asyncio
 import pytest
 
 from _e2e_world import (
@@ -266,9 +267,11 @@ class TestChiaraReopens:
             "the case was resolved and is open at the same time"
         )
 
-        root.json("post", f"/complaints/{reference}/resolve", json={
-            "resolution_code": "refunded",
-        })
+        root.json(
+            "post",
+            f"/complaints/{reference}/resolve",
+            json={"resolution_code": "refunded"},
+        )
         closed = root.json("post", f"/complaints/{reference}/close", json={})
         assert closed["status"] == "closed", closed
 
@@ -909,3 +912,565 @@ class TestTheCastIsRealData:
     def test_the_actors_the_flows_name_are_in_the_cast(self):
         for user_id in (ANA, BRUNO, CHIARA, ROOT):
             assert person(user_id).user_id == user_id
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 break-and-watch
+# ---------------------------------------------------------------------------
+
+
+class TestBreakAndWatch:
+    """Break the journey mid-flight; assert the flow refuses to lie about it.
+
+    Every test above sees the system working. A flow that only ever runs on the
+    happy path has an untested half: each claim it makes about *durable* state
+    -- "we put 250 points on your account" -- is also a claim about work that
+    did not happen when the worker underneath it broke.
+
+    So each test here removes one dependency mid-journey and asserts the
+    **invariant**, not an error shape. An invariant has to hold however the
+    failure is dressed up:
+
+    * a wallet balance either moved by the full amount or did not move at all;
+    * an offer is either ``fulfilled`` with its effect applied, or still
+      ``accepted`` -- never ``fulfilled`` over an unapplied effect.
+
+    Asserting a status code instead would let the same bug back the moment
+    someone chose a different way to report it. One of these was false before it
+    was written; see its comment.
+    """
+
+    def _accepted_goodwill(self, world):
+        """An accepted goodwill offer, plus the balance before it is fulfilled.
+
+        Every test here needs the same preamble, so it is written once. A
+        preamble that drifts slightly between tests is how two of these ended up
+        meaning different things under the same name.
+        """
+        root = mounted(world, user_id=ROOT)
+        ana = mounted(world, user_id=ANA)
+
+        world.add(world.wallet(ANA, balance=500.0))
+        world.commit()
+
+        issued = root.json(
+            "post",
+            "/chat/admin/recovery/offers",
+            json={
+                "kind": "goodwill",
+                "user_id": ANA,
+                "recovery_context": {
+                    "recovery_readiness": "high",
+                    "churn_risk": "high",
+                },
+            },
+        )
+        reference = issued["reference"]
+        accepted = ana.json("post", f"/chat/me/offers/{reference}/accept")
+        assert accepted["accepted"] is True, accepted
+        return root, ana, reference, _balance(world, ANA)
+
+    def test_a_fulfilled_offer_means_the_points_actually_landed(self, world):
+        """The control: with the writer working, the claim is true.
+
+        Separate because every other test here is only meaningful against it.
+        Without it, "the balance moved by exactly 250" would also be satisfied
+        by a balance that never moves at all -- which is the very defect these
+        tests exist to catch. It has to be ruled out first, in its own right.
+        """
+        root, _ana, reference, before = self._accepted_goodwill(world)
+
+        fulfilled = root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{reference}/outcome",
+            json={"outcome": "fulfil", "note": "control"},
+        )
+        assert fulfilled["recorded"] is True, fulfilled
+        assert fulfilled["status"] == "fulfilled", fulfilled
+        assert fulfilled["effect"]["applied"] is True, fulfilled["effect"]
+        assert_money(
+            _balance(world, ANA), before + 250.0, what="balance after fulfil"
+        )
+
+    def test_a_broken_points_writer_leaves_the_offer_unfulfilled(self, world):
+        """If the points never land, the offer must not claim ``fulfilled``.
+
+        The defect this was written for. :func:`record_outcome` writes the
+        ``fulfilled`` status *before* applying the effect, so any error handling
+        that turns a failed credit into a tidy ``{"applied": False}`` payload
+        produces a fulfilled offer over an unapplied effect: HTTP 200, status
+        ``fulfilled``, and a customer told in the present perfect that points
+        are on their account. A previous version of ``_apply_offer_effect``
+        caught the exception and did exactly that.
+
+        Hence the two assertions are about the claims rather than the response:
+
+        1. the offer is not ``fulfilled`` -- the transaction aborts and it stays
+           ``accepted``;
+        2. the balance did not move.
+
+        The second reads the wallet rather than the payload, and that is the
+        whole point: a half-credited balance is the failure mode the first
+        assertion alone would not rule out.
+        """
+        from app.services import recovery_playbooks
+
+        root, ana, reference, before = self._accepted_goodwill(world)
+
+        def broken_credit(*_args, **_kwargs):
+            raise RuntimeError("points ledger unavailable")
+
+        original = recovery_playbooks.credit_recovery_points
+        recovery_playbooks.credit_recovery_points = broken_credit
+        try:
+            # The failure has to escape ``record_outcome``. In production it
+            # surfaces as a 500; the ASGI test client re-raises instead, so the
+            # assertion is on the escape itself. Anything *less* than escaping --
+            # a caught exception rendered as a tidy payload -- is the bug.
+            with pytest.raises(RuntimeError, match="points ledger unavailable"):
+                root.post(
+                    f"/chat/admin/recovery/offers/{reference}/outcome",
+                    json={"outcome": "fulfil", "note": "the writer is down"},
+                )
+        finally:
+            recovery_playbooks.credit_recovery_points = original
+
+        # 1. the offer did not move.
+        reread = ana.json("get", f"/chat/me/offers/{reference}")
+        assert reread["status"] == "accepted", (
+            f"the offer reports {reread['status']!r} after its credit raised; "
+            "'fulfilled' is defined as the effect having landed, so a failed "
+            "credit must leave it accepted"
+        )
+
+        # 2. and neither did the balance.
+        assert_money(
+            _balance(world, ANA),
+            before,
+            what="balance after a fulfil whose credit raised",
+        )
+
+    def test_a_repeated_fulfilment_never_credits_twice(self, world):
+        """Re-running fulfilment is refused, so the balance moves at most once.
+
+        A double credit is the failure mode an idempotency claim hides, and the
+        one a reader of a single response cannot rule out. ``_prior_offer_credit``
+        is what prevents it, so the assertion is on the wallet rather than on the
+        refusal message -- the message is copy, the balance is money.
+        """
+        root, _ana, reference, before = self._accepted_goodwill(world)
+
+        first = root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{reference}/outcome",
+            json={"outcome": "fulfil", "note": "first"},
+        )
+        assert first["recorded"] is True, first
+        assert_money(
+            _balance(world, ANA), before + 250.0, what="balance after one fulfil"
+        )
+
+        second = root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{reference}/outcome",
+            json={"outcome": "fulfil", "note": "again"},
+        )
+        assert second["recorded"] is False, second
+        assert_money(
+            _balance(world, ANA),
+            before + 250.0,
+            what="balance after a second, refused fulfil",
+        )
+
+    def test_the_sentence_a_customer_reads_tracks_what_actually_landed(self, world):
+        """The prose is a claim too, and it was claiming things that did not happen.
+
+        This is the third instance of one defect, and the one that outlived the
+        first two. ``_apply_offer_effect`` claims ``fulfilled`` before applying the
+        effect and nothing rolled it back (fixed above). Then it reported
+        ``requires_out_of_band`` so an operator would know which components it
+        could not deliver. Both fixed. And the sentence the *customer* reads said,
+        from every status including ``offered``:
+
+            "We put 250 points on your account and took 15.0% off your next service."
+
+        Two claims in one template, both wrong:
+
+        * **tense** -- "we put 250 points on your account" while the offer was
+          merely ``offered`` and the balance had not moved. The module's own
+          comment names the state this destroys: "you accepted and we have not
+          done it yet" is a real and embarrassing state, and a fixed past-tense
+          sentence renders it identically to the state where it is not true;
+        * **scope** -- "took 15% off" for a component the same response reported
+          as ``requires_out_of_band``. One reader was told the truth and the
+          other the opposite, in the same flow.
+
+        So the assertions are cross-readings rather than strings: for each state,
+        what the customer is told and what the operator is told have to agree. A
+        ``"15%" not in what`` assertion would be satisfied by deleting the clause
+        altogether, which is not the fix; asserting the copy *and* the payload
+        name the same outstanding component is.
+        """
+        root, ana, reference, before = self._accepted_goodwill(world)
+
+        # --- while it is only accepted, nothing has been given yet.
+        pending = ana.json("get", f"/chat/me/offers/{reference}")
+        assert pending["status"] == "accepted", pending
+        assert_money(_balance(world, ANA), before, what="balance while merely accepted")
+        assert "We put" not in pending["explanation"]["what"], (
+            "the customer was told in the past tense that points are on their "
+            f"account while the status is {pending['status']!r} and the balance "
+            f"has not moved: {pending['explanation']['what']!r}"
+        )
+        assert "discount_percent" in pending["explanation"]["outstanding"], (
+            f"a component nothing applies is not named as outstanding to the "
+            f"customer: {pending['explanation']}"
+        )
+
+        # --- the operator's report and the customer's sentence name the same
+        # outstanding component, from the same flow.
+        fulfilled = root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{reference}/outcome",
+            json={"outcome": "fulfil", "note": "done"},
+        )
+        assert fulfilled["recorded"] is True, fulfilled
+        operator_outstanding = sorted(fulfilled["effect"]["requires_out_of_band"])
+
+        after = ana.json("get", f"/chat/me/offers/{reference}")
+        assert after["status"] == "fulfilled", after
+        assert_money(_balance(world, ANA), before + 250.0, what="balance after fulfil")
+        assert "We put" in after["explanation"]["what"], (
+            f"the points did land and the customer is not told so: "
+            f"{after['explanation']['what']!r}"
+        )
+        assert sorted(after["explanation"]["outstanding"]) == operator_outstanding, (
+            f"the customer and the operator were told different things about the "
+            f"same offer: customer {after['explanation']['outstanding']}, operator "
+            f"{operator_outstanding}"
+        )
+
+    def test_a_discount_nothing_applies_is_never_spoken_of_in_the_past_tense(self, world):
+        """The control on the other half of the defect: it was true before this.
+
+        The test above pins that the two readers agree. This pins that the
+        agreement is not achieved by deleting the discount from the sentence --
+        the discount is 15% on every goodwill offer this repository issues
+        (``RECOVERY_SAVE_INCENTIVES``), so silently dropping it would leave a
+        customer with a promise nobody mentions, which is the same defect wearing
+        the opposite sign.
+
+        So the amount is asserted present, and asserted *not* as something that
+        has happened, at every status including ``fulfilled``.
+        """
+        root, ana, reference, _before = self._accepted_goodwill(world)
+        root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{reference}/outcome",
+            json={"outcome": "fulfil", "note": "done"},
+        )
+
+        for label in ("while offered", "after fulfilled"):
+            detail = ana.json("get", f"/chat/me/offers/{reference}")
+            what = detail["explanation"]["what"]
+            assert "15%" in what, (
+                f"{label}: the 15% discount the offer carries is absent from the "
+                f"customer's sentence, so a promise made to the operator is not "
+                f"made to the customer: {what!r}"
+            )
+            assert "15.0%" not in what, (
+                f"{label}: a storage float reached the page: {what!r}"
+            )
+            lowered = what.lower()
+            assert "took 15%" not in lowered and "discounted 15%" not in lowered, (
+                f"{label}: the discount is described as spent, and nothing in this "
+                f"repository spends it: {what!r}"
+            )
+            assert "discount_percent" in detail["explanation"]["outstanding"], (
+                f"{label}: not named as outstanding: {detail['explanation']}"
+            )
+
+    def test_a_waiver_nothing_here_can_apply_says_so_rather_than_promising(self, world):
+        """The third form of the same defect, and the one a reword would miss.
+
+        The two tests above cover a component this service **never** applies. A
+        waiver is different: `_apply_offer_effect` *can* apply it, but only when
+        `arrears_entry_id` is populated -- and `issue_offer` never populates it.
+        So an unlinked waiver is not an edge case, it is **every** waiver this
+        service issues, and the component is genuinely appliable in principle.
+
+        That is what makes a two-form rewrite wrong. "We're removing the interest
+        from your account" is in the *future* tense, so it passes every review that
+        the past-tense template failed, and it is still a promise by this process
+        to do something this process will not do. The honest sentence has to name
+        a third state -- not-yet-done-by-us versus not-ours-to-do -- and that
+        distinction only exists because the row decides.
+
+        So the assertions are on the two readers agreeing *and* on the sentence
+        declining to commit us. Asserting the absence of "We're removing" would be
+        satisfied by deleting the clause; asserting the clause is present *and*
+        hands the work to somebody else is not.
+        """
+        root = mounted(world, user_id=ROOT)
+        ana = mounted(world, user_id=ANA)
+
+        # Ana is `customer-premium`, so the waiver is eligible -- a refusal would
+        # test the approval path instead of the copy.
+        issued = root.json(
+            "post",
+            "/chat/admin/recovery/offers",
+            json={
+                "kind": "waiver",
+                "user_id": ANA,
+                "waiver_type": "interest",
+                "recovery_context": {"recovery_readiness": "", "churn_risk": "low"},
+                "policy_score": {
+                    "policy_tier": person(ANA).policy_tier,
+                    "access_score": 0.0,
+                },
+            },
+        )
+        assert issued["issued"] is True, issued
+        reference = issued["reference"]
+
+        before = ana.json("get", f"/chat/me/offers/{reference}")
+        assert before["explanation"]["what"], before
+        assert "We're removing" not in before["explanation"]["what"], (
+            "the customer was told this service is about to remove the interest, "
+            "and nothing in this service removes it -- no arrears entry is linked, "
+            f"and `issue_offer` never links one: {before['explanation']['what']!r}"
+        )
+        assert "our team" in before["explanation"]["what"], (
+            "the work is handed to somebody rather than promised to the customer, "
+            f"which is what actually happens: {before['explanation']['what']!r}"
+        )
+        assert "waiver" in before["explanation"]["outstanding"], before["explanation"]
+
+        # And after fulfilment, the two readers still agree about what is left.
+        ana.json("post", f"/chat/me/offers/{reference}/accept")
+        fulfilled = root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{reference}/outcome",
+            json={"outcome": "fulfil", "note": "done"},
+        )
+        assert fulfilled["recorded"] is True, fulfilled
+        operator_outstanding = sorted(fulfilled["effect"]["requires_out_of_band"])
+        assert operator_outstanding == ["waiver"], (
+            f"an unlinked waiver should be reported as out-of-band and nothing else: "
+            f"{fulfilled['effect']}"
+        )
+        assert fulfilled["effect"]["applied"] is False, (
+            f"nothing was applied here, so the effect must not claim it was: "
+            f"{fulfilled['effect']}"
+        )
+
+        after = ana.json("get", f"/chat/me/offers/{reference}")
+        assert sorted(after["explanation"]["outstanding"]) == operator_outstanding, (
+            f"the customer and the operator were told different things: customer "
+            f"{after['explanation']['outstanding']}, operator {operator_outstanding}"
+        )
+        assert "We removed" not in after["explanation"]["what"], (
+            f"the waiver is reported removed and nothing removed it: "
+            f"{after['explanation']['what']!r}"
+        )
+
+    def test_a_dropped_recovery_action_refuses_fulfilled(self, world):
+        """A mid-journey failure leaves the offer unfulfilled, and the copy says so.
+
+        The recovery planner emits a sequence of actions. If one of them fails
+        (writer raises), the offer must stay in `accepted` and the customer's
+        sentence must not claim the effect landed. This is the same invariant as
+        BW-2 but at the planner level rather than the mutator level.
+
+        The failure must escape as an exception (in production: 500). The test
+        verifies the exception escapes, then checks the offer state and balance
+        are unchanged.
+        """
+        from app.services import recovery_playbooks
+
+        root = mounted(world, user_id=ROOT)
+        ana = mounted(world, user_id=ANA)
+
+        # Issue a goodwill offer that carries points and a discount.
+        # Use recovery_readiness="high" (250 points, 15% discount) with
+        # investment_band="standard" (scale 1.0) for predictable amounts.
+        issued = root.json(
+            "post",
+            "/chat/admin/recovery/offers",
+            json={
+                "kind": "goodwill",
+                "user_id": ANA,
+                "recovery_context": {"recovery_readiness": "high", "churn_risk": "high"},
+                "policy_score": {"policy_tier": person(ANA).policy_tier, "access_score": 0.0},
+                "investment_band": "standard",
+            },
+        )
+        assert issued["issued"] is True, issued
+        reference = issued["reference"]
+
+        # Accept the offer.
+        ana.json("post", f"/chat/me/offers/{reference}/accept")
+
+        # Patch the points writer to fail.
+        original_credit = recovery_playbooks.credit_recovery_points
+
+        async def failing_credit(*_args, **_kwargs):
+            raise RuntimeError("simulated points writer failure")
+
+        recovery_playbooks.credit_recovery_points = failing_credit
+        try:
+            # The failure must escape -- in production this is a 500, the test
+            # client re-raises the app exception.
+            with pytest.raises(RuntimeError, match="simulated points writer failure"):
+                root.post(
+                    f"/chat/admin/recovery/offers/{reference}/outcome",
+                    json={"outcome": "fulfil", "note": "attempt"},
+                )
+        finally:
+            recovery_playbooks.credit_recovery_points = original_credit
+
+        # After the failed attempt, the offer must still be accepted (not fulfilled)
+        # and the balance must be unchanged.
+        after = ana.json("get", f"/chat/me/offers/{reference}")
+        assert after["status"] == "accepted", (
+            f"offer must stay accepted after failed fulfilment: {after}"
+        )
+        assert "We put" not in after["explanation"]["what"], (
+            f"customer was told points landed but they didn't: {after['explanation']['what']!r}"
+        )
+        assert "points" in after["explanation"]["outstanding"], after["explanation"]
+        assert "discount_percent" in after["explanation"]["outstanding"], after["explanation"]
+
+    def test_a_broken_consent_gate_is_reported_through_the_probe(self, world):
+        """Consent gate withholds a fix, and the probe path surfaces it.
+
+        The probe `consent_gate_excludes_service` has two independent checks:
+        1. `service` and `recovery` must NOT be in `CONSENT_GATED_PURPOSES` (config
+           invariant -- the negative control in `TestNegativeControls` patches the
+           module to add `service` and requires `gate_withheld_a_fix`).
+        2. For all declared purposes, the persona's consent must permit them.
+
+        Since `service`/`recovery` are never gated in the real config, check 2 is
+        only exercised for purposes that ARE gated (analytics, marketing, etc.).
+        This test verifies check 1 by patching the module constant.
+        """
+        from app.real_life_flows import _probe_consent_propagation, PERSONA_BY_ID
+        from app.services import preferences
+
+        # Verify the probe's config invariant: service/recovery must not be gated.
+        original_gated = tuple(preferences.CONSENT_GATED_PURPOSES)
+        preferences.CONSENT_GATED_PURPOSES = list(original_gated) + ["service"]
+        try:
+            chiara = PERSONA_BY_ID["repeatedly_cancelled"]
+            outcome = _probe_consent_propagation(chiara)
+            assert outcome.held is False, (
+                f"probe must fail when service is gated: {outcome.summary}"
+            )
+            summ = outcome.summary.lower()
+            assert "gates ['service'], which must never gate" in summ, (
+                f"probe should name the forbidden gated purpose: {outcome.summary}"
+            )
+        finally:
+            preferences.CONSENT_GATED_PURPOSES = list(original_gated)
+
+    def test_partial_fulfilment_credit_yes_waiver_no_agrees_on_outstanding(self, world):
+        """One component applies, the other does not; both readers agree on what is left.
+
+        A goodwill offer (with points + discount) and a waiver offer (unlinked)
+        for the same customer. The goodwill credits points but cannot apply the
+        discount; the waiver cannot apply at all (no arrears entry). Both readers
+        must agree on what is outstanding.
+        """
+        from types import SimpleNamespace
+        root = mounted(world, user_id=ROOT)
+        ana = mounted(world, user_id=ANA)
+
+        # Issue a goodwill offer (points + discount) -- recovery_readiness="high"
+        # gives 250 points / 15% discount at standard generosity.
+        issued_goodwill = root.json(
+            "post",
+            "/chat/admin/recovery/offers",
+            json={
+                "kind": "goodwill",
+                "user_id": ANA,
+                "recovery_context": {"recovery_readiness": "high", "churn_risk": "high"},
+                "policy_score": {"policy_tier": person(ANA).policy_tier, "access_score": 0.0},
+                "investment_band": "standard",
+            },
+        )
+        assert issued_goodwill["issued"] is True, issued_goodwill
+        ref_gw = issued_goodwill["reference"]
+
+        # Issue a waiver offer (no arrears entry, so unlinked).
+        # Waiver policy needs access_score >= 70 for customer-premium tier.
+        policy_snapshot = SimpleNamespace(policy_tier=person(ANA).policy_tier, access_score=88.0)
+        issued_waiver = root.json(
+            "post",
+            "/chat/admin/recovery/offers",
+            json={
+                "kind": "waiver",
+                "user_id": ANA,
+                "waiver_type": "interest",
+                "recovery_context": {"recovery_readiness": "", "churn_risk": "low"},
+                "policy_score": {"policy_tier": person(ANA).policy_tier, "access_score": 88.0},
+            },
+        )
+        assert issued_waiver["issued"] is True, issued_waiver
+        ref_waiver = issued_waiver["reference"]
+
+        # Accept both.
+        ana.json("post", f"/chat/me/offers/{ref_gw}/accept")
+        ana.json("post", f"/chat/me/offers/{ref_waiver}/accept")
+
+        # Fulfil goodwill.
+        fulfilled_gw = root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{ref_gw}/outcome",
+            json={"outcome": "fulfil", "note": "goodwill done"},
+        )
+        assert fulfilled_gw["recorded"] is True, fulfilled_gw
+        assert fulfilled_gw["effect"]["applied"] is True, fulfilled_gw["effect"]
+        assert "points" not in fulfilled_gw["effect"]["requires_out_of_band"], (
+            "points must be applied, not out-of-band"
+        )
+        assert "discount_percent" in fulfilled_gw["effect"]["requires_out_of_band"], (
+            "discount must be out-of-band"
+        )
+
+        # Fulfil waiver (unlinked, so nothing applies).
+        fulfilled_waiver = root.json(
+            "post",
+            f"/chat/admin/recovery/offers/{ref_waiver}/outcome",
+            json={"outcome": "fulfil", "note": "waiver done"},
+        )
+        assert fulfilled_waiver["recorded"] is True, fulfilled_waiver
+        assert fulfilled_waiver["effect"]["applied"] is False, fulfilled_waiver["effect"]
+        assert fulfilled_waiver["effect"]["requires_out_of_band"] == ["waiver"], (
+            f"unlinked waiver must be out-of-band: {fulfilled_waiver['effect']}"
+        )
+
+        # Customer copy for goodwill: points done, discount out-of-band.
+        after_gw = ana.json("get", f"/chat/me/offers/{ref_gw}")
+        assert "250 points on your account" in after_gw["explanation"]["what"], after_gw["explanation"]["what"]
+        assert "discount_percent" in after_gw["explanation"]["outstanding"], after_gw["explanation"]
+        assert "points" not in after_gw["explanation"]["outstanding"], after_gw["explanation"]
+
+        # Customer copy for waiver: out-of-band clause, waiver outstanding.
+        after_waiver = ana.json("get", f"/chat/me/offers/{ref_waiver}")
+        assert "our team" in after_waiver["explanation"]["what"], after_waiver["explanation"]["what"]
+        assert "waiver" in after_waiver["explanation"]["outstanding"], after_waiver["explanation"]
+
+        # Operator and customer agree on goodwill outstanding.
+        op_outstanding_gw = sorted(fulfilled_gw["effect"]["requires_out_of_band"])
+        cust_outstanding_gw = sorted(after_gw["explanation"]["outstanding"])
+        assert op_outstanding_gw == cust_outstanding_gw == ["discount_percent"], (
+            f"goodwill: op={op_outstanding_gw} cust={cust_outstanding_gw}"
+        )
+
+        # Operator and customer agree on waiver outstanding.
+        op_outstanding_wv = sorted(fulfilled_waiver["effect"]["requires_out_of_band"])
+        cust_outstanding_wv = sorted(after_waiver["explanation"]["outstanding"])
+        assert op_outstanding_wv == cust_outstanding_wv == ["waiver"], (
+            f"waiver: op={op_outstanding_wv} cust={cust_outstanding_wv}"
+        )
+

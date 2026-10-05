@@ -727,9 +727,19 @@ OFFER_HEADLINES: dict[str, str] = {
 
 #: The customer-facing sentences, per kind. Split from the engine's own wording
 #: on purpose: see :data:`OFFER_HEADLINES` for why the upstream name is not used.
+#:
+#: **There is deliberately no ``what`` here.** The sentence a customer reads is
+#: composed per *component* by :func:`_component_sentence`, because a kind's
+#: promise is not one claim. ``goodwill`` promises points, which this service
+#: delivers, *and* a discount, which nothing in this repository applies; a single
+#: template bundling the two cannot be true in both halves, so it was true in
+#: neither. The template that used to sit here read "We put 250 points on your
+#: account and took 15% off your next service" from every status including
+#: ``offered`` -- claiming a completed act before the money moved, and claiming a
+#: discount that is reported to the *operator* as ``requires_out_of_band`` in the
+#: very same response. One reader was told the truth and the other the opposite.
 OFFER_EXPLANATIONS: dict[str, dict[str, str]] = {
     "goodwill": {
-        "what": "We put {points} points on your account and took {discount}% off your next service.",
         "why": (
             "Something went wrong on our side and you had to chase it. This is our "
             "way of saying sorry, and it is not a discount you would have earned."
@@ -737,7 +747,6 @@ OFFER_EXPLANATIONS: dict[str, dict[str, str]] = {
         "legal": "Offered because you reported a problem we were handling. No marketing consent is required for it.",
     },
     "waiver": {
-        "what": "We have removed {waiver_type} from your account.",
         "why": (
             "Charging you for a delay we caused is not something we are willing to do, "
             "so the charge is being removed rather than reduced."
@@ -745,7 +754,6 @@ OFFER_EXPLANATIONS: dict[str, dict[str, str]] = {
         "legal": "Offered because a charge on your account is being waived under your policy.",
     },
     "priority": {
-        "what": "We will handle anything you send next ahead of other requests.",
         "why": (
             "You should not have to wait behind a queue to get an answer after "
             "reporting a problem."
@@ -753,6 +761,249 @@ OFFER_EXPLANATIONS: dict[str, dict[str, str]] = {
         "legal": "Offered because your open issue is being escalated for urgent review.",
     },
 }
+
+#: The three states a promise component can honestly be in, and one clause per
+#: component per state. Read :data:`OFFER_EXPLANATIONS` first: this table exists
+#: because the template it replaced could not be split.
+#:
+#: * ``done`` -- the effect landed here. Reachable only if
+#:   :func:`_components_this_service_applies` can return the component *and* the
+#:   offer reached ``fulfilled``.
+#: * ``pending`` -- the effect is ours and has not happened yet. A commitment this
+#:   service will keep on fulfilment, so the future tense is accurate.
+#: * ``out_of_band`` -- the effect is **not ours**: nothing in this repository
+#:   applies it, and an operator has to finish it elsewhere. See
+#:   :func:`_apply_offer_effect`, which reports exactly these components in
+#:   ``requires_out_of_band``.
+#:
+#: **The third state is not a synonym for the second, and conflating them is the
+#: defect again in a smaller coat.** "We're removing the charge from your account"
+#: tells a customer this service is about to do it. For a waiver with no arrears
+#: entry -- and nothing in this module populates ``arrears_entry_id``, so that is
+#: *every* waiver issued here -- nothing will remove it. The sentence would be as
+#: false as the past-tense one, just in the future tense instead.
+#:
+#: **A component with no ``done`` clause is therefore load-bearing**, and
+#: :func:`validate_offers` checks it in both directions: it cannot gain a ``done``
+#: clause unless this service gains the ability to use it, and it cannot lose one
+#: while the service still can. Either way the customer reads a sentence with no
+#: reachable state.
+_COMPONENT_CLAUSES: dict[str, dict[str, str]] = {
+    "points": {
+        "done": "We put {points} points on your account.",
+        "pending": "We're putting {points} points on your account.",
+    },
+    "waiver": {
+        "done": "We removed the {waiver_type} from your account.",
+        "pending": "We're removing the {waiver_type} from your account.",
+        "out_of_band": (
+            "The {waiver_type} removal is noted on your account for our team to "
+            "complete."
+        ),
+    },
+    "discount_percent": {
+        "out_of_band": (
+            "A {discount}% discount on your next service is noted on your account "
+            "for our team to apply."
+        ),
+    },
+    "priority": {
+        "out_of_band": (
+            "Your next request is flagged on your account for our team to prioritise."
+        ),
+    },
+}
+
+#: The same claims in the terse form the ``plain_language_explanations`` preference
+#: selects. Kept as a second table rather than derived from the sentences above
+#: because a truncation of a sentence is not a shorter sentence -- "250 points on
+#: the way" and "We put 250 points on your account." differ in tense, and the tense
+#: is the whole of the defect. :func:`validate_offers` checks the two tables have
+#: the same components and the same reachable forms, so a clause cannot be added
+#: to one and forgotten in the other.
+_COMPONENT_TERSE: dict[str, dict[str, str]] = {
+    "points": {
+        "done": "{points} points credited",
+        "pending": "{points} points on the way",
+    },
+    "waiver": {
+        "done": "{waiver_type} removed",
+        "pending": "{waiver_type} being removed",
+        "out_of_band": "{waiver_type} removal noted for our team",
+    },
+    "discount_percent": {
+        "out_of_band": "{discount}% discount noted for our team",
+    },
+    "priority": {
+        "out_of_band": "next request flagged for priority",
+    },
+}
+
+
+#: The clause forms :func:`_component_sentence` can select between. A name absent
+#: from this set is a sentence nobody can ever read, so :func:`validate_offers`
+#: treats it as an error rather than as unused-but-harmless configuration.
+_CLAUSE_FORMS: frozenset[str] = frozenset({"done", "pending", "out_of_band"})
+
+
+class _ProbeRow:
+    """The smallest thing :func:`_components_this_service_applies` will accept.
+
+    Exists for :func:`validate_offers`, which has to ask "could this component
+    ever be delivered?" without building a real offer. A plain class rather than
+    ``SimpleNamespace`` so the attributes the function reads are visible next to
+    the function that reads them.
+    """
+
+    offer_kind = "goodwill"
+    reference = ""
+    status = "offered"
+    points = 0.0
+    discount_percent = 0.0
+    waiver_type = ""
+    arrears_entry_id = 0
+    generosity_scale = 1.0
+    expires_at = None
+
+
+def _probe_row_for(component: str, *, favourable: bool = True) -> _ProbeRow:
+    """A row in the shape that would (or, failing that, would not) make
+    `component` appliable here.
+
+    Each component gets its own probe because one row cannot be a goodwill offer
+    and a waiver offer simultaneously. That is not a detail: a check reusing the
+    wrong shape asks about ``points`` on a ``waiver`` row, gets "not appliable",
+    and reports a real component as undeliverable — which is how a check like this
+    turns into a green wall.
+
+    **Both shapes matter, and that is what makes ``waiver`` interesting.** Probed
+    favourably it is appliable, because an arrears entry makes a waiver possible;
+    probed unfavourably it is not, because nothing in this module populates
+    ``arrears_entry_id``. So it has *three* reachable states rather than two, and a
+    check that only ever probes the favourable shape will forbid exactly the
+    ``out_of_band`` clause the unlinked case needs. ``favourable=False`` is that
+    second shape, and every check below which could be confused between "never
+    applies" and "sometimes applies" asks for both.
+    """
+    row = _ProbeRow()
+    if component == "points":
+        row.offer_kind, row.points = "goodwill", 1.0 if favourable else 0.0
+    elif component == "waiver":
+        row.offer_kind = "waiver"
+        row.waiver_type = "interest"
+        row.arrears_entry_id = 1 if favourable else 0
+    elif component == "discount_percent":
+        row.offer_kind, row.discount_percent = "goodwill", 1.0 if favourable else 0.0
+    elif component == "priority":
+        row.offer_kind = "priority"
+    return row
+
+
+def _components_this_service_applies(row: Any) -> set[str]:
+    """Which promise components this service applies itself, judged from the row.
+
+    The single source of truth for **two consumers that must never disagree**:
+    :func:`_apply_offer_effect`, which reports to an operator what it did, and
+    :func:`explain_offer`, which tells a customer what happened. A customer
+    reading a sentence is a reader of the same claim an operator reads in
+    ``requires_out_of_band``, so the determination is made once, here, rather than
+    restated in a template.
+
+    It was restated, and they did disagree: ``_apply_offer_effect`` reported
+    ``requires_out_of_band: ["discount_percent"]`` for every goodwill offer while
+    the sentence rendered alongside it said the discount had been taken off.
+
+    **Static on purpose.** It reads the row and this module's own config and never
+    the database, so it can be called from a rendering path that has no session.
+    A component whose application can still *fail* at runtime -- the arrears call,
+    the double-credit guard -- is still reported as appliable here, because "we can
+    apply this" and "this was applied" are different claims. Collapsing them is
+    what let the copy drift: conflating "the waiver call succeeded" with "a waiver
+    is something this service does" would put ``waiver`` back in the unconditional
+    past tense for every offer, including the ones with no arrears entry to waive.
+    """
+    kind = str(getattr(row, "offer_kind", "") or "")
+    applies: set[str] = set()
+    if kind == "waiver":
+        entry_id = int(getattr(row, "arrears_entry_id", 0) or 0)
+        waiver_type = str(getattr(row, "waiver_type", "") or "")
+        if entry_id and waiver_type in ("interest", "fees", "all"):
+            applies.add("waiver")
+    elif kind == "goodwill":
+        if float(getattr(row, "points", 0.0) or 0.0) > 0:
+            applies.add("points")
+    # `priority` and any unrecognised kind apply nothing here; see
+    # `_apply_offer_effect` for why, and `requires_out_of_band` for how that is
+    # reported rather than implied.
+    return applies
+
+
+def _component_states(row: Any, status: str) -> list[tuple[str, bool]]:
+    """The promise components this offer carries, each marked delivered or not.
+
+    ``delivered`` requires *both* that the offer reached ``fulfilled`` and that
+    this service applies the component at all. The second half is what keeps
+    ``discount_percent`` and ``priority`` out of the past tense: a status of
+    ``fulfilled`` says the fulfilment ran, not that it could do everything the
+    offer promised, and :func:`_apply_offer_effect` records the difference in
+    ``requires_out_of_band`` in the same breath.
+    """
+    kind = str(getattr(row, "offer_kind", "") or "")
+    points = float(getattr(row, "points", 0.0) or 0.0)
+    discount = float(getattr(row, "discount_percent", 0.0) or 0.0)
+    applies = _components_this_service_applies(row)
+    fulfilled = str(status or "") == "fulfilled"
+    states: list[tuple[str, bool]] = []
+    if kind == "goodwill":
+        if points > 0:
+            states.append(("points", fulfilled and "points" in applies))
+        if discount > 0:
+            states.append(("discount_percent", False))
+    elif kind == "waiver":
+        states.append(("waiver", fulfilled and "waiver" in applies))
+    elif kind == "priority":
+        states.append(("priority", False))
+    return states
+
+
+def _component_sentence(row: Any, status: str, *, terse: bool) -> str:
+    """Compose the ``what`` sentence from the components' own clauses.
+
+    **Which of a component's three forms is read depends on two facts, not one.**
+    ``fulfilled`` chooses between ``done`` and not; *appliability* chooses between
+    ``pending`` and ``out_of_band``. A component this service does not apply has no
+    ``pending`` claim to make -- "we're doing it" is a promise about an action this
+    process will not take, and for an unlinked waiver, which is every waiver issued
+    here, that is a future-tense version of the original defect.
+
+    Returns ``""`` when the offer carries nothing this function can describe, and
+    the caller falls back to the kind's template -- which is a path
+    :func:`validate_offers` exists to keep unreachable for every known kind.
+    """
+    table = _COMPONENT_TERSE if terse else _COMPONENT_CLAUSES
+    applies = _components_this_service_applies(row)
+    fields = {
+        "points": int(float(getattr(row, "points", 0.0) or 0.0)),
+        # `:g` because a customer is owed "15%", not "15.0%". The float is a
+        # storage detail and it was reaching the page.
+        "discount": "{:g}".format(float(getattr(row, "discount_percent", 0.0) or 0.0)),
+        "waiver_type": str(getattr(row, "waiver_type", "") or "charge"),
+    }
+    parts: list[str] = []
+    for component, delivered in _component_states(row, status):
+        forms = table.get(component) or {}
+        if delivered:
+            form = forms.get("done")
+        elif component in applies:
+            form = forms.get("pending")
+        else:
+            form = forms.get("out_of_band")
+        if form:
+            parts.append(form.format(**fields))
+    # Full clauses are sentences and carry their own terminal punctuation; terse
+    # clauses are fragments, so joining them with a space runs them together into
+    # "250 points on the way 15% discount noted for our team".
+    return ("; " if terse else " ").join(parts)
 
 
 def explain_offer(
@@ -776,34 +1027,48 @@ def explain_offer(
     ``plain_language_explanations`` (default on) selects the full sentence form;
     turning it off yields the terse form, which is what that preference has
     always meant everywhere else in this codebase.
+
+    **``what`` is composed from :data:`_COMPONENT_CLAUSES`, per component and per
+    tense, and that is a correctness requirement rather than a presentation one.**
+    The sentence a customer reads is a claim about what has happened to their
+    money, so it has to agree with ``requires_out_of_band`` -- which is the same
+    claim made to an operator. Both are derived from
+    :func:`_components_this_service_applies`, so they cannot disagree. They
+    previously did: every goodwill offer reports ``discount_percent`` as
+    requiring out-of-band action and rendered "took 15% off your next service" to
+    the customer in the same breath.
     """
     kind = str(getattr(row, "offer_kind", "") or "")
     status = effective_status(row, now=now)
     template = dict(OFFER_EXPLANATIONS.get(kind) or {})
-    points = float(getattr(row, "points", 0.0) or 0.0)
-    discount = float(getattr(row, "discount_percent", 0.0) or 0.0)
-    waiver_type = str(getattr(row, "waiver_type", "") or "charge")
     marketing_granted = bool((consents or {}).get("marketing", True))
     terse = not bool(
         dict(preferences_map or {}).get("plain_language_explanations", True)
     )
     framing = "campaign" if marketing_granted else "service_only"
+    composed = _component_sentence(row, status, terse=terse)
+    what = composed or (
+        # Unreachable for every kind in `OFFER_KINDS`, which
+        # `validate_offers` checks. Kept so an unknown kind still renders
+        # something rather than an empty sentence.
+        str(template.get("what") or f"{kind} offer.")
+    )
     if terse:
-        what = f"{kind} offer: {points:g} points, {discount:g}% off."
-        why = str(template.get("why") or "")
-    else:
-        what = str(template.get("what") or "").format(
-            points=int(points),
-            discount=discount,
-            waiver_type=waiver_type,
-        )
-        why = str(template.get("why") or "")
+        what = f"{kind} offer: {composed}" if composed else what
     return {
         "offer_kind": kind,
         "reference": str(getattr(row, "reference", "") or ""),
         "status": status,
         "what": what,
-        "why": why,
+        "why": str(template.get("why") or ""),
+        # What the customer has *not* been given, in the same words the operator
+        # gets. Published so the two cannot be read as agreeing when they do not,
+        # and so a client can render an outstanding item without parsing prose.
+        "outstanding": sorted(
+            component
+            for component, delivered in _component_states(row, status)
+            if not delivered
+        ),
         "legal_basis": str(template.get("legal") or ""),
         "framing": framing,
         "marketing_consent": marketing_granted,
@@ -1492,11 +1757,26 @@ async def record_outcome(
     # The effect, applied. Claimed first on purpose: `_apply_offer_effect` moves a
     # wallet balance, and it must only run for the caller that actually owns the
     # fulfilment. Two racers both reaching here would credit twice.
-    effect = (
-        await _apply_offer_effect(db, row, now=moment)
-        if target == "fulfilled"
-        else {"applied": False, "components": {}, "requires_out_of_band": []}
-    )
+    #
+    # The rollback below is what makes claiming first safe. Claiming first means
+    # the `fulfilled` status is written *before* the credit, so a credit that
+    # raises leaves that write pending on this session. Nothing rolls it back on
+    # its own path: the caller never reaches its commit/rollback, and the next
+    # query against the session autoflushes the dirty row. The result is an offer
+    # the customer is told is `fulfilled` over an effect that never applied --
+    # precisely the claim this module was written to stop making. So a failure
+    # here discards the claim and re-raises. The ordering is kept (reordering
+    # would reintroduce the double credit); what changes is that a claim no
+    # longer survives its own failure.
+    try:
+        effect = (
+            await _apply_offer_effect(db, row, now=moment)
+            if target == "fulfilled"
+            else {"applied": False, "components": {}, "requires_out_of_band": []}
+        )
+    except Exception:
+        await db.rollback()
+        raise
     await _record_event(
         db,
         offer_id=int(row.id),
@@ -1682,11 +1962,19 @@ async def _apply_offer_effect(
     payload carry the same structure, so the trail answers "did this actually
     happen?" months later -- which is :func:`build_offer_admin_report`'s stated
     job and was not answerable before.
+
+    **Which components those are comes from
+    :func:`_components_this_service_applies`, not from a restatement here.** This
+    function reports them to an operator and :func:`explain_offer` words them to a
+    customer; when both decided independently they disagreed, and the customer was
+    told a discount had been applied in the same response that reported it as
+    requiring out-of-band action. One fact, one function, two renderings.
     """
     kind = str(getattr(row, "offer_kind", "") or "")
     points = round(float(getattr(row, "points", 0.0) or 0.0), 2)
     discount = round(float(getattr(row, "discount_percent", 0.0) or 0.0), 2)
     waiver_type = str(getattr(row, "waiver_type", "") or "")
+    appliable = _components_this_service_applies(row)
     components: dict[str, Any] = {}
     requires_out_of_band: list[str] = []
 
@@ -1695,7 +1983,7 @@ async def _apply_offer_effect(
     # but nothing ever populated or read it.
     if kind == "waiver":
         arrears_entry_id = int(getattr(row, "arrears_entry_id", 0) or 0)
-        if arrears_entry_id and waiver_type in ("interest", "fees", "all"):
+        if "waiver" in appliable:
             waived = await _apply_arrears_waiver(db, arrears_entry_id, waiver_type, now)
             if waived:
                 components["waiver"] = {
@@ -1763,7 +2051,7 @@ async def _apply_offer_effect(
             "requires_out_of_band": sorted(components),
         }
 
-    if points > 0:
+    if "points" in appliable:
         existing = await _prior_offer_credit(db, row)
         if existing is not None:
             # Refused rather than skipped: see `_prior_offer_credit`.
@@ -1783,6 +2071,12 @@ async def _apply_offer_effect(
                 },
                 "requires_out_of_band": ["points"],
             }
+        # Deliberately not wrapped. ``record_outcome`` claims ``fulfilled``
+        # before calling this, and it rolls that claim back if we raise -- but
+        # catching here would return ``{"applied": False}`` underneath a status
+        # of ``fulfilled``, i.e. the "we have put the points on your account"
+        # claim with nothing behind it. A real bug here would also be reported
+        # as a service outage. Let it propagate and let the claim be undone.
         credited = await recovery_playbooks.credit_recovery_points(
             db,
             int(row.user_id),
@@ -1821,6 +2115,11 @@ async def _apply_offer_effect(
                 "service is priced, if it is applied at all"
             ),
         }
+        # Unconditional, and that is the honest report rather than a placeholder:
+        # `_components_this_service_applies` has no branch that returns
+        # `discount_percent` because there is nothing to apply it to. Adding a
+        # speculative `automatic` branch here would be a claim with no reachable
+        # state, which is the shape of the defect this file already had once.
         requires_out_of_band.append("discount_percent")
 
     return {
@@ -2072,9 +2371,173 @@ def validate_offers() -> dict[str, Any]:
                 "cannot understand is an offer they will decline"
             )
     for kind, template in OFFER_EXPLANATIONS.items():
-        for field in ("what", "why", "legal"):
+        for field in ("why", "legal"):
             if not str(template.get(field) or "").strip():
                 errors.append(f"OFFER_EXPLANATIONS[{kind}].{field} is empty")
+
+    # The customer-facing sentence is composed from `_COMPONENT_CLAUSES`, and the
+    # whole reason that table exists is that it once was not. These checks are what
+    # stop the two drifting apart again, and each names a failure that was real, or
+    # is the shape one takes when fixing the first two:
+    #
+    # * **a `done` clause for a component this service cannot deliver.** A past-tense
+    #   sentence with no reachable state. `discount_percent` and `priority` had
+    #   exactly such a sentence, rendered unconditionally, from every status.
+    # * **an appliable component with no `done` clause.** The mirror: the customer
+    #   would be told their points are on the way forever.
+    # * **a `pending` clause for a component this service cannot apply.** The
+    #   subtlest, because it reads as honest -- it is in the future tense -- and is
+    #   still a commitment by this process to do something it does not do. The
+    #   unlinked `waiver` is exactly this case, and nothing in this module populates
+    #   `arrears_entry_id`, so it is *every* waiver issued here rather than an edge.
+    # * **no `out_of_band` clause for an offer this service cannot fully apply.**
+    #   The reverse: that offer has nothing honest to read.
+    # * **an `out_of_band` clause for a component this service always applies.**
+    #   Costs a customer a truthful sentence and reads as somebody else's job.
+    # * **the terse table disagreeing with the full one.** The terse form is a
+    #   separate table, not a truncation, so a clause added to one and forgotten in
+    #   the other is invisible until a customer with that preference reads it.
+    # * **a clause in a form nothing selects.** Configuration that looks intentional
+    #   and can never be read.
+    # * **a kind whose promises no clause describes.** The fallback sentence renders
+    #   instead: comprehensible, and about nothing.
+    #
+    # `_components_this_service_applies` is probed rather than reasoned about,
+    # because a check written from the same assumption as the code it checks is the
+    # failure mode defect 17 was about -- and probed in *two* shapes per component,
+    # with each shape filtered by whether the row actually **carries** the
+    # component. Both halves matter: a favourable probe alone forbids the clause the
+    # unlinked `waiver` needs, and an unfiltered unfavourable probe invents a third
+    # state for `points`, whose zero-point offer carries no points component at all.
+    probe = _ProbeRow()
+    for component in sorted(set(_COMPONENT_CLAUSES) | set(_COMPONENT_TERSE)):
+        forms = set(_COMPONENT_CLAUSES.get(component) or {})
+        terse_forms = set(_COMPONENT_TERSE.get(component) or {})
+        if not forms:
+            errors.append(
+                f"_COMPONENT_CLAUSES has no entry for {component!r}, but the terse "
+                f"table does; the terse form is a separate table and the two must "
+                f"name the same components"
+            )
+        if forms != terse_forms:
+            errors.append(
+                f"{component!r} has forms {sorted(forms)} in _COMPONENT_CLAUSES and "
+                f"{sorted(terse_forms)} in _COMPONENT_TERSE; a component that is "
+                f"readable in one form and missing in the other is a claim that "
+                f"depends on the customer's preference setting"
+            )
+        if not forms <= _CLAUSE_FORMS:
+            errors.append(
+                f"{component!r} has an unrecognised tense "
+                f"{sorted(forms - _CLAUSE_FORMS)}; a clause in any other form is never "
+                f"selected and so never read"
+            )
+
+        # Two facts about this component, each probed rather than assumed, because
+        # they differ and conflating either produces a wrong clause:
+        #
+        # * `ever` -- some row both *carries* the component and can apply it. A
+        #   component carried by every row of its kind, or by none, has two states.
+        # * `needs_out_of_band` -- some row carries the component and this service
+        #   cannot apply it there. That row has a truthful sentence only if an
+        #   `out_of_band` clause exists, and *this* is the question a single
+        #   favourable probe cannot answer: `waiver` on a row with no arrears entry
+        #   carries the component and cannot apply it, while `points` on a goodwill
+        #   offer for zero points carries nothing at all and therefore has no such
+        #   case. Both probes must be filtered by what the row actually carries,
+        #   or a component with no third state is reported as having one.
+        fav = _probe_row_for(component, favourable=True)
+        unf = _probe_row_for(component, favourable=False)
+        carriers = [
+            row
+            for row in (fav, unf)
+            if component in dict(_component_states(row, "offered"))
+        ]
+        ever = any(component in _components_this_service_applies(r) for r in carriers)
+        needs_out_of_band = not carriers or not all(
+            component in _components_this_service_applies(r) for r in carriers
+        )
+
+        if "done" in forms and not ever:
+            errors.append(
+                f"{component!r} has a past-tense `done` clause but "
+                f"_components_this_service_applies cannot return it, so nothing in "
+                f"this service ever delivers it; the sentence is a claim with no "
+                f"reachable state"
+            )
+        elif "done" not in forms and ever:
+            # The mirror, and it is the one a reader is more likely to assume is
+            # covered. A component this service *does* apply with no `done` clause
+            # renders in the pending tense forever -- "we're putting 250 points on
+            # your account", on an offer whose points have been credited. The
+            # original defect was a clause for something undeliverable; this is the
+            # absence of a clause for something deliverable, which looks like an
+            # oversight and reads exactly the same to the customer.
+            errors.append(
+                f"{component!r} is applied by this service but has no `done` clause, "
+                f"so its past-tense sentence can never be rendered and an effect that "
+                f"did land is reported to the customer as still outstanding"
+            )
+        if "pending" in forms and not ever:
+            # The subtlest of the checks, because it reads as honest -- it is in the
+            # future tense, unlike the template it replaced -- and is still a
+            # commitment by *this* process to do something it does not do. "We're
+            # removing the charge from your account" is the unlinked waiver's exact
+            # sentence, and a reviewer's eye reads it as a correction rather than as
+            # a smaller version of the bug.
+            errors.append(
+                f"{component!r} has a first-person `pending` clause but "
+                f"_components_this_service_applies cannot return it, so the "
+                f"sentence promises this service will do something it does not do; "
+                f"it wants an `out_of_band` clause instead"
+            )
+        if needs_out_of_band and "out_of_band" not in forms:
+            # The reverse, and it costs the customer a truthful sentence rather than
+            # adding a false one. A row that carries this component where this
+            # service cannot apply it has nothing honest to read, so it falls
+            # through to the first-person `pending` sentence -- the very defect this
+            # table was built to remove, one clause set further in.
+            errors.append(
+                f"{component!r} is carried by an offer this service cannot apply it "
+                f"to, so it needs an `out_of_band` clause for that case; without one "
+                f"the customer is given a sentence about an action this service will "
+                f"not take"
+            )
+        if not needs_out_of_band and "out_of_band" in forms:
+            # And the last: an effect this service performs for *every* row that
+            # carries it, described to the customer as somebody else's unfinished
+            # work. Costs nothing in accuracy and reads as evasive.
+            errors.append(
+                f"{component!r} is applied by this service for every offer that "
+                f"carries it, so its clause set must not make it `out_of_band`; an "
+                f"effect this service performs is being described as unfinished work "
+                f"elsewhere"
+            )
+
+    # Every kind must be fully describable by the component tables, so the
+    # fallback in `explain_offer` stays unreachable for kinds we know about. The
+    # probe is loaded with every optional amount, so a kind that can promise more
+    # than one thing is checked against all of them rather than the empty case.
+    for kind in OFFER_KINDS:
+        probe.offer_kind = kind
+        probe.points = 1.0
+        probe.discount_percent = 1.0
+        probe.waiver_type = "interest"
+        probe.arrears_entry_id = 1
+        states = _component_states(probe, "fulfilled")
+        if not states:
+            errors.append(
+                f"{kind} has no promise components in _COMPONENT_CLAUSES, so a "
+                f"customer is shown the bare fallback sentence instead of a "
+                f"description of what the offer actually promises"
+            )
+        for component, _delivered in states:
+            if component not in _COMPONENT_CLAUSES:
+                errors.append(
+                    f"{kind} promises {component!r} but no clause describes it, so "
+                    f"the promise is made to an operator and silently omitted from "
+                    f"the customer's sentence"
+                )
 
     # Two structural invariants about the concurrency fix, checked against the
     # *parsed call* rather than the source text.

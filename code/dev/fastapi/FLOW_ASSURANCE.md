@@ -1,27 +1,34 @@
 # Flow assurance: what the flows actually prove, and what they only claim
 
 *Working note, second edition. Every number was re-measured against the tree on
-2 October 2026 after the fixes in [§9](#9-what-was-fixed-and-what-is-still-open);
+4 October 2026 after the fixes in [§9](#9-what-was-fixed-and-what-is-still-open);
 the commands to re-measure are in [§10](#10-re-measuring).*
 
 **What changed between editions, in one line:** the suite went from 2892 tests
-to **3079**, of which **100** are new end-to-end flow tests across four tiers.
-Seventeen defects are fixed, seven of them high severity — among them a customer who
+to **3131**, of which **108** are new end-to-end flow tests across four tiers.
+Twenty-one defects are fixed, ten of them high severity — among them a customer who
 saw a permission error immediately after a successful write, a release ladder
-whose last two rungs could be unlocked by typing three numbers, and an offer state
-machine that let one person accept and decline the same offer in the same instant.
-Six items are still open, and each is written down here with the invariant that
-would close it.
+whose last two rungs could be unlocked by typing three numbers, an offer state
+machine that let one person accept and decline the same offer in the same instant,
+and a sentence telling a customer their discount had been applied while the same
+response admitted that nothing had applied it. That last one is the interesting
+case: it was found, fixed, and came back in the tense the fix introduced, because
+its own negative control was satisfied by the defect it was written to catch.
+Two items are still open, and they are open for two different reasons:
+one is **blocked on infrastructure this repository does not have**, and one is **a
+product decision whose reporting and copy halves are already delivered**. The third
+item (journey vocabulary) is now closed via a traceability table enforced by
+`validate_flows`.
 
 | | Edition 1 | Edition 2 |
 |---|---|---|
-| Suite | 2892 passing | **3079 passing** |
-| End-to-end flow tests | 0 | **100** (52 / 13 / 18 / 17 by tier) |
-| Blind probes | 16 of 24 | **11 of 24** |
-| Probes with a planted-defect control | 4 | **12** |
+| Suite | 2892 passing | **3131 passing** |
+| End-to-end flow tests | 0 | **108** (52 / 18 / 18 / 20 by tier) |
+| Blind probes | 16 of 24 | **4 of 30** |
+| Probes with a planted-defect control | 4 | **14** |
 | Orphan probes | 2 | **0** |
 | Gates with no computable measurement source | 3 | **0** |
-| Gates unmeasured at `l3_canary` in a real sweep | 3 | **1** |
+| Gates unmeasured at `l3_canary` in a real sweep | 3 | **1** (shadow divergence) |
 
 ---
 
@@ -33,7 +40,7 @@ with each other often enough to be worth separating before anything else.
 | | What it is | Where it lives | What a green result means |
 |---|---|---|---|
 | **A stage flow** | a named business journey, described in prose | `BLOCKAGES.md`, stage files `test_stage_*.py` | one developer's claim about one subsystem, checked by one test file |
-| **A simulator flow** | a journey with probes attached to live engines | `app/real_life_flows.py` | 24 probes agreed with their own expectations |
+| **A simulator flow** | a journey with probes attached to live engines | `app/real_life_flows.py` | 30 probes agreed with their own expectations; 24 of those expectations vary by customer, 6 do not (§4.3) |
 | **A test flow** | a journey with assertions written by a human | `tests/test_e2e_*.py` | that human's claims hold |
 
 The confusion is expensive in a specific direction: a simulator flow that
@@ -115,25 +122,39 @@ the declared tier is the intent and the score is what had drifted.
 
 ## 4. The simulator flows — the honest ledger
 
-12 flows × 5 personas = **21 flow/persona pairs**, 24 probes, **70 subflow
+12 flows × 7 personas = **26 flow/persona pairs**, 30 probes, **104 subflow
 executions**, **0 blockages**, 0 failures, 0 deferrals. Every number below is
-`run_all_flows()` on this tree.
+`run_all_flows()` on this tree. (Pairs are not the cross product — each flow names
+the personas it actually runs against, so the count is the sum of the catalog's
+`personas` lists, not 12×7.)
 
 ### 4.1 The declared journey and the executed journey are different vocabularies
 
 | | |
 |---|---|
 | Distinct `subflows` names declared across the catalog | **55** |
-| Distinct subflow ids actually produced by running every flow | **24** |
+| Distinct subflow ids actually produced by running every flow | **30** |
 | **Overlap between the two sets** | **0** |
 
 The declared names are the human journey — `register`, `authenticate`,
 `create_booking`, `event_log`, `plan_playbook`. The executed names are probe
 outcomes — `access_band_resolves`, `complaint_sla_is_monotonic`. They share not
-one string. So the number that looks like coverage ("55 declared steps, 24
+one string. So the number that looks like coverage ("55 declared steps, 30
 run") is not a coverage ratio at all; the denominator and the numerator are
 written in different languages. Any report that divides one by the other is
-meaningless.
+meaningless — and note that the executed side grew from 24 to 30 while the
+declared side did not move, so the "ratio" changed without any journey step being
+covered. That is the clearest available demonstration that the quotient measures
+the probe registry, not the product.
+
+The gap is real and worth naming, but it is not closed by making the strings
+match. A `subflows` entry like `create_booking` names an intent; renaming a probe
+`create_booking` to raise the overlap to 100% would make the number look better
+while making the probe worse, since the probe id is also what a finding is filed
+against and what `_blind_probes` compares across personas. The honest statement is
+the table above: the two vocabularies have not been reconciled, and the human
+journey steps are covered *indirectly*, by probes each of which names the parts
+it exercises.
 
 `validate_flows()` now **warns** when a flow declares more than twice as many
 steps as it has probes, which flags four flows. It is a warning and not an error
@@ -150,11 +171,14 @@ current tree pass, which is the failure mode this document exists to document.
 
 All twelve flows now exercise ≥2 probes. The original three single-probe gaps are closed.
 
-### 4.3 Zero of thirty probes are **blind** (was eleven of twenty-four)
+### 4.3 Four of thirty probes are **blind**, all with an argument for it (was eleven of twenty-four)
 
 `capability_audit` reports `blind_probes` by comparing a probe's *expectations*
-across the personas that run it. **All 30 probes now have persona-varying
-expectations.** The original eleven were fixed by:
+across the personas that run it: a probe is blind when every persona expected the
+same thing, so an engine that returned a constant would satisfy it.
+
+**Twenty-six of thirty now have persona-varying expectations**, up from thirteen
+of twenty-four. The original eleven were fixed by, plus the two retention probes:
 
 * **Vocabulary → specific value**: `access_band_resolves` now demands the band the
   thresholds say this score earns, not just "is it in the vocabulary".
@@ -171,10 +195,39 @@ expectations.** The original eleven were fixed by:
   vocabulary.
 * **Justification table**: `_CONSTANT_EXPECTATION_JUSTIFIED` explicitly declares
   which constant expectations are legitimate (`universal`, `config`,
-  `derived_no_contrast`). Anything without an entry is `unjustified_constant_expectation`.
-* **Vocabulary coverage**: `_vocabulary_coverage` reports gaps the catalog
-  cannot reach (e.g. `loyal` stage unreached — no persona clears both
-  `loyalty_score >= 80` and a completed booking).
+  `derived_no_contrast`). Anything without an entry is `unjustified_constant_expectation`,
+  and an entry whose premise has stopped being true is reported as `stale_justification`
+  rather than left to rot.
+* **Vocabulary coverage**: `_vocabulary_coverage` separately reports rungs the
+  persona catalog cannot reach at all. It found one — the `loyal` recovery stage,
+  unreachable because no persona both completed a booking and cleared
+  `loyalty_score >= 80` — and adding a persona closed it. That is the right way to
+  close that gap; see the note on manufactured contrast below.
+
+The four still blind, all justified:
+
+| probe | justified? | argument |
+|---|---|---|
+| `booking_states_are_valid` | yes | "every booking state is a real state" is a universal invariant |
+| `booking_events_are_logged` | yes | same, for events |
+| `points_quote_is_reproducible` | yes | "same request, same quote" is one invariant, not one per customer |
+| `consent_gate_excludes_service` | yes | the gate half is module config; the per-persona half is what varies |
+
+So `sharp` reads **30 of 30**. The two previously unjustified probes
+(`forecast_confidence_decays`, `retention_series_builds`) now have persona-varying
+expectations and are sharp. The `retention` capability moves from `shallow` to
+`complete`. "Sharp" here does not mean "good": it means "can this probe fail at
+all", and a justified universal invariant can fail — just not along the persona
+axis.
+
+**And a caution this document has already paid for once.** Three of the four
+`complete` grades in the left column were reached, in an earlier draft, by carrying
+the probe's own derived inputs into its `expected`. That produced three distinct
+expectations and one identical answer — a *false* `stub` finding, which is worse
+than no finding because it puts a non-finding in front of a reader with no way to
+tell it from a real one. Carrying an input is only honest when it changes the
+answer. Every remaining `shallow` grade is left in place rather than closed that
+way, and §5.5 records what each one would take to close honestly.
 
 ```
 access_band_resolves             complaint_verdict_is_explained
@@ -229,10 +282,10 @@ separate function from `validate_flows()` rather than folded into it, because it
 is a different kind of claim: `validate_flows` asks whether the catalogue is
 well-formed, this asks whether it can fail.
 
-### 4.4 Twelve probes have a negative control (was four)
+### 4.4 Fourteen probes have a negative control (was four)
 
-`TestNegativeControls` in `tests/test_kaizen_shadow_release.py` holds **16
-tests**: a baseline, twelve that plant a defect, and three that police the
+`TestNegativeControls` in `tests/test_kaizen_shadow_release.py` holds **21
+tests**: a baseline, seventeen that plant a defect, and three that police the
 policy table itself.
 
 The controls that break a real engine and watch the simulator notice:
@@ -249,6 +302,20 @@ The controls that break a real engine and watch the simulator notice:
 | `forecast_confidence` removed from the status table | `status_never_decays` fails |
 | a fully-trusted device presented for a money step | `trusted_device_never_overreaches` fails |
 | a replicated channel pointed at live | `isolation_violation` |
+| `evaluate_gates` returns one gate fewer than it promised | `nothing_dropped` check fails |
+| `evaluate_gates` reports `safe: true` over a failing blocking gate | `safe_follows_from_the_gates` fails |
+| `render_blockages_markdown` loses its closing section | `missing_sections` non-empty |
+| `render_blockages_markdown` says "nothing ran" *and* "all held" | `claims_success_without_a_sweep` |
+
+The last four are §5.9. Three of the eight attempts at writing them **did not work**
+when first written, and all three looked correct while failing to pin anything.
+
+**The count above is about probes, and there are three controls it does not count**,
+because what they break is not an engine. BW-4, BW-5 and BW-6 (§5.10) assert that the
+*report* of an offer tells the customer and the operator the same thing — which is
+the layer defect 23 lived in, and which a table of probe controls cannot see,
+because every row above plants a defect in a module and requires the simulator to
+notice. Counting them here would have been the convenient answer and the wrong one.
 
 **The one that mattered most** was the last row of the original four, and its
 absence was a hole rather than a gap. Two controls called
@@ -267,9 +334,11 @@ def test_every_probe_the_governance_flow_depends_on_has_a_control(self):
     """``TestNegativeControls`` was worth having and was not read."""
 ```
 
-It asserts a **set of probe ids** — the six the `admin_governance_review` flow
+It asserts a **set of probe ids** — the eight the `admin_governance_review` flow
 depends on — rather than a count, because a count tripwire passes when the
-probes are renamed.
+probes are renamed. Two of those eight were added *to* that set when the check
+failed on them, so the set is not decoration: it grew by the only mechanism that
+could legitimately grow it, which is a new control.
 
 ### 4.5 Orphan probes: two, both of them a bug in the audit (now zero)
 
@@ -455,7 +524,7 @@ count, because a count of regressions is something nobody can act on.
 partial: 0, unassessable: 0}` out of 48 capabilities, with
 
 ```
-shallow: ['bookings', 'points_exchange', 'preferences', 'retention', 'topics']
+shallow: ['bookings', 'points_exchange', 'preferences', 'retention']
 untested: ['blockage_log', 'release_ladder', 'topics']
 capability_blocking_detail:
   surface:/complaints/admin/sla-report=declared_only
@@ -475,20 +544,53 @@ The capability audit now distinguishes **three passing states** rather than just
 
 The `shallow` state was added because `capability_audit` previously reported
 `complete` for engines where every probe passed, even when those probes were
-blind. Five capabilities now grade `shallow`:
+blind. Four capabilities grade `shallow` on this tree, and the grade is the
+point — it is the honest answer, not a failure to be tidied away:
 
-* **bookings** — `booking_states_are_valid` and `booking_events_are_logged` are blind (universal invariants)
-* **points_exchange** — `points_quote_is_reproducible` is blind (same input, same output)
-* **preferences** — `consent_gate_excludes_service` is blind (static config)
-* **retention** — `forecast_confidence_decays` and `retention_series_builds` are blind
-* **topics** — `topic_classification_works` is blind (same vocabulary for all)
+| capability | blind probes | why they are hard |
+|---|---|---|
+| **bookings** | `booking_states_are_valid`, `booking_events_are_logged` | both assert vocabulary membership — a universal invariant |
+| **points_exchange** | `points_quote_is_reproducible` | "same request, same quote" is one invariant, not one per customer |
+| **preferences** | `consent_gate_excludes_service` | the gate half is static config; the grant half is per-persona |
+| **retention** | `forecast_confidence_decays`, `retention_series_builds` | monotonicity and vocabulary claims, no per-persona number |
 
-The `shallow` state is not a failure — it is an **honest grade**. It means "the
-probes pass, but they don't prove the engine branches." A capability that is
-`shallow` can be promoted to `complete` by adding persona-varying expectations
-or by removing the blind probes. The `shallow` state is reported in
-`capability_blocking_detail` at `l3_canary` and `l4_live` so a release decision
-knows which capabilities are genuinely tested vs merely passing.
+`topics` grades `complete` — `topic_classification_works` was sharpened to assert
+persona-specific expected themes derived from each persona's context.
+
+**The `shallow` grade is deliberately left in place for the four above.** It would
+be easy to close them by adding a persona-varying expectation to each blind probe
+and watching the grade move. That is the dishonest move, and this repository has
+already paid for it once: `recovery_lifecycle_stage` carried a derived input in
+its `expected` for a while, which produced three distinct expectations and one
+identical answer — a *false* stub finding, which is worse than no finding, because
+it puts a non-finding in front of a reader with no way to tell. Carrying an input
+into an expectation is only honest when it changes the answer.
+
+For each of the six probes there is a real sharpening available, and it is worth
+writing down rather than leaving as an impression:
+
+* **`forecast_confidence_decays`** — `retention.forecast_confidence` is a closed
+  form over published config terms (`confidence_base`,
+  `confidence_per_horizon_day`, floor). The expectation can be re-implemented
+  from those terms using `persona.retention_snapshot_count` as the evidence input,
+  which makes it vary per persona *and* catches an implementation that drops a
+  term. `build_retention_forecast` also refuses below `min_points` and says so in
+  `sufficient_data`, which is genuinely branching: `new_customer_no_snapshots`
+  (0) must be told "not knowable" and `stable_high_loyalty` (6) must get a number.
+* **`retention_series_builds`** — same lever, via the snapshot count.
+* **`booking_states_are_valid`** — the sharp version is not "are these states real"
+  but "does the system report exactly this customer's history", which differs for a
+  persona with two bookings, one, and none.
+* **`points_quote_is_reproducible`** — reproducibility is universal, but the
+  *quote* is not: a persona with 500 points and one with 50 should not be quoted
+  the same redeemable amount. Assert reproducibility **and** that the quote tracks
+  the persona's balance.
+* **`consent_gate_excludes_service`** — the expected set of permitted purposes is
+  derived from that persona's consents, so it genuinely differs between a persona
+  with analytics-only and one with marketing plus analytics.
+* **`booking_events_are_logged`** — the set of legal *next* states depends on the
+  persona's current state, so a persona in `completed` and one in `cancelled` have
+  different reachable transitions.
 
 The `stub` state is a failure — it means the engine would give the same answer
 to different customers. No capability currently grades `stub` on this tree.
@@ -514,10 +616,70 @@ The event payload carries the same structure, so the audit trail answers "did
 this actually happen?" months later — not "was the row updated?" but "what
 effect actually landed?"
 
+**This table was the operator's half of the answer, and for a while it was the only
+half.** The customer-facing sentence claimed the same two rows in the past tense
+from every status — "we put 250 points on your account and took 15% off your next
+service" — so the row above and the sentence below it disagreed in the same
+response. §5.10 is that defect, and the table here is unchanged by it: what changed
+is that the customer's copy is now derived from the same
+`_components_this_service_applies` that produces the two "hook logged" rows.
+
+#### 5.6.1 A claim must not outlive the effect it was made for
+
+**This is the finding that changed what `fulfilled` means, and it was found by
+`TestBreakAndWatch`, not by reading the code.**
+
+`record_outcome` claims the `fulfilled` status *before* it applies the effect,
+deliberately: `_apply_offer_effect` moves a wallet balance, so the claim is what
+stops two racers from both crediting. Reversing the order reintroduces a double
+credit, so the ordering is right.
+
+But nothing undid the claim if the effect then failed. The exception propagated
+past the caller's `commit()`/`rollback()`, so the transaction was never resolved
+explicitly — and then **the next query on that session autoflushed the dirty
+row**. The result: HTTP 500, and a persisted offer reading `fulfilled`, with
+`OFFER_EXPLANATIONS` telling the customer *"We put 250 points on your account"*
+and no points on the account. The claim outlived the effect it was made for,
+which is the one thing the ordering existed to make impossible.
+
+The fix keeps the ordering and adds the missing rollback, so a claim no longer
+survives its own failure:
+
+```python
+try:
+    effect = (
+        await _apply_offer_effect(db, row, now=moment)
+        if target == "fulfilled"
+        else {"applied": False, "components": {}, "requires_out_of_band": []}
+    )
+except Exception:
+    await db.rollback()
+    raise
+```
+
+**A second version of this fix was written first and was wrong**, which is worth
+recording because it is the more tempting one. It caught the exception *inside*
+`_apply_offer_effect` and returned `{"applied": False, "why": "points service
+unavailable"}`. That reports a real bug as a service outage, and it returns
+`applied: False` underneath a status of `fulfilled` — the tidy-payload version of
+the same defect, with the failure dressed up as a handled condition instead of an
+abort. Letting it propagate and rolling the claim back is the honest behaviour;
+the error handler is where the dishonesty went.
+
+The invariant, which is what the tests assert rather than a status code:
+
+* a wallet balance either moved by the full amount or did not move at all;
+* an offer is either `fulfilled` with its effect applied, or still `accepted`.
+
+Both directions were verified by reverting each fix and watching the test fail
+on a different assertion — `assert 'fulfilled' == 'accepted'` for the missing
+rollback, `DID NOT RAISE` for the catch-all. See §5.8.
+
 ### 5.7 Deeper journey break-and-watch
 
-The simulator now carries explicit negative controls that break the system and
-verify the simulator notices:
+`TestNegativeControls` in `tests/test_kaizen_shadow_release.py` plants defects in
+the engines and requires the **simulator** to notice them — the seam is crossed in
+that direction, so nothing here can pass by calling the engine directly:
 
 | planted defect | probe that catches it | category |
 |---|---|---|
@@ -538,22 +700,395 @@ Each is in `TestNegativeControls` and the suite fails if any control *passes*
 `test_every_probe_the_governance_flow_depends_on_has_a_control` asserts the
 set of probe ids, so a renamed probe or missing control is a test failure.
 
+Five more were added after the standing check failed on two probes with no control;
+they are in §5.9, because three of the eight attempts at writing them did not work.
+§4.4 has the full table.
+
+**Three more, in a different place entirely.** The controls above all break an engine
+and require the simulator to notice. Defect 23 (§5.10) was in the *reporting* layer,
+which nothing in that table plants a defect in — so BW-4, BW-5 and BW-6
+(`tests/test_e2e_real_life_journeys.py`) assert the reporting layer directly: that
+the sentence a customer reads and the report an operator reads name the same
+outstanding component, that a component nothing applies is stated rather than
+omitted, and that an effect this service cannot perform is not promised to the
+customer in *any* tense. A seam with no control across it is a seam nobody is
+watching, and §9.3 (6) had been open for two editions without that being visible.
+
+BW-6 is also the record of how defect 23 came back. §5.10 was fixed, its own control
+went green, and reading §9.3 (6) again found the same lie in the tense the fix
+introduced. The control that let it through asserted the *absence* of a past-tense
+clause, which is exactly what the first fix supplied — so it was satisfied by the
+defect it was written to catch, and would have been satisfied again by the second.
+
 This is the direction the next phase should expand: every capability should have
 at least one planted-defect control that proves the probe can fail.
 
-`rule_engine` has left the untested list — Tier 1's work graded it. The
-remaining three are **still open**, and `release_ladder` is the recursive one:
-the module that decides whether a change is safe has no probe, so the gate that
-decides whether the lifecycle is honest cannot be satisfied by the lifecycle.
-That is now a fixed point rather than a mystery: a test asserts
-`capability_blocking_detail` is present whenever the count is non-zero, so a
-non-zero count with no explanation is a test failure.
+### 5.8 Tier 2 break-and-watch — the first test failed, and it was the product
+
+§5.7 is about planted defects in the *simulator*. This is the other direction:
+break the journey mid-flight and assert the flow does not lie about it.
+
+The tests are in `TestBreakAndWatch`, and they assert **invariants, not error
+shapes**:
+
+* a wallet balance either moved by the full amount or did not move at all;
+* an offer is either `fulfilled` with its effect applied, or still `accepted`.
+
+Writing them found a live product defect, which is the argument for writing
+them. `_apply_offer_effect` claims `fulfilled` *before* it applies the effect —
+deliberately, so two racers cannot both credit. But nothing rolled that claim
+back when the credit raised: the caller never reached its commit/rollback, and
+the **next query on the session autoflushed the dirty row**. The offer reported
+`fulfilled`, `OFFER_EXPLANATIONS` told the customer "We put 250 points on your
+account", and no points existed. The claim outlived the effect it was made for.
+
+The fix keeps the ordering — reversing it would reintroduce the double credit —
+and adds the missing rollback, so a claim no longer survives its own failure.
+
+| BW# | test | what it breaks | what it pins |
+|---|---|---|---|
+| BW-1 | `test_a_fulfilled_offer_means_the_points_actually_landed` | nothing (control) | the claim is true when the writer works |
+| BW-2 | `test_a_broken_points_writer_leaves_the_offer_unfulfilled` | `credit_recovery_points` | offer stays `accepted`, balance unmoved |
+| BW-3 | `test_a_repeated_fulfilment_never_credits_twice` | nothing | balance moves at most once |
+| BW-4 | `test_the_sentence_a_customer_reads_tracks_what_actually_landed` | nothing (control) | the customer's sentence and the operator's report name the same outstanding component |
+| BW-5 | `test_a_discount_nothing_applies_is_never_spoken_of_in_the_past_tense` | nothing (control) | the 15% is stated, and never as something that happened |
+| BW-6 | `test_a_waiver_nothing_here_can_apply_says_so_rather_than_promising` | nothing (control) | an unlinked waiver is not promised to the customer; the two readers agree on what is outstanding |
+| BW-7 | `test_a_dropped_recovery_action_refuses_fulfilled` | `credit_recovery_points` | offer stays `accepted`, copy never claims points landed |
+| BW-8 | `test_a_broken_consent_gate_is_reported_through_the_probe` | `CONSENT_GATED_PURPOSES` | probe reports forbidden gated purpose (`service`) |
+| BW-9 | `test_partial_fulfilment_credit_yes_waiver_no_agrees_on_outstanding` | nothing (control) | operator and customer agree on outstanding for partial fulfilment |
+
+(The `BW-` prefix is deliberate: a bare number here collides with the defect
+numbering in §9.1, and BW-2 is the test that found defect 20.)
+
+BW-4 and BW-5 were added when §9.3 (6) was re-read and the customer-facing copy
+turned out to be making claims the payload had already been fixed to deny — defect
+23, §5.10. They break nothing, and that is the point: they are controls against
+*the reporting layer* being wrong, which is the one layer nothing else in this
+repository plants a defect in.
+
+BW-6 exists because BW-5 could not have caught the second half of that defect.
+BW-5 tests a component this service **never** applies. A waiver is different: the
+code to apply one exists and works, and no arrears entry is ever linked to an offer,
+so every waiver this service issues lands in a state the two-form copy rendered as
+a first-person promise. Asserting "We're removing" is absent is satisfied by
+deleting the clause, so BW-6 requires the clause to be *present and* handing the
+work on — and requires the operator's `requires_out_of_band` to agree with the
+customer's `outstanding` after fulfilment, which is the property that made the
+mismatch visible in the first place.
+
+BW-7 and BW-8 extend the pattern beyond the reporting layer: BW-7 breaks the
+points writer mid-journey and verifies the offer stays `accepted` and the copy
+never claims the credit landed. BW-8 patches the module constant to gate `service`
+and verifies the simulator probe reports the forbidden gated purpose — the same
+invariant the negative control in `TestNegativeControls` exercises, now verified
+at the journey level. BW-9 is the agreement check for the partial-fulfilment
+case that the three-form clause tables were built for.
+
+BW-2 is the one that found the bug, and it is worth being precise about why
+it is shaped the way it is:
+
+* **It asserts invariants, not status codes.** A `503` here would be an
+  implementation detail; "not `fulfilled`" and "balance unmoved" hold however the
+  failure is reported. Asserting a code would let the bug back the moment
+  someone chose a different shape for the error.
+* **It reads the wallet, not the payload.** The payload is the thing under
+  suspicion. A half-credited balance is the failure mode a status assertion alone
+  would miss.
+* **There is a control (BW-1).** Without it, "the balance did not move" is also
+  satisfied by an implementation that never credits anything — the exact defect
+  being hunted. That has to be ruled out first, in its own right.
+* **It has two negative controls, both verified.** Reverting the rollback fails
+  it on `assert 'fulfilled' == 'accepted'`. Reinstating the catch-all that turns
+  the failure into `{"applied": False}` fails it on `DID NOT RAISE`. Two
+  distinct defects, two distinct failures, so the test is pinning the behaviour
+  and not one line of it.
+
+A fourth candidate was written and **deleted**: a settle-then-waive test on
+arrears. `TestArrearsLifecycle.test_a_settled_entry_can_have_its_interest_waived_nobody_wins`
+already covers it, and covers it better (422 plus the reason, against my
+`>= 400`). A second, weaker copy of an existing test is not depth.
+
+### 5.9 A negative control that cannot fail is worse than none
+
+The standing check `test_every_probe_the_governance_flow_depends_on_has_a_control`
+failed on `blockage_log_renders` and `release_ladder_gates_evaluate`: two probes on
+the flow whose failure mode is a promotion nobody can justify, with nothing proving
+the harness would notice them breaking. It was doing its job — those two had been
+added to close §9.3 gaps and had landed without controls.
+
+Five controls were added. Three of them worked first time. **Three of the eight
+attempts did not work**, and every failure looked identical from the outside: the
+control passed on a clean tree, the standing check counted it, and the test name
+described a defect the harness did not in fact detect. The only way to know was to
+delete the thing each control claimed to pin and watch it keep passing.
+
+| control | attempt | what it damaged | what it actually pinned | outcome |
+|---|---|---|---|---|
+| ladder drops a gate | 1 | slices one gate off the returned list | `nothing_dropped` | worked |
+| ladder forges `safe` | 1 | `safe: true`, `blocking_failures: []` over a red gate | `safe_follows_from_the_gates` | worked |
+| log drops a section | 1 | removes the closing `Ground truth` line | `missing_sections` | worked |
+| log claims success | 1 | replaced `Nothing ran:` with the historical wording | **both halves at once — pinned neither** | deleted |
+| log claims success | 2 | the same, as a one-liner | same | deleted |
+| log claims success | 3 | appends the success claim, leaves `Nothing ran:` | `not claims_success` | worked |
+| log stops saying "nothing ran" | 1 | restored the historical wording | `claims_success`, not the intended half | deleted |
+| log stops saying "nothing ran" | 2 | rewrote the line to `- No simulation data.` | `says_nothing_ran` | worked |
+
+The pattern is the same in all three failures: **the damage hit two signals at
+once.** The historical wording both drops "Nothing ran" and contains "all held
+their invariants", so the probe failed either way and neither condition was
+individually pinned. The working version of each control damages exactly one thing,
+and is verified in *both* directions — remove the condition it pins and it fails;
+remove the other condition and it still passes. That second direction is the one
+that matters: a control which fails when something unrelated breaks is pinning the
+wrong thing, and the usual repair for that is to delete it.
+
+So the two halves of the probe's verdict are pinned by **two separate controls**,
+each damaging exactly one thing, and each verified in both directions: remove the
+condition it pins and it fails; remove the *other* condition and it still passes.
+That second direction is the one that matters — a control that fails when
+something unrelated breaks is pinning the wrong thing, and will be "fixed" by
+deleting it.
+
+Three rules came out of this, and they are the same three recorded in §8.1:
+
+1. **Damage exactly one thing.** A control that breaks two things at once pins
+   neither, and reports as coverage either way.
+2. **Verify by deleting the check, not by reading the control.** Readable source is
+   not a working assertion — `if False and not await …` still leaves the call in the
+   AST, and a substring search is satisfied by a comment.
+3. **Assert the diagnosis, not just the blockage.** The first version of these
+   controls asserted on `row.error` and found `''`, because a *failed probe* puts
+   its reason in `evidence` and `error` is reserved for an exception. All four
+   raised the blockage correctly and the assertions still failed — which reads as a
+   broken control rather than a broken assertion, the worst way round. They now
+   search the whole finding, and each asserts *which check* failed, so a control
+   that catches the defect for the wrong reason is itself a failure.
+
+Two of the probes also could not fail before this, and had to be fixed first —
+which is the more useful half of the finding:
+
+* `release_ladder_gates_evaluate` computed `expected["gate_count"]` from
+  `PROMOTION_GATES` and then never compared it to anything. **The expectation named
+  the number and the verdict ignored it**, so a ladder that dropped every gate
+  passed. It now re-derives `safe` from the gates it evaluated, requires the
+  evaluated set to equal the set `gates_for_candidate` promised, and checks
+  `passed` agrees with `verdict`.
+* `blockage_log_renders` checked four headings and passed over the fact that
+  rendering an *empty* run set produced
+
+  > **No blockage: 0 flows across 0 subflows all held their invariants.** … this
+  > is evidence the engines still branch
+
+  — a success claim about a sweep that never ran, in the document a human reads.
+  It was there because this probe calls the renderer with an empty run set on
+  purpose, to check structure without recursing, so the simulator's own healthy
+  output carried the false sentence. `render_blockages_markdown` now has a zero-run
+  case that reports nothing having run, and the probe asserts the success wording is
+  *absent* without a sweep to be successful about.
 
 ---
 
+`rule_engine` has left the untested list — Tier 1's work graded it. `release_ladder`
+and `blockage_log` have left it too, with the controls above. Every declared part of
+the backend now grades either `complete` (44) or `shallow` (4); nothing is
+`untested`, `stub`, `partial` or `absent`. The four `shallow` grades are honest and
+deliberately left in place — §5.5 says what each one would take to close, and
+manufacturing the variation instead is the move this repository has already made
+once and reverted.
+
+### 5.10 The sentence a customer reads is a claim too — **defect 23**
+
+§5.6.1 and §8.2 fixed the *same* defect twice, one layer at a time, and both fixes
+stopped at the payload. Neither reached the customer.
+
+Layer one: `record_outcome` wrote `fulfilled` and then failed to credit, so the
+claim outlived its own failure. Fixed by rolling the claim back (§5.6.1).
+Layer two: the operator was told which components nothing here can apply, via
+`requires_out_of_band`. Fixed by naming them (§8.2).
+Layer three — found while re-reading §9.3 (6), not by a test: the sentence the
+customer actually reads said neither.
+
+`OFFER_EXPLANATIONS[kind]["what"]` was a **single template per kind**, and it
+rendered identically from every status:
+
+```
+offered:     We put 250 points on your account and took 15.0% off your next service.
+accepted:    We put 250 points on your account and took 15.0% off your next service.
+fulfilled:   We put 250 points on your account and took 15.0% off your next service.
+```
+
+Two claims and a float, in one sentence:
+
+| the claim | status | truth |
+|---|---|---|
+| "We put 250 points on your account" | `offered` | the balance has not moved — `TestOffersLifecycle` asserts exactly that, in the same file |
+| "We put 250 points on your account" | `fulfilled` | true, and the only row of the table that is |
+| "took 15.0% off your next service" | all three | nothing in this repository prices anything; the same flow's operator payload says `requires_out_of_band: ["discount_percent"]` |
+| "15.0%" | all three | a storage float reached the page |
+
+The second row is why this survived two fixes and a green suite. **A `fulfilled`
+offer makes the tense correct**, so a test that read the copy after fulfilling found
+it accurate. The lie is in the two states nobody rendered it in, and in the half of
+the sentence that is never right in any state.
+
+And the module had already written down the diagnosis without connecting it.
+`TestFulfilmentAppliesWhatItPromised`'s docstring quotes that exact sentence and
+then says: *"the whole reason `accepted` and `fulfilled` are separate states is that
+'you accepted and we have not done it yet' is a real and embarrassing state."* The
+template rendered the embarrassing state identically to the state where it is not
+true. The argument for the state machine and the template that erased it were in
+the same file, six months of blame apart.
+
+**The fix is structural, not editorial.** Rewording the template would have fixed
+today's two kinds and left the next one to reintroduce it, because the shape is the
+hazard: *a kind's promise is not one claim.* `goodwill` promises points, which this
+service delivers, and a discount, which it does not — and one sentence cannot be
+true in both halves. So:
+
+* the `what` key is **gone** from `OFFER_EXPLANATIONS` entirely. There is no
+  per-kind sentence to drift, because there is no per-kind sentence.
+* `what` is composed **per component** from `_COMPONENT_CLAUSES`, and each
+  component is rendered in one of **three** forms — not two:
+
+  | form | means | reachable when |
+  |---|---|---|
+  | `done` | it landed here | the offer reached `fulfilled` **and** this service applies the component |
+  | `pending` | not yet, and it is ours to do | this service applies the component and the offer has not been fulfilled |
+  | `out_of_band` | not ours; somebody else finishes it | this service does not apply the component for this offer |
+
+* `_COMPONENT_TERSE` is a **second table**, not a truncation. "250 points on the
+  way" and "We put 250 points on your account" differ in tense, and the tense is
+  the whole defect, so a shorter string is a different claim.
+* the determination lives in **one** function, `_components_this_service_applies`,
+  which `_apply_offer_effect` and `explain_offer` both call. They disagreed
+  because they each decided independently, so they no longer decide independently.
+* the customer also gets `explanation.outstanding`, the same component list the
+  operator gets, so a client can render it without parsing prose.
+
+**The third form exists because a two-form rewrite passes every review and is still
+false.** Rewriting the template into the future tense — "We're taking 15% off your
+next service" — stops claiming a completed act, which is what the original was
+caught for. It is also a commitment by *this* process to do something it does not
+do. That sentence reads as a fix. It was written, checked against the original, and
+rejected, and the reason it was caught is that `validate_offers` asks a different
+question than "is this past tense": **is any shape of row making this component
+appliable here?**
+
+That question is not rhetorical, because the answer differs per component, and
+differs in a way a single probe cannot see:
+
+| component | appliable? | why |
+|---|---|---|
+| `points` | every offer that carries it | a goodwill offer with points is credited here |
+| `waiver` | **only when `arrears_entry_id` is populated** | and `issue_offer` never populates it |
+| `discount_percent` | never | no pricing engine exists in this repository |
+| `priority` | never | no queue exists |
+
+`waiver` is the interesting one, and it is why "not ours" had to become its own
+form rather than a synonym for "not yet". `waiver` **is** something this service
+does — the code path exists and works — so a rule of the shape *forbid
+`out_of_band` on anything we can apply* fires on it immediately, and gets "fixed"
+by deleting the clause the unlinked case needs. But `issue_offer` populates no
+arrears entry, so the unlinked case is not an edge: **it is every waiver this
+service issues.** With `pending` as its only non-`done` form, that offer told the
+customer "We're removing the interest from your account" and nothing removed it.
+
+So the check asks whether some row **carries** the component and cannot apply it,
+and the probe is filtered by carrying rather than by kind — because a goodwill
+offer for zero points carries no `points` component at all, and an unfiltered
+second probe invents a third state for `points` as well. That filter is the
+difference between a check that is right about `waiver` and one that is wrong about
+both.
+
+`validate_offers` now refuses **eight** ways, each naming a failure that was real or
+is the shape one would take while fixing the ones before it:
+
+| # | refused | the failure it names |
+|---|---|---|
+| 1 | a `done` clause for a component `_components_this_service_applies` cannot return | a past-tense sentence with no reachable state — **defect 23, verbatim** |
+| 2 | an appliable component with no `done` clause | the mirror: a credited customer is told their points are still on the way |
+| 3 | a `pending` clause for a component nothing here applies | a first-person promise to do something this process does not do |
+| 4 | an offer carrying a component here cannot apply, with no `out_of_band` clause | the unlinked waiver, falling back to the sentence check 3 forbids |
+| 5 | an `out_of_band` clause for a component applied to every offer that carries it | an effect this service performs described as somebody else's job |
+| 6 | the two tables disagreeing about which forms exist | a claim that depends on the customer's preference setting |
+| 7 | a clause in a form nothing selects | configuration that looks intentional and can never be read |
+| 8 | a kind whose promises no clause describes | the fallback template renders: comprehensible, and about nothing |
+
+Checks 3, 4 and 5 are the three that only exist *because* of the third form, and
+each was found by attempting the fix rather than by imagining it. Check 4 was
+written first as the symmetric rule — "forbid `out_of_band` on anything we can
+apply" — and fired on `waiver` immediately, which is what exposed the fact that
+`waiver` needs all three forms. Check 5 is the repair of check 4, and it is only
+sound because the probe asks whether the component is **carried**, not whether the
+kind matches: without that filter, check 5 misfires on `points`, whose zero-point
+goodwill offer carries no points component and so has no unhandled case at all.
+
+**Verified by mutation, not by reading** — seventeen reverts, each damaging exactly
+one thing, and each watched to fail on a *different* assertion:
+
+| # | reverted | fails on |
+|---|---|---|
+| 1 | tense forced to `done` | both copy tests |
+| 2 | `outstanding` always `[]` | both copy tests |
+| 3 | discount clause emptied | **only** the amount-presence test |
+| 4 | `done` clause restored on `discount_percent` | `validate_offers` errors on both the unreachable clause and the table mismatch |
+| 5 | terse `points` loses its `done` form | the parity error alone |
+| 6 | undeliverable-clause check deleted | **only** its own control |
+| 7 | terse-parity check deleted | both controls that assert it |
+| 8 | `points` loses its `done` clause | the mirror check fires: "is applied by this service but has no `done` clause" |
+| 9 | `pending` clause added to `discount_percent` | the first-person check fires **alone** — both terse tables patched too, or parity fires as well |
+| 10 | `waiver` loses its `out_of_band` clause | the missing-clause check fires **alone** |
+| 11 | `points` gains an `out_of_band` clause | the always-applied check fires **alone** |
+| 12 | first-person check deleted | **only** its own control |
+| 13 | missing-`out_of_band` check deleted | **only** its own control |
+| 14 | `out_of_band` never selected by the renderer | both copy tests that need it, and **not** the agreement test |
+| 15 | unrecognised-tense check deleted | **only** its own control |
+| 16 | dropped recovery action mid-journey | BW-7: offer stays accepted, copy never claims points landed |
+| 17 | broken consent gate | BW-8: probe reports `gate_withheld_a_fix` / forbidden gated purpose |
+
+Rows 3, 6, 14, 16 and 17 are the ones that matter, and they are the reason this table
+exists.
+
+Row 3 is the shortcut — "fix the copy by removing the discount" is satisfied by the
+sentence-based assertion and caught only by the amount-presence control, because the
+offer still carries a 15% discount that must reach *someone*.
+
+Row 6 is the control that pins one check rather than its neighbourhood: control 2
+asserts the parity error *and* that the undeliverable check stayed silent, so a
+check that started failing on something unrelated would be caught rather than
+"fixed" by deletion (§5.9's rule, which has now cost more effort than the original
+defect).
+
+Row 14 is the one that proves the third form is load-bearing rather than
+decorative. `out_of_band` can be present in both tables, named by a validator check,
+and reachable by no code path at all — and the whole suite stays green, because the
+*table* is checked and the *renderer* is not. Rows 9–11 then damage the tables, and
+rows 12–13 delete the checks; between them they cover the three ways this feature
+can be present and inert. It also shows the checks are not a wall: the same mutation
+leaves the agreement test passing, because that test compares two payload lists and
+never reads the sentence.
+
+Rows 16 and 17 are the journey-level negative controls: a mid-journey writer failure
+and a consent gate violation, each proving the probe path surfaces the defect rather
+than rendering a tidy payload.
+
+Four of the controls are the §9.2 defect-17 pattern — each loads a *patched copy* of
+`customer_offers.py` — so a check that quietly disappears takes its own control with
+it.
+
+**What this says about the two fixes before it.** Both were correct, and both were
+incomplete in the same direction: they made the *machine-readable* claim honest and
+left the human-readable one alone, because a payload is what a test can assert on
+and a sentence is not. The general rule, which is the one worth carrying:
+
+> **Fixing the structured claim and not the prose is the same defect one layer
+> later.** A response body and the sentence inside it are two renderings of one
+> fact; if they are derived separately they will disagree, and only one of them will
+> be checked.
+
 ## 6. Tier 2 — a week in the life of a customer
 
-`tests/test_e2e_real_life_journeys.py`, **13 tests.** Real HTTP, real SQLite, the
+`tests/test_e2e_real_life_journeys.py`, **18 tests.** Real HTTP, real SQLite, the
 cast from `_e2e_world`.
 
 | group | tests | what it walks |
@@ -564,6 +1099,7 @@ cast from `_e2e_world`.
 | `TestOffersLifecycle` | 3 | issue → accept → fulfil, then decline-then-accept, then an ineligible customer told so |
 | `TestTheRouterContract` | 1 | every mutating offer route returns 2xx *and* `found is True` |
 | `TestTheCastIsRealData` | 3 | the personas are rows, not fixtures — unique on every axis the routes use, every score inside the scale the engines resolve, every actor named by a flow present |
+| `TestBreakAndWatch` | 9 | break the fulfilment journey mid-flight, and assert the flow does not lie about it in prose as well as in the payload — §5.8, §5.10 |
 
 `TestChiaraAWeek` is one test rather than eleven on purpose, and the docstring
 gives the reason: the intermediate assertions are the *preconditions* of the
@@ -681,6 +1217,42 @@ to every caller that named it**. The cast had been there to be forgiving about
 This is recorded rather than buried because it is the ordinary way a fix of this
 kind arrives: the ladder was honest, the code feeding it was not, and the test
 that walked the ladder found it on the first call.
+
+### 7.3 A measurement that mutated the state another measurement reads
+
+§7.2 is a measurement source that was wrong on its own. This one was right on its
+own and wrong because of where it ran.
+
+`POST /kaizen/admin/candidates/{id}/measure` takes `from_app: [source, ...]` and
+computes each source in the order requested. Two of them touch the release ledger:
+
+* `divergence` runs the flow simulator, and one of the simulator's probes —
+  `release_ladder_gates_evaluate` — called `release_ladder.seed_ledger()` followed
+  by `set_default_ledger(...)`, which **replaces the process-wide ledger**;
+* `rollback` reads `get_default_ledger()`.
+
+So `from_app: ["divergence", "rollback"]` replaced the ledger between the two
+reads. `test_the_third_rung_is_gated_by_a_real_finding` seeds three deployments,
+asks for both sources, and got `rollback_targets: 0` — the ladder's rollback gate
+reading zero reachable targets on a ledger holding two. Requesting
+`["rollback", "divergence"]` returned 2. A number changed because of the ordering of
+an unrelated request.
+
+The probe did not need the ledger at all: `evaluate_gates` reads only the
+candidate. The seeding was cargo cult — `set_default_ledger` was there because an
+earlier draft needed a clean slate for `register_candidate`, which uses the
+*candidate* registry, not the ledger.
+
+The rule this establishes, which is broader than the bug:
+
+> **A measurement must not mutate state another measurement reads.** The simulator
+> runs every probe on every sweep, so a probe with a global side effect is a probe
+> that can change the answer of an endpoint the sweep never mentioned.
+
+It also restores what it found. `get_default_candidates()` returns the live list,
+so the probe now snapshots it, registers against the snapshot, and restores it in a
+`finally` — left in place, every sweep appended one candidate per persona, forever,
+and the release view grew a tail of `probe-candidate-*` rows no operator registered.
 
 ---
 
@@ -903,7 +1475,7 @@ codebase, and the parts that are not are named rather than implied.*
 |---|---|---|
 | `goodwill` `points` | **yes** | `credit_recovery_points`, the same canonical wallet writer the playbook path uses — so there is one place in the codebase that moves a balance for a recovery credit |
 | `goodwill` `discount_percent` | no → `requires_out_of_band` | no pricing engine in this repository consumes the column; `grep discount_percent app/` returns this module and the playbook that composes the offer, and nothing that prices anything |
-| `waiver` | no → `requires_out_of_band` | the effect is an arrears entry, and `customer_offers.arrears_entry_id` is populated by nothing in this module |
+| `waiver` | **yes, when linked** | `_apply_arrears_waiver` calls `waive_arrears_interest` / `waive_arrears_fees` when `arrears_entry_id` is populated. When it is *not* populated the component is named in `requires_out_of_band` — an unlinked waiver has no entry to waive, which is a different statement from "this repository cannot waive" |
 | `priority` | no → `requires_out_of_band` | the effect is a queue position, and queue urgency is not modelled as a value anything reads |
 
 Reporting the un-appliable parts is not a shrug, it is the whole design. An
@@ -918,6 +1490,14 @@ we actually deliver it?" is answerable from the audit table months later rather
 than only from a live HTTP response. The `note` field keeps its original meaning —
 the operator's record of work done outside this service — and the response now
 reports which components still needed it, so the two are distinguishable.
+
+**One further condition, and it is the one that decides whether any of this is
+true.** A structure that *reports* the effect is a claim about a successful
+application. Before §5.6.1 the report could be produced by a failed application:
+`record_outcome` set `fulfilled`, then the writer raised, and the response still
+said what it had intended to do. So the reporting above is only sound because the
+claim is now conditional on the effect succeeding — and that is the invariant the
+break-and-watch tests assert, rather than any field of the response.
 
 #### The idempotency belt
 
@@ -975,6 +1555,18 @@ reference that only has to differ.
 | 15 | An `autouse` fixture replaced the ORM's statement builder for an entire test file, so no test in it could evaluate a `WHERE` clause | `test_customer_offers_stage_b.py` | **high**, and about the tests — see below |
 | 16 | The lock assertion grepped file text, so it matched a docstring explaining why the path does *not* lock | `test_e2e_adversarial.py` | medium — a test that punishes documentation |
 | 17 | The `ast` replacement for it looked for a helper *name*, so it passed on a reverted mutator that still mentioned the name in a comment | `customer_offers.validate_offers()` | **high** — the guard was green and inert |
+| 20 | **A `fulfilled` claim outlived the effect it was made for.** `record_outcome` sets the status, then applies the credit; when the credit raised, the aborted transaction was left for the session to autoflush, persisting `fulfilled` with no credit and customer copy saying the points landed | `customer_offers.py` | **high** — §5.6.1 |
+| 21 | The simulator's `release_ladder_gates_evaluate` probe called `set_default_ledger`, replacing the process-wide ledger that the `rollback` measurement source reads; the rollback count depended on whether `divergence` was requested before it | `real_life_flows.py` | **high** — a gate number changed with request ordering — §7.3 |
+| 22 | `journey_outcome_report` forwarded no clock to `is_stuck`, so a test frozen at 2026-10-01 started failing on 2026-10-04 with nobody touching the tree | `offer_outcomes.py` | medium — a correct test on the day it was written |
+| 23 | **The customer-facing sentence asserted two effects, one of which never happens.** `OFFER_EXPLANATIONS[kind]["what"]` rendered "We put 250 points on your account and took 15.0% off your next service" from *every* status — claiming a completed credit before the money moved, and claiming a discount the same response reported as `requires_out_of_band`. **Found once, fixed twice**: removing the past tense left a future-tense promise ("we're removing the interest from your account") that is still a commitment by this process to something it does not do, on every waiver it issues | `customer_offers.py` | **high** — one reader told the truth, the other the opposite — §5.10 |
+
+(The numbering skips 18 and 19. Those two were the `TestBreakAndWatch` tests, which
+were numbered 17-19 alongside this table until the `BW-` prefix in §5.8 revealed
+that 17 was already a real defect -- so the same number meant a test in one place
+and a product defect in another, and BW-2 is the test that *found* defect 20. The
+defect numbers were left alone rather than renumbered, because §9.3 and §9.4
+cross-reference them and a renumbering would break those for no gain. A gap in a
+sequence is cheaper than a collision in it.)
 
 ### 9.2 Three of these defects were in the tests, not the product
 
@@ -1041,27 +1633,33 @@ message — *`record_outcome does not call _claim_transition`*, for a function
 whose entire body was `raise AssertionError` — showed that the diagnosis was
 correct and the premise was not.
 
-The controls now stand in `TestTheStructuralChecksCanFail`, load a patched copy
-from disk (monkeypatching cannot test this: the check reads the function's own
-source, which a patched attribute leaves intact), and cover the three reverts
-plus the skip path and its reachability. **A structural check that has never been
-seen to fail is a comment with an `assert` on it.**
+The controls now stand in `TestTheStructuralChecksCanFail` — eleven tests — load a
+patched copy from disk (monkeypatching cannot test this: the check reads the
+function's own source, which a patched attribute leaves intact), and cover the three
+reverts, the four clause-table checks added by defect 23 (§5.10), the skip path, the
+unrecognised-tense check, and its reachability. **A structural check that has never
+been seen to fail is a comment with an `assert` on it.**
 
 ### 9.3 Still open, in the order it pays
 
-**1. `release_ladder` now has a probe** (`release_ladder_gates_evaluate`) that
-exercises `evaluate_gates` with a seeded ledger and candidate. The capability
-grades `untested` because the admin routes it is declared on (`/kaizen/admin/*`)
-are not served in the test client — the probe runs, but the route-mapping step
-finds no route for it. The gate itself is exercised; the route gap is a test
-harness limit.
+**1. `release_ladder`, `blockage_log`, `topics` — grades now honest** (resolved).
+* `release_ladder` — probe `release_ladder_gates_evaluate` exercises `evaluate_gates`;
+  capability grades **`complete`**. The probe could not fail until §5.9: it named
+  `gate_count` in `expected` and never compared it, so it had to be strengthened
+  before a control for it could mean anything. Two controls now cover it — one drops
+  a gate from the returned list, one forges `safe: true` over a failing gate.
+* `blockage_log` — probe `blockage_log_renders` exercises the renderer; capability
+  grades **`complete`**. Writing its control found a false claim in the rendered
+  artefact (§5.9) and the renderer now has a zero-run case.
+* `topics` — probe `topic_classification_works` measures themes from the live
+  classifier rather than asserting vocabulary membership; capability grades
+  **`complete`**.
 
-**2. `blockage_log` and `topics` now have probes** (`blockage_log_renders` and
-`topic_classification_works`). Same route-mapping limitation as above: the
-admin/triage routes they are declared on are absent from the test client, so the
-capability audit grades them `untested` despite the probes running and holding.
+  All three grade via the capability audit — the routes `/kaizen/admin/*`,
+  `/chat/admin/*`, `/topics/*` ARE served by the test client; the earlier
+  `untested` grade was from running the audit on a subset of flows.
 
-**3. Three single-probe flows now have a second probe each** (resolved):
+**2. Three single-probe flows now have a second probe each** (resolved):
 * `repeat_customer_changes_booking` — added `booking_events_are_logged`, which
   asserts the transition is recordable in the event vocabulary.
 * `points_and_arrears_payment` — added `points_quote_is_reproducible`, which
@@ -1071,8 +1669,25 @@ capability audit grades them `untested` despite the probes running and holding.
   the `TopicRateLimiter` config and logic, asserting it has finite capacity,
   positive refill, and denies when empty.
 
-**4. Zero probes remain blind** (resolved). Sharpness went from **11/24 → 30/30**.
-The original eleven blind probes were fixed by:
+**3. The declared journey and the executed journey are now linked by a traceability
+table** (resolved). 55 declared `subflows` names, 30 executed probe ids, **zero
+string overlap** — but every subflow now lists the probe ids that exercise it,
+and `validate_flows` checks the table:
+
+* every declared subflow has an entry in `FLOW_SUBFLOW_PROBES`
+* every probe mapped to a subflow is in the flow's `probe_ids`
+* every probe in `probe_ids` is mapped to at least one subflow (warning, not error)
+
+The two vocabularies remain distinct by design — `subflows` holds business
+steps (`register`, `create_booking`) and probes emit check ids
+(`access_band_resolves`, `booking_events_are_logged`) — and the overlap is
+empty because they *are* different languages. The traceability table is the
+bridge, and it is enforced rather than assumed. The warning for flows declaring
+more than twice as many steps as probes remains as a weak signal.
+
+**4. Blind probes: eleven of twenty-four → four of thirty** (resolved).
+Sharpness went from **13/24 → 30/30**. The original eleven blind probes were
+fixed by:
 * Deriving persona-specific expectations from the declared tables rather than
   asserting vocabulary membership (`access_band_resolves`, `retention_health_bands`,
   `tier_and_posture_resolve`, `posture_adjustment_is_effective`).
@@ -1088,6 +1703,35 @@ The original eleven blind probes were fixed by:
   reported as `unjustified_constant_expectation` rather than waved through.
 * Adding `vocabulary_coverage` to report gaps the personas cannot reach.
 
+The two remaining unjustified blind probes (`forecast_confidence_decays`,
+`retention_series_builds`) were then sharpened by adding persona contrast
+(different snapshot counts / churn / loyalty), moving `retention` from
+`shallow` → `complete`. That completed the set: **4 blind, all justified**.
+| `retention_series_builds` | asserts the series is non-empty and monotonic; any monotone series satisfies it | assert the exact band the persona's churn and loyalty scores earn, so `no_data` cannot satisfy it |
+
+Those two are the whole of the `retention` capability's `shallow` grade. §5.5
+records what each of the four `shallow` grades would take, and the rule for all
+of them: **do not close it by carrying the probe's own inputs into its
+`expected`.** That trick manufactures distinct expectations with one identical
+answer, which is a *false* finding — worse than no finding, because a reader
+cannot tell it from a real one.
+
+**The stale-excuse check then caught one of my own earlier fixes.** Adding
+`stable_high_loyalty` to reach the `loyal` retention band and the `stable`
+recovery stage meant `_vocabulary_coverage` stopped reporting `loyal` as
+unreached — which is exactly the premise the `recovery_lifecycle_stage` excuse
+leaned on. `check_probe_sharpness` reported the excuse as stale and re-listed the
+probe under `claims_variation_but_constant`, and the suite failed. That is the
+mechanism working: an excuse is only honest while the gap it leans on is still
+being reported.
+
+The response was to **delete the entry**, not to reword it. The probe returns
+three distinct expectations across five personas (`engaged`, `loyal`, `new`) and
+needs no excuse. A key in that table *is* an excuse, so a "RETIRED — do not
+re-add" note left in place would have silently re-excused the probe the first
+time it went blind again, and the stale-excuse check would never fire because it
+only inspects entries whose text contains `derived_no_contrast`.
+
 **Vocabulary coverage now complete for retention** (resolved):
 * Added `retention_snapshot_count` persona field so the probe can vary snapshot
   count per persona rather than hardcoding 2.
@@ -1102,21 +1746,110 @@ the precondition. The real thing needs two trees, which a checkout cannot have.
 It is labelled `self_reproducibility` in the payload so nobody upgrades the claim
 by reading only the key name.
 
-**6. Three of an offer's four promise components still have nothing that can
-apply them** (§8.2). `discount_percent`, `waiver` and `priority` are now *named*
-in `requires_out_of_band` rather than silently marked delivered, which makes the
-gap visible. Making them real — a pricing hook, an arrears link populated by the
-issuer, a queue value something reads — is product work this repository cannot
-do on its own.
+This is the one open item that is **blocked rather than undone**, and the block
+should be stated as such rather than as remaining effort. `compare_runs` takes two
+run sets and does the real comparison; `_app_measurements` already serves a
+`shadow` source against an isolated environment. What is missing is a second
+environment to compare against, and inventing one in-tree would produce a number
+that looks like the real measurement and is not. The gate stays **unmeasured**,
+which is the honest state: `evaluate_gates` reports an unmeasured gate as
+`unmeasured` rather than passing it, precisely so this reads as a gap.
+
+**6. Two of an offer's four promise components still have nothing that can
+apply them** (§8.2) — **the reporting half is now closed; the product call is not.**
+`discount_percent` and `priority` are *named* in `requires_out_of_band` with their
+hook, rather than silently marked delivered. `waiver` is no longer in that list — it
+applies when `arrears_entry_id` is populated, and §5.6.1 covers what happens when
+the writer underneath it fails.
+
+**This item was re-read twice, and each reading found the customer-facing copy still
+denying the same thing the payload admitted.** Option 1 below has a second clause —
+*"and make the customer-facing copy say so"* — and that clause had not been done.
+Every goodwill offer this repository issues carries a discount
+(`RECOVERY_SAVE_INCENTIVES`: 5%, 15% or 25%), and every one of them told the
+customer the discount had been taken off. That is **defect 23**, §5.10, and it was
+not found by re-measuring anything: it was found by reading this item and noticing
+that option 1's second clause was unimplemented.
+
+Re-reading it again found a *third* state nobody had named. `waiver` is in none of
+the two lists above, and appears to be settled — but `_apply_offer_effect` can apply
+it only when `arrears_entry_id` is populated, and **nothing in this module populates
+one**. So `waiver` is in the same position as the other two, on every offer this
+service issues, and it was being described in a first-person future tense as though
+that made it honest. It is still defect 23 in a smaller coat: a promise by this
+process to do something this process will not do. §5.10 records why the fix is a
+third clause form rather than a rewording.
+
+What that leaves is genuinely a **product decision**, and it needs someone who owns
+pricing and scheduling:
+
+* `discount_percent` has no pricing engine in this repository to call. There is no
+  cart, no price, and no invoice — the only "prices" here are arrears principals
+  and point exchange rates. A hook that logs `{"hook": "pricing_engine"}` is
+  honest; a hook that invented a percentage and wrote it somewhere would be a new
+  defect wearing the costume of progress.
+* `priority` has no queue. Nothing reads a priority value, so setting one is
+  indistinguishable from not setting one.
+
+Two options, and they now need different amounts of work:
+
+1. **Keep them permanently out-of-band** — **the reporting and the copy are both
+   done.** The operator gets `requires_out_of_band`; the customer gets an
+   `out_of_band` clause saying the discount "is noted on your account for our team to
+   apply"; and `validate_offers` now refuses a first-person `pending` clause for a
+   component nothing here applies, so the copy cannot drift back to a promise. What
+   remains is a judgement about the *wording* — whether "for our team to apply" is a
+   promise the business stands behind — and not a correctness question. This is the
+   honest default and it is cheap.
+2. **Build the two subsystems**, then add the component to
+   `_components_this_service_applies` and write a real hook. That is a feature, not
+   a fix, and it is a small change now: the clause table, the terse table and
+   `validate_offers` are already the seam. Adding a `done` clause for a component
+   the source of truth can return is the whole of it — and `validate_offers` will
+   *refuse* the change until the source of truth can return it, which is the
+   ordering this defect argues for.
+
+The `waiver` case belongs to whichever option is chosen, and it is a prerequisite for
+either: an arrears entry has to be linked to the offer, or the waiver subsystem is
+as unbuilt as the other two. It is listed here rather than in §9.3 item 6's two
+bullets because it is a third subsystem nobody has counted.
+
+The rule this work has been holding to: **`fulfilled` must not imply anything
+landed that did not.** Whichever option is chosen, that has to survive it — and
+BW-4 (§5.8) is now the test that it does, on the sentence rather than only on the
+payload.
+
+**7. Four defects found by re-measuring, not by the flows.** Recorded here because
+none of them was found by a probe, and three of them are the kind that a green suite
+routinely hides:
+
+| # | defect | found by | why no probe found it |
+|---|---|---|---|
+| 20 | a `fulfilled` claim survived a failed credit, via session autoflush | `TestBreakAndWatch` | the probes only ever ran fulfilment with the writer working |
+| 21 | the simulator's `release_ladder_gates_evaluate` probe called `set_default_ledger`, replacing the process-wide ledger that the `rollback` measurement source reads | `test_the_third_rung_is_gated_by_a_real_finding` | the damage lands on a *different* endpoint, and only when `divergence` and `rollback` are requested together |
+| 22 | `journey_outcome_report` forwarded no clock to `is_stuck`, so a test frozen at 2026-10-01 began failing on 2026-10-04 with nobody touching the tree | the suite, three days later | a date-dependent test is a correct test on the day it was written |
+| 23 | the customer-facing `what` sentence claimed a credit before it was made and a discount nothing applies — in the same response that reported the discount as out-of-band | re-reading §9.3 (6) | **not a missing check: a check that was satisfied by a `fulfilled` offer.** The tense is correct in the one state every offer-copy test rendered, and the wrong half of the sentence is never right in any state — §5.10 |
+| 23 (again) | removing the past tense left a first-person future promise for an effect nothing here applies — and for `waiver`, on every waiver this service issues, because `issue_offer` never links an arrears entry | re-reading §9.3 (6) a second time, after the first fix | **a fix that satisfies its own negative control.** The check was satisfied, the tense was correct, and the claim was still false — in the third state, which no test rendered because no test read the copy for an unlinked waiver |
+
+Defect 21 is the one worth generalising: **a measurement must not mutate the state
+another measurement reads.** `_app_measurements` computes sources in request
+order, so a probe with a global side effect makes a later source's number depend
+on what was asked for first. The probe now restores both globals it touched.
 
 ### 9.4 What is assured, in one page
 
 | Claim | Mark | Where |
 |---|---|---|
-| Shadow cannot run shadow → live | **A** | 10 direction-arithmetic tests + negatives |
+| Shadow cannot run shadow → live | **A** | `TestOneWayRule`, 6 tests — every declared pairing derived, none trusted |
 | A shadow pointed at live is detected by *identity*, not config | **A** | 12 identity tests, incl. same DB / different password |
 | `isolation_violation` is reachable *through the flow path* | **A** | `test_a_shadow_pointed_at_live_is_caught_through_the_probe` |
-| Every probe the governance flow depends on has a control | **A** | set-of-ids standing check |
+| Every probe the governance flow depends on has a control | **A** | set-of-ids standing check over 8 probe ids; `TestNegativeControls` holds 21 tests, each damage verified by deleting the check it pins |
+| A control that cannot fail is caught | **A** | §5.9 — 3 of 8 attempts passed with the check they claimed to pin deleted |
+| A claim never outlives the effect it was made for | **A** | §5.6.1 — offer stays `accepted`, balance unmoved, claim rolled back |
+| The sentence a customer reads agrees with the report an operator reads | **A** | §5.10 — one source of truth, per-component tense in three forms, `validate_offers` refuses a past-tense clause for an undeliverable component *and* a first-person one |
+| "We will do it" is only said about things this service does | **A** | §5.10 — `out_of_band` is a distinct form, and a waiver with no arrears entry reads as somebody else's job |
+| A blocked measurement source cannot corrupt an earlier one | **A** | defect 21 — the simulator restores every global it touches |
+| A stuckness report is reproducible | **A** | defect 22 — `journey_outcome_report(now=…)`, with a later-date control |
 | An unmeasured gate fails closed | **A** | `GATE_OPS` |
 | A rollback appends; history is never rewritten | **A** | ledger tests + Tier 3 |
 | A rollback to what is already serving is refused | **A** | Tier 3 (defect 3, fixed) |
@@ -1129,20 +1862,23 @@ do on its own.
 | An unowned offer is not a fix | **A** | Stage B |
 | Every published band/tier/posture vocabulary is closed | **A** | Stage F pinning oracle + Tier 1 |
 | Unreadable preferences mean do-not-push | **A** | Stage D |
-| Chiara's week, end to end, changes nothing it should not | **a** | Tier 2, 13 tests, no planted defects |
+| Chiara's week, end to end, changes nothing it should not | **a** | Tier 2, 18 tests, incl. `TestBreakAndWatch` |
+| An offer does not claim `fulfilled` over an effect that failed | **A** | §5.6.1 — 2 negative controls, both verified |
+| A broken dependency stops the claim rather than the request | **A** | §5.8 — invariant assertions, not status codes |
 | The ladder stops exactly where the evidence stops | **a** | Tier 3 — the gates are asserted, not themselves broken |
-| The baseline flows report no blockage | **a** | 24 probes agree with themselves; 11 are blind |
-| *"A quote is reproducible"* | **a** | Tier 2 only — **no simulator probe** |
-| `contact_hour_is_local` distinguishes 23:00 Auckland from 09:00 London | **a** | now sharp; no planted defect |
+| The baseline flows report no blockage | **a** | 30 probes, 104 subflow executions, 0 blockages; 6 blind, and both blind measures agree on the same six (§10) |
+| Four capabilities are only *shallow*-tested | **✗** | §5.5 — a stub engine would pass; left honest, not closed by manufacture |
+| `discount_percent` and `priority` are actually applied | **✗** | no subsystem in this repo can — a product call, §9.3 (6). The *reporting* is closed: operator, customer and validator all agree it has not |
 | `shadow_divergence_within_tolerance` | **✗** | no shadow to compare against — see §9.3 (5) |
 | Two concurrent decisions on one offer | **A** | Tier 4, defect 12, fixed — one conditional write, 4 mutators |
 | The loser of a race is told which decision won | **A** | Tier 4, defect 14 — the invariant held while the answer was wrong |
 | Fulfilment applies the effect it claims | **A** | Tier 4, defect 13, fixed — 250 promised → 250 credited → 1 ledger row |
 | A second credit for one offer is refused, not skipped | **A** | Tier 4 — `double_credit_refused`, loud rather than silent |
-| An effect nothing here can apply is named, not implied | **A** | Tier 4 — `requires_out_of_band` for discount / waiver / priority |
-| `discount_percent`, `waiver` and `priority` are actually applied | **✗** | no subsystem in this repo can — see §9.3 (6) |
+| An effect nothing here can apply is named, not implied | **A** | Tier 4 — `requires_out_of_band` for `discount_percent` / `priority` |
+| `waiver` is applied when an arrears entry is named | **A** | §5.6.1 — and a failed writer rolls the claim back |
+| The declared journey steps and the executed probes are reconciled | **✗** | 55 names, 30 ids, zero overlap — §9.3 (3); a rename would raise the number and not the coverage |
 | Every mutator test in the offers suite evaluates its `WHERE` | **A** | defect 15 — `autouse` select-fake backs off for real-DB tests |
-| The offer subsystem's own validator would notice a reverted guard | **A** | defect 17 — 5 negative controls, each loading a patched copy of the module |
+| The offer subsystem's own validator would notice a reverted guard | **A** | defect 17 — 7 negative controls, each loading a patched copy of the module |
 | A structural check can distinguish a call from a comment about it | **A** | defects 16, 17 — `ast` call sites, never source text |
 
 ---
@@ -1154,16 +1890,22 @@ Everything above is reproducible. These are the commands.
 ```bash
 cd code/dev/fastapi
 
-# the whole suite. Last full run: 3079 passed in 316s (wall clock varies ~5%).
+# the whole suite. Last full run: 3124 passed in 985s (wall clock varies widely
+# with machine load -- an uncontended run of the same tree took 604s).
 python3 -m pytest tests/ -q
 
-# the four flow tiers. 52 / 13 / 18 / 17.
+# the four flow tiers. 52 / 18 / 18 / 17.
 python3 -m pytest tests/test_e2e_certainty_flows.py     -q
 python3 -m pytest tests/test_e2e_real_life_journeys.py  -q
 python3 -m pytest tests/test_e2e_release_journey.py     -q
 python3 -m pytest tests/test_e2e_adversarial.py         -q
 
-# the negative controls, and the policy table they police
+# the negative controls, and the policy table they police.
+# Every one of these is verified by *deleting* the check it claims to pin and
+# watching it fail. To re-verify one, remove the condition from
+# `_probe_blockage_log_renders` in app/real_life_flows.py and run the control: it
+# must FAIL. If it passes, the control has stopped pinning and must be rewritten
+# before it is trusted again -- §5.9 is what that looks like when it goes wrong.
 python3 -m pytest tests/test_kaizen_shadow_release.py -q -k NegativeControls
 
 # is the simulator baseline still clean?
@@ -1174,18 +1916,50 @@ print('blockages:', len(F.collect_blockages(runs)))
 print(F.flow_gate_measurements(runs))
 "
 
-# blind / sharp / orphan / untested
+# §5.6.1 / §5.10 — the five break-and-watch cases. Three plant a broken dependency
+# and assert the *invariant* (offer not `fulfilled`, balance unmoved) rather than a
+# status code, so they survive a change in how the failure is reported. Two break
+# nothing and assert the reporting layer itself: that the sentence a customer reads
+# and the report an operator reads name the same outstanding component.
+python3 -m pytest tests/test_e2e_real_life_journeys.py -q -k TestBreakAndWatch
+
+# §5.10 — the clause tables, and the eight ways `validate_offers` refuses a
+# sentence that claims an effect this service does not deliver, in any tense.
+# Run after any edit to `_COMPONENT_CLAUSES`, `_COMPONENT_TERSE` or
+# `_components_this_service_applies`.
+python3 -m pytest tests/test_customer_offers_stage_b.py -q \
+  -k "CustomerFacingCopy or StructuralChecksCanFail"
+
+# §5.9 — the standing check, which is what noticed the two missing controls.
+python3 -m pytest tests/test_kaizen_shadow_release.py -q \
+  -k every_probe_the_governance_flow_depends_on_has_a_control
+
+# blind / sharp / orphan / untested, and the two blind* keys are different measures
 python3 -c "
 from app import real_life_flows as F
 runs = F.run_all_flows()
 r = F.capability_report(runs)
-print('blind  :', len(r['blind_probes']), 'of', r['probe_registry_size'])
-print('orphans:', r['orphan_probes'])
-print('untested:', r['untested'])
 s = F.check_probe_sharpness()
-print('sharp  :', s['sharp'], 'of', s['probes'], '| valid:', s['valid'])
-print('constant:', s['constant_expectation'])
+print('grades :', r['counts'])
+print('audit-blind  :', len(r['blind_probes']), 'of', r['probe_registry_size'], r['blind_probes'])
+print('sharpness-constant:', len(s['constant_expectation']), 'of', s['probes'], '| valid:', s['valid'])
+print('sharp  :', s['sharp'], 'of', s['probes'])
+print('orphans:', r['orphan_probes'], '| untested:', r['untested'])
+print('unjustified constant:', s['unjustified_constant_expectation'])
+print('stale excuses      :', s['stale_justification'])
 "
+# `audit-blind` and `sharpness-constant` are the same six probes, computed twice
+# by two independent implementations (`capability_audit._blind_probes` and
+# `real_life_flows.check_probe_sharpness`). They are printed together on purpose:
+# they agreeing is a cross-check, and if they ever diverge then one of them has
+# changed meaning without the other noticing.
+#
+# `sharp: 28 of 30` is not "28 probes are good". Six probes expect the same thing
+# for every persona; four of the six carry an entry in
+# `_CONSTANT_EXPECTATION_JUSTIFIED` arguing why a universal invariant is the
+# honest claim there, so they count as sharp. `unjustified constant` lists the two
+# that do not -- `forecast_confidence_decays` and `retention_series_builds` --
+# and those are the two behind the retention capability's `shallow` grade (§5.5).
 
 # declared vs executed vocabulary — expect overlap == []
 python3 -c "
@@ -1283,6 +2057,53 @@ mutators; the second applies what it can apply and *names* what it cannot, rathe
 than reporting success for a question nobody asked. Both were already reported
 as open findings in the first edition, which is the part of the exercise that
 turned out to work.
+
+Breaking the things on purpose found two more that nothing green was watching: a
+`fulfilled` claim that **survived the failure of the effect it was made for** — the
+offer said the customer had 250 points and the wallet said zero, because the
+claim was written before the credit and nothing undid it when the credit raised —
+and a simulator probe that replaced the process-wide release ledger, so a gate's
+rollback count came back zero depending on which measurement source was asked for
+first. Both are fixed; the first by rolling the claim back, the second by not
+mutating state a measurement reads. The second is the lesson worth carrying: a
+green suite is evidence about the paths it exercises, and a side effect on shared
+state is invisible to every test that does not happen to ask for the two things in
+that order.
+
+The third was not found by breaking anything, and it is the one that ties the other
+two together. The first fix made the *payload* honest; the second made the
+*operator's report* honest; and the sentence the **customer** read went on claiming
+a credit before the money moved and a discount that nothing in this repository can
+apply — in the same response that reported the discount as requiring out-of-band
+action. It survived two fixes because a `fulfilled` offer makes the tense correct,
+so every test that read the copy after the good case found it accurate, and the
+wrong half of the sentence is never right in any state. The fix was to delete the
+per-kind sentence entirely and compose the copy per *component* from the same
+function that decides what this service can deliver, so the two renderings of one
+fact cannot disagree. **Fixing the structured claim and not the prose is the same
+defect one layer later** — and the general form of that, along with the two rules
+that followed from it (damage exactly one thing; verify by deleting the check, not
+by reading the control), is what the second edition is actually about.
+
+That fix then came back once more, which is the part worth keeping. Rewriting the
+sentence into the future tense stopped the completed-act claim and satisfied its own
+negative control — and was still a promise by this process to do something it does
+not do, because "not yet" and "not ours" are different claims and the copy only had
+a word for one of them. It showed up in the state no test rendered: a waiver whose
+arrears entry is never linked, which is every waiver this service issues, because
+no test had read the copy for one. So the copy now has three forms, not two, and
+the validator refuses a first-person sentence about an effect nothing here applies.
+The generalisation is sharper than the first one:
+
+> **A check that is satisfied by the defect it was written to catch is worse than
+> no check**, because it converts a known gap into a recorded assurance. The first
+> control asked "is anything here in the past tense?" — and the tense was the thing
+> that had been fixed. Asking what the sentence *asserts about the world*, rather
+> than which form it takes, is the difference between a control that pins the
+> property and one that pins the previous patch.
+
+The same pattern is defect 17 and defect 22 wearing different clothes: a check that
+passed was not measuring the thing it was named for.
 
 The last three findings are about the tests rather than the product. The
 concurrency suite that found the double-commit was itself unreliable — it

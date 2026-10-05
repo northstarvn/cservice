@@ -1536,6 +1536,29 @@ class TestNegativeControls:
     def _blockers_with(blockages, category):
         return [row for row in blockages if row.category == category]
 
+    @staticmethod
+    def _finding_text(row) -> str:
+        """The whole finding as text, so a diagnosis can be found where it lives.
+
+        A probe that *fails* puts its reason in ``evidence``; ``error`` is for an
+        exception raised. Four controls below assert on which specific check
+        failed, and searching only ``error`` finds an empty string -- which reads
+        as "the control proved nothing" at exactly the moment the control is
+        working. Getting this wrong looks like a failing control rather than a
+        failing assertion, which is the worst way for it to go wrong.
+        """
+        return repr(row.as_dict())
+
+    @staticmethod
+    def _named_findings(blockages, subflow_id, *needles):
+        """Findings for ``subflow_id`` whose text mentions every needle."""
+        found = [row for row in blockages if row.subflow_id == subflow_id]
+        return [
+            row
+            for row in found
+            if all(needle in TestNegativeControls._finding_text(row) for needle in needles)
+        ]
+
     def test_the_baseline_is_clean(self):
         """Before any control: nothing. Without this the controls prove nothing."""
         from app import real_life_flows
@@ -1978,6 +2001,280 @@ class TestNegativeControls:
 
         assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
 
+    # -----------------------------------------------------------------------
+    # The two governance probes that had no control.
+    #
+    # Both were added to close gaps in §9.3 and both landed in
+    # ``admin_governance_review`` without a control, so the standing check below
+    # failed on them. That check was doing exactly its job: a probe added to the
+    # flow whose failure mode is an unjustifiable promotion, with nothing proving
+    # the harness would notice it breaking.
+    #
+    # Neither control needed a new mechanism. What they needed was a probe that
+    # *could* fail, and each of these probes could not:
+    #
+    # * ``release_ladder_gates_evaluate`` computed ``expected["gate_count"]`` from
+    #   ``PROMOTION_GATES`` and then never compared it to anything, so a ladder
+    #   that dropped every gate still passed -- the expectation named the number
+    #   and the verdict ignored it. It now re-derives ``safe`` from the gates it
+    #   evaluated and requires the evaluated set to match what was promised.
+    # * ``blockage_log_renders`` checked four headings and reported success over
+    #   an empty sweep; see its docstring.
+
+    def test_a_ladder_that_drops_a_gate_is_caught(self):
+        """A gate quietly ceasing to be evaluated is the whole failure mode.
+
+        ``evaluate_gates`` returns a list. A refactor that filters it -- an
+        ``if gate_id not in SEEN`` guard, a table rebuilt from the wrong tuple --
+        produces a shorter list and every other field still consistent, because
+        the counts come from the same shortened list. Nothing looks wrong and a
+        rung has quietly stopped being gated.
+
+        So the gate is damaged by *wrapping* the real function and slicing its
+        output, not by replacing it: the wrapper cannot introduce a bug the real
+        evaluator does not have, and the control is about the probe noticing.
+        """
+        from app import real_life_flows
+        from app import release_ladder
+
+        real = release_ladder.evaluate_gates
+        dropped = []
+
+        def silently_drops_one_gate(candidate, **kwargs):
+            result = real(candidate, **kwargs)
+            gates = list(result.get("gates") or ())
+            if gates:
+                dropped.append(gates[0]["gate_id"])
+                # Everything else the evaluator computed is left alone, so the
+                # damage is confined to the list itself.
+                return dict(result, gates=gates[1:])
+            return result
+
+        release_ladder.evaluate_gates = silently_drops_one_gate
+        try:
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+        finally:
+            release_ladder.evaluate_gates = real
+
+        assert dropped, "the control dropped nothing, so it proves nothing"
+        assert self._named_findings(
+            blockages, "release_ladder_gates_evaluate", "nothing_dropped"
+        ), (
+            "a ladder that silently stopped evaluating a gate raised no finding "
+            f"naming it; dropped {dropped}; findings were "
+            f"{[self._finding_text(row) for row in blockages]}"
+        )
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_ladder_that_reports_safe_over_a_failing_gate_is_caught(self):
+        """``safe: true`` must follow from the gates, not be asserted beside them.
+
+        This is the more dangerous of the two, and the one the probe previously
+        could not see at all: the evaluator returns ``safe`` as a summary of
+        ``blocking_failures``, and a short-circuit that hard-coded ``True`` would
+        let a candidate reach a level serving real traffic with two blocking gates
+        red. Nothing about the gate rows would look wrong.
+
+        The probe re-derives ``safe`` from the rows it was handed, so a forged
+        summary has nothing to stand on.
+        """
+        from app import real_life_flows
+        from app import release_ladder
+
+        real = release_ladder.evaluate_gates
+        forged_over = []
+
+        def safe_regardless(candidate, **kwargs):
+            result = real(candidate, **kwargs)
+            if result.get("blocking_failures"):
+                forged_over.append(list(result["blocking_failures"]))
+                return dict(result, safe=True, blocking_failures=[])
+            return result
+
+        release_ladder.evaluate_gates = safe_regardless
+        try:
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+        finally:
+            release_ladder.evaluate_gates = real
+
+        assert forged_over, (
+            "this checkout has no failing blocking gate for a draft candidate, so "
+            "there was nothing to forge 'safe' over and the control proves nothing"
+        )
+        found = [row for row in blockages if row.subflow_id == "release_ladder_gates_evaluate"]
+        assert found, (
+            f"safe=True was forged over {forged_over[0]} and raised no finding"
+        )
+        assert self._named_findings(
+            blockages, "release_ladder_gates_evaluate", "safe_follows_from_the_gates"
+        ), (
+            "the forged `safe` was caught, but not by the check that re-derives it: "
+            f"{[self._finding_text(row) for row in found]}"
+        )
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_blockage_log_that_drops_a_section_is_caught(self):
+        """A refactor that loses the closing section must not pass silently.
+
+        The renderer's sections are appended by hand, so dropping one during a
+        change is an ordinary accident rather than an exotic one. The probe names
+        the three it requires; this control removes one from the real output.
+
+        Damaging the *output* rather than replacing the renderer is deliberate: a
+        stub would prove the probe can be broken by a function that returns the
+        wrong string, which is not the question. The question is whether the probe
+        notices a document that is missing part of itself.
+        """
+        from app import real_life_flows
+
+        real = real_life_flows.render_blockages_markdown
+
+        def loses_the_ground_truth_line(runs, blockages, **kwargs):
+            md = real(runs, blockages, **kwargs)
+            return "\n".join(
+                line
+                for line in md.splitlines()
+                if "Ground truth for the next pass" not in line
+            )
+
+        real_life_flows.render_blockages_markdown = loses_the_ground_truth_line
+        try:
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+        finally:
+            real_life_flows.render_blockages_markdown = real
+
+        found = [row for row in blockages if row.subflow_id == "blockage_log_renders"]
+        assert found, "a blockage log missing a section raised no finding"
+        assert self._named_findings(
+            blockages, "blockage_log_renders", "missing_sections"
+        ), (
+            "the missing section was caught, but the finding does not name it: "
+            f"{[self._finding_text(row) for row in found]}"
+        )
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_blockage_log_that_stops_saying_nothing_ran_is_caught(self):
+        """The zero-run sentence is load-bearing, and this pins it specifically.
+
+        ``render_blockages_markdown`` had no zero-run case at all: an empty run set
+        shared the "no blockage" wording with a real sweep, so a clean sweep and a
+        sweep that never ran rendered identically -- both as success. It was
+        reached constantly, because ``_probe_blockage_log_renders`` calls the
+        renderer with an empty run set to check structure without recursing.
+
+        "Nothing ran" is now its own case in the renderer, and this control takes
+        it away.
+
+        **The replacement wording is deliberately neutral, and that is the third
+        version of this control.** The first put the historical sentence back --
+        which also contains "all held their invariants", so it failed the probe on
+        ``claims_success`` and kept passing when ``says_nothing_ran`` was deleted
+        from the verdict. The second one-liner had the same defect. A control that
+        damages two things at once pins neither, and the standing check reports it
+        as coverage either way.
+
+        So the damage is a plausible-but-honest-sounding rewrite -- "- No simulation
+        data." -- which drops the explicit statement that nothing ran while making
+        no success claim of its own. Now only ``says_nothing_ran`` can fail the
+        probe. Verified by deleting each condition in turn: removing
+        ``says_nothing_ran`` fails this test, removing ``not claims_success``
+        leaves it passing.
+        """
+        from app import real_life_flows
+
+        real = real_life_flows.render_blockages_markdown
+
+        def vaguer_about_the_empty_sweep(runs, blockages, **kwargs):
+            md = real(runs, blockages, **kwargs)
+            lines = [
+                "- No simulation data." if line.startswith("- **Nothing ran:") else line
+                for line in md.splitlines()
+            ]
+            return "\n".join(lines)
+
+        real_life_flows.render_blockages_markdown = vaguer_about_the_empty_sweep
+        try:
+            damaged = real_life_flows.render_blockages_markdown([], [])
+            assert "Nothing ran" not in damaged, "the control removed the wrong sentence"
+            assert "all held their invariants" not in damaged, (
+                "the control also removed the success claim, so it pins both halves "
+                "at once -- see the docstring"
+            )
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+        finally:
+            real_life_flows.render_blockages_markdown = real
+
+        assert self._named_findings(blockages, "blockage_log_renders", "says_nothing_ran"), (
+            "a renderer that stopped saying an empty sweep ran nothing raised no "
+            f"finding: {[self._finding_text(row) for row in blockages]}"
+        )
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
+    def test_a_blockage_log_that_claims_success_without_a_sweep_is_caught(self):
+        """A renderer may not say "nothing ran" and "everything held" at once.
+
+        The defect this pins is real, and was found while writing the control.
+        ``render_blockages_markdown([], [])`` used to render
+
+            "**No blockage: 0 flows across 0 subflows all held their invariants.**
+             ... this is evidence the engines still branch"
+
+        -- a success claim about a sweep that never ran, in the document a human
+        reads. It was there because ``_probe_blockage_log_renders`` calls the
+        renderer with an empty run set on purpose, to check structure without
+        recursing, so the simulator's own healthy output carried the false
+        sentence.
+
+        **The first version of this control did not work, and checking that is
+        the reason it is worth reading.** It damaged the output by replacing
+        ``Nothing ran:`` with the old success wording, which removed *both*
+        signals at once -- so the probe failed on ``says_nothing_ran`` whether or
+        not it looked at the success claim. Deleting ``not claims_success`` from
+        the probe's verdict left this test passing. A control that cannot fail is
+        worse than no control, because it appears in the standing check and reads
+        as coverage.
+
+        So the damage here is the *contradictory* document: "nothing ran" is left
+        in place and the success claim is added beside it. Now only
+        ``claims_success`` can fail the probe, and removing that condition from the
+        verdict makes this test fail -- which was verified, not assumed.
+        """
+        from app import real_life_flows
+
+        real = real_life_flows.render_blockages_markdown
+        success_claim = (
+            "- **No blockage: 0 flows across 0 subflows all held their invariants.**"
+            " Each flow ran against the varied personas rather than a happy path."
+        )
+
+        def contradicts_itself(runs, blockages, **kwargs):
+            md = real(runs, blockages, **kwargs)
+            # Keep "Nothing ran:" exactly where it is, so the only thing this
+            # damages is the success claim.
+            return md.replace(
+                "\n- **Flows run:**",
+                f"\n{success_claim}\n\n- **Flows run:**",
+                1,
+            )
+
+        real_life_flows.render_blockages_markdown = contradicts_itself
+        try:
+            damaged = real_life_flows.render_blockages_markdown([], [])
+            assert "Nothing ran" in damaged, "the control removed the wrong sentence"
+            assert "all held their invariants" in damaged, "the control added nothing"
+            blockages = real_life_flows.collect_blockages(real_life_flows.run_all_flows())
+        finally:
+            real_life_flows.render_blockages_markdown = real
+
+        assert self._named_findings(
+            blockages, "blockage_log_renders", "claims_success_without_a_sweep"
+        ), (
+            "a document claiming both that nothing ran and that everything held "
+            "raised no finding: "
+            f"{[self._finding_text(row) for row in blockages]}"
+        )
+        assert real_life_flows.collect_blockages(real_life_flows.run_all_flows()) == []
+
     def test_every_probe_the_governance_flow_depends_on_has_a_control(self):
         """The reason the six above exist, as a standing check.
 
@@ -2001,6 +2298,11 @@ class TestNegativeControls:
             # Broken by a control that edits the module global the probe reads.
             "policy_motion_needs_evidence",
             "contact_hour_is_local",
+            # Broken by a control that wraps the real function and damages its
+            # output. Both needed their probes strengthened first: each named the
+            # number it expected and then never compared it to anything.
+            "release_ladder_gates_evaluate",
+            "blockage_log_renders",
             # Read-only invariants: nothing to break, they assert what the tree
             # already publishes.
             "broken_promise_is_visible",
@@ -2493,7 +2795,32 @@ class TestDivergenceComparison:
         assert comparison["only_in_candidate"] == []
 
     def test_a_flipped_outcome_is_counted_separately_from_a_value_difference(self):
-        """A flip changes behaviour; a differing number may only change a number."""
+        """A flip changes behaviour; a differing number may only change a number.
+
+        **The ``within_tolerance is False`` line this used to assert was passing
+        by accident of catalog size, and it has been replaced rather than
+        updated.** One flip plus one value difference is 2 divergences over
+        ``compared`` subflows, against a default tolerance of 2%. That is
+        ``within_tolerance is False`` while the catalog holds 99 subflows and
+        ``is True`` at 101. Probes were added; the assertion quietly changed
+        meaning; nothing was wrong with the product.
+
+        Which is the wrong thing to assert either way. ``within_tolerance`` is a
+        *size-relative* gate, so "one flip must breach it" is a claim about how
+        many probes this repository happens to have. The question this test is
+        named for is whether the two kinds of difference are counted separately,
+        which is what the first four assertions already say. So:
+
+        * the arithmetic is pinned exactly -- 2 over ``compared`` -- so dilution
+          by adding probes is visible rather than silent;
+        * "a flip is not absorbed by tolerance" is asserted against an explicit
+          ``tolerance=0.0``, which is what makes the claim true at every catalog
+          size.
+
+        Whether a single flipped probe *should* block a promotion is a release
+        policy question, and `DEFAULT_DIVERGENCE_TOLERANCE` is where that belongs.
+        Encoding it here, as a by-product of the sweep's size, was the accident.
+        """
         from app import real_life_flows
 
         baseline = real_life_flows.run_all_flows()
@@ -2510,7 +2837,28 @@ class TestDivergenceComparison:
             comparison["outcome_flips"][0]["candidate_held"]
         )
         assert comparison["divergence_ratio"] > 0.0
-        assert comparison["within_tolerance"] is False
+
+        # The flip and the value difference are one each -- not two divergences
+        # collapsed together, and not one divergence counted twice.
+        assert len(comparison["divergences"]) == 1, comparison["divergences"]
+        assert comparison["divergences"][0]["reason"] == "observed values differ"
+        assert "forced" in comparison["divergences"][0]["fields"]
+        assert comparison["outcome_flips"][0]["note"]
+
+        # Exactly one flip and one difference over everything compared.
+        assert comparison["divergence_ratio"] == round(
+            2 / comparison["compared"], 6
+        ), comparison
+        assert comparison["compared"] > 100, (
+            "the sweep shrank; the arithmetic above was written against a catalog "
+            f"of this size and is worth re-reading if not ({comparison['compared']})"
+        )
+
+        # And the flip is not absorbed by tolerance, checked against a tolerance
+        # that does not depend on how many probes exist.
+        strict = real_life_flows.compare_runs(baseline, candidate, tolerance=0.0)
+        assert strict["within_tolerance"] is False, strict
+        assert strict["divergence_ratio"] == comparison["divergence_ratio"]
 
     def test_a_value_difference_without_a_flip_is_still_a_divergence(self):
         from app import real_life_flows
@@ -2759,17 +3107,42 @@ class TestEndpoints:
         assert body["blockers"] == []
 
     def test_listing_the_flows(self, admin_client):
+        """The catalog endpoint publishes the catalog, completely.
+
+        **The two counts this used to assert -- ``12`` flows and ``5`` personas --
+        are gone, and the comment directly beneath them already said why.** A
+        count assertion is a tripwire that fires on every added probe or persona
+        and asks the author to update a literal, which trains people to update
+        the literal without asking whether the new row is reachable. Then the
+        counts went stale anyway: two personas were added to reach retention bands
+        and recovery stages, and ``5`` failed on a tree whose behaviour had not
+        changed at all.
+
+        A count is the *weakest* thing this endpoint could assert, so what is
+        asserted instead is that the listing is faithful to the catalog in both
+        directions -- nothing dropped, nothing invented -- plus the reachability
+        property for probes and personas both. Those fail if a row is added
+        without being wired to anything, which is the thing the count could never
+        detect.
+        """
+        from app import real_life_flows
+
         response = admin_client.get("/kaizen/admin/flows")
         assert response.status_code == 200, response.text
         body = response.json()
-        assert len(body["flows"]) == 12
-        assert len(body["personas"]) == 5
-        # Not a magic number. A count assertion is a tripwire that fires on every
-        # added probe and asks the author to update a literal, which trains people
-        # to update the literal without asking whether the new probe is reachable.
-        # This asserts the property that actually matters instead: every probe
-        # registered is named by at least one flow, so a probe can never be written
-        # and forgotten.
+
+        assert [f["flow_id"] for f in body["flows"]] == list(real_life_flows.FLOW_IDS), (
+            "the endpoint's flow list is not the catalog: "
+            f"{[f['flow_id'] for f in body['flows']]}"
+        )
+        assert {p["persona_id"] for p in body["personas"]} == {
+            row.persona_id for row in real_life_flows.PERSONAS
+        }, "the endpoint's persona list is not the catalog"
+        assert body["flows"], "the surface published no flows at all"
+        assert body["personas"], "the surface published no personas at all"
+
+        # Every probe registered is named by at least one flow, so a probe can
+        # never be written and forgotten.
         registered = set(body["probes"])
         named = {p for f in body["flows"] for p in f.get("probe_ids", ())}
         assert registered, "the surface published no probes at all"
@@ -2778,6 +3151,18 @@ class TestEndpoints:
             f"{sorted(registered - named)}; named but unregistered: "
             f"{sorted(named - registered)}"
         )
+
+        # The same argument applied to personas. A persona no flow names is
+        # described in the catalog and never exercised, which is exactly the
+        # orphan-probe hole one level up -- and it is reachable by a persona being
+        # added for its own sake, which is what adding two did.
+        run_personas = {p for f in body["flows"] for p in f.get("personas", ())}
+        assert run_personas == {p["persona_id"] for p in body["personas"]}, (
+            "personas in the catalog that no flow runs: "
+            f"{sorted({p['persona_id'] for p in body['personas']} - run_personas)}; "
+            f"run by a flow but not in the catalog: {sorted(run_personas - {p['persona_id'] for p in body['personas']})}"
+        )
+
         assert body["score_scale"] == [0.0, 100.0]
 
     def test_simulating_one_flow_reports_its_runs(self, admin_client):

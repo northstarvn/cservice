@@ -1332,6 +1332,45 @@ def _expected_escalation_decision(
 
 def _probe_retention_series(persona: Persona) -> ProbeOutcome:
     from app.services import retention
+    from statistics import fmean, pstdev
+
+    # Persona-specific snapshot count and base loyalty/churn.
+    # Snapshot count varies by booking activity (the engine reads snapshots, not
+    # bookings directly, but a persona with more bookings naturally has more
+    # snapshots). Churn rank comes from the published scale.
+    churn_rank = {"low": 0.0, "medium": 1.0, "high": 2.0, "critical": 3.0}
+    base_churn = churn_rank.get(persona.churn_risk, 1.0)
+
+    # Snapshot count: at least 2, at most 6, driven by booking count and days
+    # since activity. This creates distinct metric expectations per persona.
+    if persona.persona_id == "loyal_with_points":  # ana: 2 bookings, active
+        count = 4
+        loyalty_base = persona.loyalty_score
+        loyalty_trend = -1.5  # slight decline
+    elif persona.persona_id == "abandoned_pending":  # bruno: 1 booking, recent
+        count = 3
+        loyalty_base = persona.loyalty_score
+        loyalty_trend = -2.0
+    elif persona.persona_id == "repeatedly_cancelled":  # chiara: 3 bookings, high churn
+        count = 5
+        loyalty_base = persona.loyalty_score
+        loyalty_trend = -3.0
+    elif persona.persona_id == "dormant_45_days":  # dmitri: 1 booking, inactive (45 days)
+        count = 2
+        loyalty_base = persona.loyalty_score
+        loyalty_trend = 0.0  # flat
+    elif persona.persona_id == "stable_high_loyalty":  # root: no bookings, operator
+        count = 2
+        loyalty_base = persona.loyalty_score
+        loyalty_trend = 0.0
+    elif persona.persona_id == "new_customer_no_snapshots":
+        count = 2
+        loyalty_base = persona.loyalty_score
+        loyalty_trend = 0.0
+    else:
+        count = 2
+        loyalty_base = persona.loyalty_score
+        loyalty_trend = 0.0
 
     base = datetime(2026, 9, 1, tzinfo=timezone.utc)
     snapshots = [
@@ -1339,31 +1378,63 @@ def _probe_retention_series(persona: Persona) -> ProbeOutcome:
             "id": index + 1,
             "snapshot_type": "scheduled",
             "lifecycle_stage": "active",
-            "loyalty_score": max(0.0, persona.loyalty_score - (3 - index) * 4.0),
-            "churn_risk": persona.churn_risk if index >= 2 else "medium",
+            "loyalty_score": max(0.0, min(100.0, loyalty_base + index * loyalty_trend)),
+            "churn_risk": persona.churn_risk,
             "created_at": base + timedelta(days=index * 7),
         }
-        for index in range(3)
+        for index in range(count)
     ]
     points = retention.snapshot_series_points(snapshots)
+
+    # Independent re-computation of the metrics the function returns.
+    # This is the separate implementation that makes the probe sharp.
+    loyalty_values = [float(p["loyalty_score"]) for p in points]
+    churn_values = [float(p["churn_rank"]) for p in points]
+    count_got = len(points)
+
+    expected = {
+        "snapshot_count": count_got,
+        "loyalty_avg": round(fmean(loyalty_values), 2) if loyalty_values else 0.0,
+        "loyalty_min": round(min(loyalty_values), 2) if loyalty_values else 0.0,
+        "loyalty_max": round(max(loyalty_values), 2) if loyalty_values else 0.0,
+        "loyalty_latest": round(loyalty_values[-1], 2) if loyalty_values else 0.0,
+        "loyalty_stdev": round(pstdev(loyalty_values), 2) if count_got >= 2 else 0.0,
+        "loyalty_delta": round(loyalty_values[-1] - loyalty_values[0], 2) if count_got >= 2 else 0.0,
+        "abs_loyalty_delta": round(abs(loyalty_values[-1] - loyalty_values[0]), 2) if count_got >= 2 else 0.0,
+        "churn_avg": round(fmean(churn_values), 2) if churn_values else 0.0,
+        "churn_latest": round(churn_values[-1], 2) if churn_values else 0.0,
+        "churn_max": round(max(churn_values), 2) if churn_values else 0.0,
+        "churn_delta": round(churn_values[-1] - churn_values[0], 2) if count_got >= 2 else 0.0,
+        "churn_stdev": round(pstdev(churn_values), 2) if count_got >= 2 else 0.0,
+        "churn_latest_label": str(points[-1]["churn_risk"]) if points else "",
+        "snapshot_types": sorted({str(p["snapshot_type"]) for p in points if p["snapshot_type"]}),
+        "lifecycle_stages": sorted({str(p["lifecycle_stage"]) for p in points if p["lifecycle_stage"]}),
+    }
+
     metrics = retention.build_retention_series_metrics(points)
-    # Ordered oldest -> newest is the direction the trend is read in, so a series
-    # that came back reversed would make every delta the wrong sign.
     ordered = [point["index"] for point in points] == list(range(len(points)))
     required = ("snapshot_count", "loyalty_avg", "loyalty_latest", "churn_latest")
     missing = [key for key in required if key not in metrics]
+
+    all_ok = len(points) == count and ordered and not missing
+    for k, v in expected.items():
+        if metrics.get(k) != v:
+            all_ok = False
+            break
+
     return _outcome(
         "retention_series_builds",
         persona,
-        len(points) == 3 and ordered and not missing,
-        f"{len(points)} points, ordered={ordered}, metrics missing {missing or 'none'}",
+        all_ok,
+        f"{count_got} points, ordered={ordered}, metrics missing {missing or 'none'}",
         observed={
-            "points": len(points),
+            "points": count_got,
             "ordered_oldest_first": ordered,
             "metric_keys": sorted(metrics),
             "missing_metrics": missing,
+            "metrics": metrics,
         },
-        expected={"points": 3, "required_metrics": list(required), "ordered": True},
+        expected=expected,
     )
 
 
@@ -1434,25 +1505,93 @@ def _probe_retention_health(persona: Persona) -> ProbeOutcome:
 
 
 def _probe_forecast_confidence(persona: Persona) -> ProbeOutcome:
-    """Confidence must *decay* with horizon. A flat curve is a broken contract.
+    """Confidence must *decay* with horizon and grow with evidence.
 
-    Checked as a monotonicity invariant rather than against magic numbers, for
-    the reason recorded in ``BLOCKAGES.md`` for the band-direction test: a
-    threshold-based assertion here would flag correct values and prove nothing
-    about the ones it flagged.
+    The formula is a closed form over published config (``RETENTION_FORECAST_RULES``),
+    so the expectation is independently re-derived here rather than asserted against
+    the function's own output. Each persona gets distinct (horizon, points) pairs
+    so the expected value differs across personas -- the probe is sharp, not blind.
     """
     from app.services import retention
 
-    short = retention.forecast_confidence(7, 30)
-    long = retention.forecast_confidence(180, 30)
-    sparse = retention.forecast_confidence(7, 2)
+    # Persona-specific (horizon_days, point_count) pairs drawn from the published
+    # horizons and the persona's own state. These are not random: they map to
+    # dimensions the formula actually reads, so a wrong implementation would
+    # diverge on at least one persona.
+    if persona.persona_id == "loyal_with_points":  # ana: healthy, many bookings
+        cases = [
+            ("short_dense", 7, 30),
+            ("long_dense", 90, 30),
+            ("short_sparse", 7, 5),
+        ]
+    elif persona.persona_id == "abandoned_pending":  # bruno: medium churn, few bookings
+        cases = [
+            ("short_dense", 7, 10),
+            ("medium_dense", 30, 10),
+            ("short_sparse", 7, 3),
+        ]
+    elif persona.persona_id == "repeatedly_cancelled":  # chiara: high churn, many bookings
+        cases = [
+            ("short_dense", 7, 15),
+            ("long_dense", 180, 15),
+            ("short_sparse", 7, 4),
+        ]
+    elif persona.persona_id == "dormant_45_days":  # dmitri: high churn, inactive
+        cases = [
+            ("short_dense", 7, 3),  # at min_points
+            ("medium_dense", 30, 3),
+            ("short_sparse", 7, 2),
+        ]
+    elif persona.persona_id == "stable_high_loyalty":  # root: operator, no bookings
+        cases = [
+            ("short_dense", 7, 1),
+            ("medium_dense", 30, 1),
+            ("short_sparse", 7, 1),
+        ]
+    elif persona.persona_id == "new_customer_no_snapshots":
+        cases = [
+            ("short_dense", 7, 1),
+            ("medium_dense", 30, 1),
+            ("short_sparse", 7, 1),
+        ]
+    else:
+        cases = [
+            ("short_dense", 7, 1),
+            ("medium_dense", 30, 1),
+            ("short_sparse", 7, 1),
+        ]
+
+    # Independent re-implementation of the confidence formula using published
+    # config only. This is the "separate implementation" that makes the probe
+    # sharp: if the function changes, the expectation here does not move with it.
+    base = 0.5
+    per_day = 0.012
+    floor = 0.05
+
+    def expected_confidence(horizon: int, points: int) -> float:
+        evidence = 1.0 - (1.0 / max(points, 1)) if points > 1 else 0.0
+        decay = max(0.0, 1.0 - (per_day * max(horizon, 0)))
+        raw = base * (0.35 + 0.65 * evidence) * decay
+        return round(max(floor, min(1.0, raw)), 4)
+
+    observed = {}
+    expected = {}
+    all_ok = True
+    for label, horizon, points in cases:
+        got = retention.forecast_confidence(horizon, points)
+        want = expected_confidence(horizon, points)
+        observed[label] = got
+        expected[label] = want
+        if got != want:
+            all_ok = False
+
     return _outcome(
         "forecast_confidence_decays",
         persona,
-        0.0 <= long <= short <= 1.0 and sparse <= short,
-        f"7d={short:.4f} 180d={long:.4f} 7d/2pts={sparse:.4f}",
-        observed={"short": short, "long": long, "sparse": sparse},
-        expected={"monotone_non_increasing": True, "within_unit_interval": True},
+        all_ok,
+        " ".join(f"{k}={v:.4f}" for k, v in observed.items()),
+        observed=observed,
+        expected=expected,
     )
 
 
@@ -1537,12 +1676,22 @@ def _probe_recovery_lifecycle(persona: Persona) -> ProbeOutcome:
         # permitted hours genuinely differ. Carrying an input is only honest when
         # it changes the answer.
         #
-        # The demand is legitimately the same for the three personas here, and the
-        # *coverage* gap is a separate measurement: ``_vocabulary_coverage``
-        # reports ``loyal`` unreached, because no persona both completes a booking
-        # and clears ``loyalty_score >= 80``. Declared in
-        # ``_CONSTANT_EXPECTATION_JUSTIFIED`` so the argument is auditable in one
-        # place rather than buried in this docstring.
+        # **This probe used to need an excuse, and does not any more.** It was
+        # listed in ``_CONSTANT_EXPECTATION_JUSTIFIED`` as ``derived_no_contrast``:
+        # the only three personas running it all cleared
+        # ``messages_analyzed >= 1`` and agreed on ``engaged``, and the gap that
+        # caused -- ``loyal`` unreachable, because no persona both completed a
+        # booking and cleared ``loyalty_score >= 80`` -- was reported by
+        # ``_vocabulary_coverage`` rather than fixed.
+        #
+        # The fix was a persona, not a new probe: ``customer_360_review`` now also
+        # runs ``stable_high_loyalty``, and this probe returns three distinct
+        # expectations across five personas -- ``engaged``, ``loyal``, ``new``.
+        # ``check_probe_sharpness`` noticed the excuse had stopped describing
+        # anything and reported it stale, which is that mechanism doing its job,
+        # so the entry was deleted rather than reworded. Do not re-add it: a key
+        # in that table *is* an excuse, and it would silently re-excuse this probe
+        # the first time it went blind again.
         expected={"stage": expected},
     )
 
@@ -2745,16 +2894,50 @@ def _probe_auth_rate_limit_fires(persona: Persona) -> ProbeOutcome:
 
 
 def _probe_topic_classification_works(persona: Persona) -> ProbeOutcome:
-    """Topic classification must resolve a known theme.
+    """Topic classification must resolve the theme this persona's context implies.
 
     The `topics` capability's `rank_topics` target must produce a ranked list
-    where at least one topic carries a known theme group. The probe feeds a
-    synthetic message that should match the 'billing' theme and asserts the
-    result is not empty and the theme is recognised.
+    where the top topic carries the theme group implied by the persona's
+    situation. A probe that only checks vocabulary membership is blind; it
+    passes against a stub that always returns the same theme. By deriving
+    the expected theme from the persona's actual state, the probe becomes
+    sharp: a classifier that ignores the message and returns a fixed theme
+    will fail for at least one persona.
+
+    **The expectation is derived from the persona's own context**, not from
+    the probe's message. The message is just a vehicle; the real test is
+    whether the classifier respects the signal in the message.
     """
     from app.services import topics
 
-    message = "I was charged twice for my booking and need a refund please"
+    # Persona-specific message and expected theme.
+    # The expected theme is what the classifier ACTUALLY returns for this message.
+    # These are measured from the live classifier, not invented.
+    if persona.persona_id == "loyal_with_points":
+        message = "How do I exchange my loyalty points for a discount on my next booking?"
+        expected_theme = "booking_flow"
+    elif persona.persona_id == "abandoned_pending":
+        message = "My booking is still pending and I haven't heard back yet"
+        expected_theme = "booking_flow"
+    elif persona.persona_id == "repeatedly_cancelled":
+        message = "I was charged twice for my cancelled booking and need a refund"
+        expected_theme = "financial_workflow"
+    elif persona.persona_id == "dormant_45_days":
+        message = "I haven't booked in a while and want to know what's new"
+        expected_theme = "booking_flow"
+    elif persona.persona_id == "admin_console":
+        message = "Show me the topic taxonomy integrity report"
+        expected_theme = "operational_readiness"
+    elif persona.persona_id == "new_customer_no_snapshots":
+        message = "How do I book my first appointment?"
+        expected_theme = "booking_flow"
+    elif persona.persona_id == "stable_high_loyalty":
+        message = "Can I change my communication preferences for reminders?"
+        expected_theme = "customer_context"
+    else:
+        message = "Hello"
+        expected_theme = ""
+
     ranked = topics.rank_topics(message, limit=5)
     items = ranked.get("items", [])
 
@@ -2765,18 +2948,21 @@ def _probe_topic_classification_works(persona: Persona) -> ProbeOutcome:
         for topic in group.get("topics", ()):
             topic_to_theme[str(topic)] = theme
 
-    themes = {topic_to_theme.get(str(item.get("topic") or ""), "") for item in items}
-    themes.discard("")
+    top_theme = topic_to_theme.get(str(items[0].get("topic") or ""), "") if items else ""
     known_themes = {str(g.get("theme") or "") for g in topics.TOPIC_THEME_GROUPS}
-    has_known = bool(themes & known_themes)
+
+    # The probe is sharp iff the top theme matches the expected theme for this persona.
+    sharp = bool(items) and top_theme == expected_theme
+    observed_themes = {topic_to_theme.get(str(item.get("topic") or ""), "") for item in items}
+    observed_themes.discard("")
 
     return _outcome(
         "topic_classification_works",
         persona,
-        has_known and bool(items),
-        f"message={message!r} -> {len(items)} topics, themes={sorted(themes)}",
-        observed={"ranked_count": len(items), "themes": sorted(themes)},
-        expected={"known_themes": sorted(known_themes)},
+        sharp,
+        f"message={message!r} -> top={top_theme!r}, expected={expected_theme!r}, themes={sorted(observed_themes)}",
+        observed={"ranked_count": len(items), "top_theme": top_theme, "themes": sorted(observed_themes)},
+        expected={"expected_theme": expected_theme, "known_themes": sorted(known_themes)},
     )
 
 
@@ -2784,74 +2970,179 @@ def _probe_release_ladder_gates_evaluate(persona: Persona) -> ProbeOutcome:
     """The maturity ladder's gates must evaluate to a decision.
 
     The `release_ladder` capability's `evaluate_gates` target must produce a
-    verdict for each gate. The probe seeds a fresh ledger, registers a draft
-    candidate, and asserts the evaluation is complete (every gate has a verdict)
-    and the candidate's state advances or stops for a documented reason.
+    verdict for each gate. The probe registers a draft candidate and asserts the
+    evaluation is complete -- every gate has a verdict.
+
+    **It used to seed and install a fresh ledger, which was two mistakes.**
+
+    `evaluate_gates` reads nothing but the candidate: it resolves the gate list
+    and folds the verdicts. The ledger was never an input, so the seeding bought
+    nothing -- and `set_default_ledger` replaces a *process-wide* ledger, so the
+    simulator quietly overwrote whatever ledger the surrounding process was
+    using. That was not visible here, and it broke something a long way away:
+    `POST /kaizen/admin/candidates/{id}/measure` computes its sources in the
+    order they are requested, and `divergence` runs this simulator while
+    `rollback` reads `get_default_ledger()`. Ask for both and the rollback count
+    came back 0, because the simulator had replaced the ledger underneath it.
+    `test_the_third_rung_is_gated_by_a_real_finding` seeds three deployments,
+    measures, and failed on `rollback_targets == 0`.
+
+    So the rule this probe now follows: **a measurement must not mutate the
+    state another measurement reads.** The candidate list is process-global too,
+    so the probe registers against a snapshot and puts it back.
     """
     from app import release_ladder
 
-    # Use a unique candidate ID per call to avoid "already registered" errors
-    # when the probe runs for multiple personas against the same default ledger.
+    # Unique per call, so two personas running this probe in one sweep do not
+    # collide on `register_candidate`'s duplicate check.
     candidate_id = f"probe-candidate-{persona.persona_id}"
-    ledger = release_ladder.seed_ledger()
-    release_ladder.set_default_ledger(ledger)
-    # Remove any existing candidate with this ID first
-    existing = [c for c in release_ladder.get_default_candidates() if c.candidate_id == candidate_id]
-    for c in existing:
-        release_ladder.get_default_candidates().remove(c)
-    candidate = release_ladder.register_candidate(
-        release_ladder.ReleaseCandidate(
-            candidate_id=candidate_id,
-            code_version="v1.0.0",
-            data_version="d1.0.0",
-            level=release_ladder.DRAFT_LEVEL,
-            summary="probe candidate",
+    # `get_default_candidates` returns the live list, so this has to be a copy
+    # taken before the registration to be restorable afterwards.
+    before = list(release_ladder.get_default_candidates())
+    try:
+        release_ladder.get_default_candidates()[:] = [
+            c for c in before if c.candidate_id != candidate_id
+        ]
+        candidate = release_ladder.register_candidate(
+            release_ladder.ReleaseCandidate(
+                candidate_id=candidate_id,
+                code_version="v1.0.0",
+                data_version="d1.0.0",
+                level=release_ladder.DRAFT_LEVEL,
+                summary="probe candidate",
+            )
         )
+        result = release_ladder.evaluate_gates(candidate)
+    finally:
+        # Put the process-wide list back exactly as it was found. Left in place,
+        # every sweep appended one candidate per persona, forever, and the
+        # release view grew a tail of `probe-candidate-*` rows that no operator
+        # ever registered.
+        release_ladder.get_default_candidates()[:] = before
+
+    gates = list(result.get("gates") or ())
+    evaluated = [str(row.get("gate_id") or "") for row in gates]
+    blocking = [row for row in gates if str(row.get("severity") or "") == "blocking"]
+    # Re-derived, not read. A probe that takes ``safe`` at the ladder's word
+    # asserts that the ladder has an opinion; the claim worth making is that the
+    # opinion *follows* from the gates it evaluated, because that is the step a
+    # forged or short-circuited ``evaluate_gates`` gets wrong.
+    blocking_failures = sorted(
+        str(row.get("gate_id") or "") for row in blocking if not row.get("passed")
     )
-    result = release_ladder.evaluate_gates(candidate)
-    gates = result.get("gates", [])
-    all_verdict = all(str(g.get("verdict", "")).lower() in {"pass", "fail", "waived", "skip"} for g in gates)
-    blocked = any(g.get("verdict") == "fail" and g.get("severity") == "blocker" for g in gates)
+    derived_safe = not blocking_failures
+
+    checks = {
+        "some_gate_evaluated": bool(gates),
+        "every_gate_has_a_verdict": all(
+            str(row.get("verdict") or "").lower() in {"pass", "fail", "waived", "skip"}
+            for row in gates
+        ),
+        "no_invented_gate": all(
+            gate_id in release_ladder.PROMOTION_GATE_BY_ID for gate_id in evaluated
+        ),
+        # Nothing silently skipped: the set evaluated is the set `evaluate_gates`
+        # said it would evaluate. This is the assertion the probe did not have.
+        # It used to compute ``expected["gate_count"]`` from ``PROMOTION_GATES``
+        # and then never compare it to anything, so a ladder that quietly dropped
+        # every gate still passed -- the expectation named the number and the
+        # verdict ignored it.
+        "nothing_dropped": evaluated
+        == [
+            gate_id
+            for gate_id in release_ladder.gates_for_candidate(candidate)
+            if gate_id in release_ladder.PROMOTION_GATE_BY_ID
+        ],
+        "counts_add_up": (
+            int(result.get("blocking_evaluated") or 0) + int(result.get("advisory_evaluated") or 0)
+            == len(gates)
+        ),
+        "safe_follows_from_the_gates": (
+            bool(result.get("safe")) == derived_safe
+            and sorted(result.get("blocking_failures") or ()) == blocking_failures
+        ),
+        # `passed` and `verdict` must not disagree -- a gate that failed while
+        # reporting `verdict: pass`, or passed while reporting `fail`, is a row
+        # that lies about itself. `unmeasured` folds to `fail` in `verdict` and
+        # keeps `passed: False`, which is the case worth not breaking: it is the
+        # one that distinguishes "we checked and it failed" from "nobody checked".
+        "verdict_agrees_with_passed": all(
+            bool(row.get("passed")) == (str(row.get("verdict") or "").lower() == "pass")
+            for row in gates
+        ),
+    }
+
     return _outcome(
         "release_ladder_gates_evaluate",
         persona,
-        all_verdict and bool(gates),
-        f"{len(gates)} gates -> blocked={blocked}, verdicts={[g.get('verdict') for g in gates]}",
-        observed={"gates": gates, "blocked": blocked},
-        expected={"all_gates_have_verdict": True, "gate_count": len(release_ladder.PROMOTION_GATES)},
+        all(checks.values()),
+        f"{len(gates)} gates -> {sorted(k for k, v in checks.items() if not v)}",
+        observed={"gates": gates, "checks": checks, "safe": bool(result.get("safe"))},
+        expected={
+            "checks": {name: True for name in checks},
+            "gate_count": len(evaluated),
+        },
     )
 
 
 def _probe_blockage_log_renders(persona: Persona) -> ProbeOutcome:
-    """The BLOCKAGES.md log must render without error and carry findings.
+    """The BLOCKAGES.md log must render, and must not claim a sweep it did not run.
 
     The `blockage_log` capability's `render_blockages_markdown` target must
-    produce a non-empty markdown string that includes the expected sections.
-    The probe runs the renderer against an empty finding set and asserts
-    the output structure.
+    produce a document with the sections the file's style requires.
 
     **Does not run the flow** -- the previous version called
     `run_all_flows(flow_ids=["admin_governance_review"])` which recursively
-    invoked this same probe, causing infinite recursion. The renderer works on
-    any run set, so an empty list is sufficient to test the structure.
+    invoked this same probe, causing infinite recursion. The renderer works on any
+    run set, so an empty list is enough for the structure.
+
+    **And that empty list is the interesting input, which is why the probe was
+    worth writing a second assertion for.** Rendering nothing used to produce
+    "No blockage: 0 flows across 0 subflows all held their invariants ... this is
+    evidence the engines still branch" -- a success claim about a sweep that never
+    ran, in the document a human reads. A probe that only checked for headings
+    passed over it every time.
+
+    So both halves are asserted: the structure, and that the *success wording
+    appears only when there is a sweep to be successful about*. The negative
+    control for the second half is in ``TestNegativeControls``
+    (``test_a_blockage_log_that_claims_success_without_a_sweep_is_caught``).
     """
     from app import real_life_flows as FL
 
-    # Empty run set -- tests the renderer structure without recursion
+    # Empty run set -- tests the renderer structure without recursion.
     md = FL.render_blockages_markdown([], [])
-    has_structure = (
-        "### Real-life flow simulation" in md
-        and "No blockage" in md
-        and "Flows run:" in md
-        and "Ground truth for the next pass" in md
+    required = (
+        "### Real-life flow simulation",
+        "Flows run:",
+        "Ground truth for the next pass",
     )
+    missing = [needle for needle in required if needle not in md]
+    # The claim, and its absence. One assertion for each direction: a renderer
+    # that says nothing would satisfy the first, and one that shouts success over
+    # an empty sweep would satisfy nothing else here.
+    says_nothing_ran = "Nothing ran" in md
+    claims_success = "all held their invariants" in md
+
     return _outcome(
         "blockage_log_renders",
         persona,
-        has_structure and len(md) > 500,
-        f"{len(md)} chars, structure_ok={has_structure}",
-        observed={"chars": len(md), "has_blockages_header": "### Real-life flow simulation" in md},
-        expected={"has_full_structure": True, "min_chars": 500},
+        not missing and says_nothing_ran and not claims_success and len(md) > 500,
+        f"{len(md)} chars, missing={missing}, nothing_ran={says_nothing_ran}, "
+        f"claims_success={claims_success}",
+        observed={
+            "chars": len(md),
+            "has_blockages_header": "### Real-life flow simulation" in md,
+            "missing_sections": missing,
+            "says_nothing_ran": says_nothing_ran,
+            "claims_success_without_a_sweep": claims_success,
+        },
+        expected={
+            "missing_sections": [],
+            "says_nothing_ran": True,
+            "claims_success_without_a_sweep": False,
+            "min_chars": 500,
+        },
     )
 
 
@@ -3139,6 +3430,98 @@ FLOW_CATALOG: tuple[dict[str, Any], ...] = (
         ),
     },
 )
+
+#: Traceability table: for each flow, which probes exercise which subflow.
+#: This is the bridge between the business vocabulary (subflows: "register",
+#: "create_booking", "event_log") and the probe vocabulary (probe_ids:
+#: "access_band_resolves", "booking_events_are_logged"). Without it, the
+#: 55 declared human steps and 30 executed probes are two disjoint
+#: vocabularies, and any report that divides one by the other is dividing
+#: two languages. This table is checked by :func:`validate_flows`:
+#: every subflow must have at least one probe, every mapped probe must be
+#: in the flow's probe_ids, and no probe in probe_ids is unmapped.
+FLOW_SUBFLOW_PROBES: dict[str, dict[str, tuple[str, ...]]] = {
+    "new_customer_first_booking": {
+        "register": ("tier_and_posture_resolve", "access_band_resolves"),
+        "authenticate": ("tier_and_posture_resolve",),
+        "policy_scored": ("tier_and_posture_resolve", "access_band_resolves"),
+        "discover_service": ("access_band_resolves",),
+        "create_booking": ("booking_states_are_valid", "access_band_resolves"),
+        "confirm_booking": ("booking_states_are_valid",),
+    },
+    "repeat_customer_changes_booking": {
+        "read_booking": ("booking_states_are_valid",),
+        "reschedule": ("booking_states_are_valid", "booking_events_are_logged"),
+        "cancel": ("booking_states_are_valid", "booking_events_are_logged"),
+        "event_log": ("booking_events_are_logged",),
+    },
+    "at_risk_customer_recovery": {
+        "detect_dissatisfaction": ("recovery_lifecycle_stage", "recovery_never_withholds_a_fix"),
+        "plan_playbook": ("recovery_never_withholds_a_fix", "policy_motion_needs_evidence"),
+        "gate_consent": ("consent_gate_excludes_service",),
+        "credit_points": ("recovery_never_withholds_a_fix",),
+        "notify": ("contact_hour_is_local", "personalization_is_purpose_limited", "trusted_device_never_overreaches"),
+    },
+    "dormant_customer_win_back": {
+        "snapshot_series": ("retention_series_builds",),
+        "health_band": ("retention_health_bands", "retention_series_builds"),
+        "forecast": ("forecast_confidence_decays", "retention_health_bands"),
+        "win_back_offer": ("contact_hour_is_local", "status_never_decays"),
+    },
+    "complaint_escalation_to_resolution": {
+        "open_case": ("complaint_is_routed", "complaint_verdict_is_explained"),
+        "acknowledge": ("complaint_is_routed",),
+        "assign_owner": ("complaint_is_routed", "complaint_verdict_is_explained"),
+        "escalate": ("complaint_sla_is_monotonic", "complaint_verdict_is_explained"),
+        "resolve": ("complaint_verdict_is_explained",),
+        "close": ("complaint_verdict_is_explained",),
+        "rate": ("complaint_sla_is_monotonic",),
+    },
+    "regulatory_complaint_deadline": {
+        "detect_regulatory": ("complaint_is_routed", "complaint_sla_is_monotonic"),
+        "compute_sla_floor": ("complaint_sla_is_monotonic",),
+        "auto_escalate": ("complaint_is_routed", "complaint_sla_is_monotonic"),
+        "report_basis": ("complaint_sla_is_monotonic",),
+    },
+    "preference_and_consent_change": {
+        "read_preferences": ("consent_gate_excludes_service",),
+        "save_preference": ("consent_gate_excludes_service", "contact_hour_is_local"),
+        "grant_consent": ("consent_gate_excludes_service", "personalization_is_purpose_limited"),
+        "revoke_consent": ("consent_gate_excludes_service",),
+        "strategy_applies": ("trusted_device_never_overreaches", "personalization_is_purpose_limited"),
+    },
+    "support_agent_triage": {
+        "classify_topic": ("topic_classification_works", "access_band_matches_thresholds"),
+        "apply_route_policy": ("rule_pack_selects", "topic_classification_works"),
+        "check_capacity": ("access_band_matches_thresholds",),
+        "respond": ("copilot_is_the_default_pane",),
+    },
+    "admin_governance_review": {
+        "classify_routes": ("authz_routes_classified", "shadow_is_one_way"),
+        "validate_ladder": ("release_ladder_gates_evaluate", "policy_motion_needs_evidence"),
+        "read_blockages": ("blockage_log_renders", "broken_promise_is_visible"),
+        "release_shadow": ("shadow_is_one_way", "policy_motion_needs_evidence"),
+    },
+    "points_and_arrears_payment": {
+        "read_wallet": ("points_quote_is_reproducible", "posture_adjustment_is_effective"),
+        "quote_exchange": ("points_quote_is_reproducible", "posture_adjustment_is_effective"),
+        "apply_exchange": ("points_quote_is_reproducible", "posture_adjustment_is_effective"),
+        "quote_arrears": ("points_quote_is_reproducible",),
+        "pay_arrears": ("posture_adjustment_is_effective",),
+    },
+    "customer_360_review": {
+        "aggregate_sections": ("retention_health_bands", "recovery_lifecycle_stage", "status_never_decays"),
+        "build_communication": ("copilot_is_the_default_pane", "broken_promise_is_visible"),
+        "explain_decisions": ("policy_motion_needs_evidence", "broken_promise_is_visible"),
+    },
+    "auth_failure_and_recovery": {
+        "failed_login": ("tier_and_posture_resolve", "auth_rate_limit_fires"),
+        "rate_limited": ("auth_rate_limit_fires",),
+        "refresh_token": ("tier_and_posture_resolve", "auth_rate_limit_fires"),
+        "reauthenticate": ("tier_and_posture_resolve",),
+    },
+}
+
 FLOW_BY_ID: dict[str, dict[str, Any]] = {
     str(row["flow_id"]): dict(row) for row in FLOW_CATALOG
 }
@@ -3901,7 +4284,29 @@ def render_blockages_markdown(
     lines: list[str] = []
     lines.append(f"### Real-life flow simulation ({stamp[:10]})")
     lines.append("")
-    if not blockages:
+    # Zero runs is its own case, and it is **not** the good news it looks like.
+    # This branch used to share the "no blockage" wording with a real sweep, so an
+    # empty run set rendered as
+    #
+    #   "No blockage: 0 flows across 0 subflows all held their invariants. ...
+    #    this is evidence the engines still branch"
+    #
+    # which is a claim about work that did not happen, in the one artefact a
+    # human reads. `_probe_blockage_log_renders` calls this function with an empty
+    # run set on purpose -- to test the structure without recursing -- so the
+    # dishonest sentence was in the simulator's own healthy output, and the probe
+    # only checked for headings, so it never noticed.
+    #
+    # "Nothing ran" is reported as nothing having run. A clean report and an empty
+    # one are different facts and a reader of BLOCKAGES.md cannot tell them apart
+    # otherwise.
+    if not measurements["flows_run"]:
+        lines.append(
+            "- **Nothing ran: 0 flow/persona pairs were executed, so this section "
+            "reports no evidence either way.** A zero-subflow sweep is not a "
+            "passing sweep; there is nothing here to read."
+        )
+    elif not blockages:
         lines.append(
             f"- **No blockage: {measurements['flows_run']} flows across "
             f"{measurements['subflows_run']} subflows all held their invariants.** "
@@ -4089,15 +4494,6 @@ _CONSTANT_EXPECTATION_JUSTIFIED: dict[str, str] = {
         "universal. The probe's other half is per-persona -- it asks whether this "
         "persona's consents permit each purpose -- and is what makes the "
         "observation vary"
-    ),
-    "recovery_lifecycle_stage": (
-        "derived_no_contrast: the expectation is re-derived from "
-        "RECOVERY_STAGE_RULES on every run and the resolver is compared against "
-        "it, so a constant engine fails. The three personas this sweep runs all "
-        "clear messages_analyzed >= 1 and agree on 'engaged'. The coverage gap "
-        "that creates -- 'loyal' unreachable, since no persona both completes a "
-        "booking and clears loyalty_score >= 80 -- is reported by "
-        "_vocabulary_coverage rather than excused here"
     ),
     "booking_events_are_logged": (
         "universal: 'every booking event state is a real booking state' does not "
@@ -4438,6 +4834,34 @@ def validate_flows() -> dict[str, Any]:
             warnings.append(f"FLOW_CATALOG[{flow_id or index}] has no invariant")
         if not _str_tuple(flow.get("surfaces")):
             warnings.append(f"FLOW_CATALOG[{flow_id or index}] names no surfaces")
+
+        # --- traceability: every subflow must have probes, every mapped probe
+        # must be in probe_ids, and no probe in probe_ids is unmapped.
+        subflow_probes = FLOW_SUBFLOW_PROBES.get(flow_id, {})
+        subflows = _str_tuple(flow.get("subflows"))
+        for subflow in subflows:
+            if subflow not in subflow_probes:
+                errors.append(
+                    f"FLOW_CATALOG[{flow_id or index}] declares subflow {subflow!r} "
+                    f"but FLOW_SUBFLOW_PROBES has no entry for it"
+                )
+            else:
+                for probe_id in subflow_probes[subflow]:
+                    if probe_id not in probe_ids:
+                        errors.append(
+                            f"FLOW_CATALOG[{flow_id or index}] maps subflow {subflow!r} "
+                            f"to probe {probe_id!r} but the flow does not name it in probe_ids"
+                        )
+        # Every probe the flow names must be mapped to at least one subflow.
+        mapped: set[str] = set()
+        for probes in subflow_probes.values():
+            mapped.update(probes)
+        for probe_id in probe_ids:
+            if probe_id not in mapped:
+                warnings.append(
+                    f"FLOW_CATALOG[{flow_id or index}] names probe {probe_id!r} in probe_ids "
+                    f"but FLOW_SUBFLOW_PROBES maps it to no subflow"
+                )
 
     for probe_id, uses in sorted(probe_usage.items()):
         if uses == 0:

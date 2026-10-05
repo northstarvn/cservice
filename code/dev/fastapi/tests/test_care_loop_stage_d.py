@@ -481,6 +481,21 @@ class TestJourneyOutcomes:
         assert "not the customer ignoring us" in actions[2]
 
     def test_a_healthy_stage_is_not_stuck(self):
+        """One hour into the 72-hour ``offer`` timebox is not stuck.
+
+        **``now=NOW`` is load-bearing and was added after this test failed on a
+        tree nobody touched.** ``journey_outcome_report`` forwarded no clock to
+        ``is_stuck``, so it measured against wall-clock time. ``NOW`` is frozen at
+        2026-10-01, so the elapsed hours were really *today minus 2026-09-30*:
+        about 1 hour when written, over 72 on 2026-10-04, and ``stuck_count``
+        became 1 on its own. The assertion had never been about the product.
+
+        Fixed at the source rather than by freezing the state relative to
+        ``datetime.now()``, because a test that pins itself to the current clock
+        is a test that stops being reproducible -- and because the same missing
+        keyword would quietly affect a real caller asking "was this stuck as of
+        the report?". ``journey_outcome_report`` now takes ``now``.
+        """
         from app.services import offer_outcomes
 
         states = [
@@ -492,7 +507,24 @@ class TestJourneyOutcomes:
                 "history": [],
             }
         ]
-        assert offer_outcomes.journey_outcome_report(states)["stuck_count"] == 0
+        report = offer_outcomes.journey_outcome_report(states, now=NOW)
+        assert report["stuck_count"] == 0, report
+        assert report["total"] == 1, report
+
+        # The control, and the part that makes the line above mean something.
+        # "Not stuck" is only a finding if the same state *can* be reported stuck;
+        # otherwise the test would pass just as well against a check that never
+        # fires. 72h after NOW is 73h elapsed -- the stage was entered an hour
+        # *before* NOW -- so that is one hour past the ``offer`` timebox, and the
+        # reported hours come off the injected clock rather than off the wall.
+        # This fails if ``now`` is ever dropped on the floor again.
+        later = offer_outcomes.journey_outcome_report(
+            states, now=NOW + timedelta(hours=72)
+        )
+        assert later["stuck_count"] == 1, later
+        assert later["stuck"][0]["hours"] == 73.0, later
+        assert later["stuck"][0]["timebox_hours"] == 72, later
+        assert "offer has been open" in later["stuck"][0]["reason"], later
 
 
 # ===========================================================================

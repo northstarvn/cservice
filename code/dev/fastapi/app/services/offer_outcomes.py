@@ -445,7 +445,11 @@ def recommend_scale_adjustments(
     return out
 
 
-def journey_outcome_report(states: Sequence[Any]) -> dict[str, Any]:
+def journey_outcome_report(
+    states: Sequence[Any],
+    *,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
     """Completion and stuckness across a set of journey states.
 
     **Completion means "reached ``status`` at least once"**, not "the state object
@@ -456,6 +460,20 @@ def journey_outcome_report(states: Sequence[Any]) -> dict[str, Any]:
     Staged separately per stage, because ``follow_up`` being sticky tells you
     something quite different from ``offer`` being sticky: the first means we
     accepted and did not deliver, the second means we are asking and not hearing.
+
+    ``now`` is forwarded to :func:`journey_orchestrator.is_stuck`, and it exists
+    because ``is_stuck`` already took one and this wrapper dropped it. That
+    sounds harmless and was not: stuckness is ``hours_elapsed > timebox``, so a
+    caller without a clock injection reads *wall-clock* elapsed time, and a test
+    pinned to a frozen date silently becomes a different assertion once real time
+    passes the timebox. ``test_a_healthy_stage_is_not_stuck`` entered the ``offer``
+    stage one hour before a frozen ``2026-10-01`` and asserted not-stuck; the
+    ``offer`` timebox is 72h, so it passed until real time crossed
+    ``2026-10-03T23:00Z`` and then began failing on a tree nobody had touched.
+
+    A test that is only true on a particular day is not a slow test, it is a
+    wrong one -- but the alternative is worse, which is a real caller unable to
+    ask "was this stuck as of the report?" without trusting the clock.
     """
     from app.services import journey_orchestrator
 
@@ -475,7 +493,7 @@ def journey_outcome_report(states: Sequence[Any]) -> dict[str, Any]:
         if any(str(_field(item, "stage", "")) == "status" for item in history):
             ever_completed += 1
         cycles.append(int(_field(state, "cycles", 0) or 0))
-        stuck = journey_orchestrator.is_stuck(state)
+        stuck = journey_orchestrator.is_stuck(state, now=now)
         if stuck.get("stuck"):
             stuck_rows.append(
                 {

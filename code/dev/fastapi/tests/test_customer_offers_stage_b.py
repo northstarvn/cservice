@@ -534,14 +534,47 @@ class TestCustomerFacingCopy:
         # The operator can still find out which tier fired.
         assert preview["source_offer_id"] == "save_critical"
 
-    def test_every_kind_has_a_what_a_why_and_a_basis(self):
-        """An offer a customer cannot understand is one they will decline."""
+    def test_every_kind_has_copy_and_every_promise_has_a_clause(self):
+        """An offer a customer cannot understand is one they will decline.
+
+        **This used to assert a ``what`` template per kind and no longer does,
+        because there is no longer one.** The customer-facing sentence is composed
+        per component by ``_component_sentence``, from ``_COMPONENT_CLAUSES``,
+        because a kind's promise is not one claim -- ``goodwill`` promises points
+        this service delivers *and* a discount it does not, and a template
+        bundling the two was true in neither half.
+
+        So the property this pins is now the one that actually matters: every kind
+        carries the *context* copy (``why`` and ``legal``, which do not vary by
+        component), and every promise a kind can make is described by a clause.
+        The second half is the check that would have caught the defect -- a kind
+        whose components are not in the table renders the bare fallback sentence,
+        which is comprehensible and says nothing.
+        """
         from app.services import customer_offers
 
         for kind, template in customer_offers.OFFER_EXPLANATIONS.items():
-            assert template.get("what"), kind
             assert template.get("why"), kind
             assert template.get("legal"), kind
+
+        probe = customer_offers._ProbeRow()
+        for kind in customer_offers.OFFER_KINDS:
+            probe.offer_kind = kind
+            probe.points = 1.0
+            probe.discount_percent = 1.0
+            probe.waiver_type = "interest"
+            probe.arrears_entry_id = 1
+            components = customer_offers._component_states(probe, "fulfilled")
+            assert components, (
+                f"{kind} promises nothing the clause tables can describe, so the "
+                f"customer is shown the bare fallback sentence"
+            )
+            for component, _delivered in components:
+                assert component in customer_offers._COMPONENT_CLAUSES, (
+                    f"{kind} promises {component!r} but no clause describes it, so "
+                    f"the promise reaches the operator and not the customer"
+                )
+                assert customer_offers._COMPONENT_CLAUSES[component], component
 
     def test_consent_changes_the_framing_and_never_the_substance(self):
         from app.services import customer_offers
@@ -821,6 +854,9 @@ class TestAccept:
         """A real ``goodwill`` offer row, and the reference to act on."""
         from app import models
 
+        # Use far-future dates so the test is independent of the clock.
+        # The frozen clock in the test suite is NOW = 2026-10-01.
+        far_future = datetime(2099, 1, 1, tzinfo=timezone.utc)
         values = {
             "user_id": 1,
             "reference": "OFF-00000001",
@@ -833,13 +869,13 @@ class TestAccept:
             "waiver_type": "",
             "priority": "",
             "generosity_scale": 1.0,
-            "expires_at": datetime(2026, 10, 5, tzinfo=timezone.utc),
+            "expires_at": far_future,
             "issued_at": datetime(2026, 10, 1, tzinfo=timezone.utc),
             "accepted_at": None,
             "declined_at": None,
             "fulfilled_at": None,
             "decline_reason": "",
-            "follow_up_due_at": datetime(2026, 10, 3, tzinfo=timezone.utc),
+            "follow_up_due_at": far_future,
         }
         values.update(overrides)
         session = harness.session
@@ -1453,6 +1489,285 @@ class TestTheStructuralChecksCanFail:
             "expire_offers_due requires an unexpired offer" in e
             for e in report["errors"]
         ), report["errors"]
+
+    def test_a_past_tense_clause_for_something_nothing_applies_is_caught(self, tmp_path):
+        """The original defect, reintroduced into the tables rather than the code.
+
+        ``discount_percent`` had a sentence reading "We took {discount}% off your
+        next service" while the same response reported it in
+        ``requires_out_of_band``. The clause table now encodes the absence of that
+        sentence, and this control proves the absence is checked rather than merely
+        true today.
+
+        It patches the *table*, not the renderer, because the renderer cannot be
+        wrong here: ``_component_states`` decides tense from
+        ``_components_this_service_applies`` and the table has to supply the
+        sentence. Restoring the sentence is the only way to produce the original
+        bug, so that is what is reverted.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    '    "discount_percent": {\n'
+                    '        "out_of_band": (\n'
+                    '            "A {discount}% discount on your next service is noted '
+                    'on your account "\n'
+                    '            "for our team to apply."\n'
+                    "        ),\n"
+                    "    },",
+                    '    "discount_percent": {\n'
+                    '        "done": "We took {discount}% off your next service.",\n'
+                    '        "out_of_band": (\n'
+                    '            "A {discount}% discount on your next service is noted '
+                    'on your account "\n'
+                    '            "for our team to apply."\n'
+                    "        ),\n"
+                    "    },",
+                )
+            ],
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False, (
+            "the validator accepted a past-tense clause for a component nothing in "
+            "this service delivers"
+        )
+        assert any(
+            "has a past-tense `done` clause" in e for e in report["errors"]
+        ), report["errors"]
+        # Named rather than counted: a count passes if the checks are renamed, and
+        # this one is paired with a second diagnosis that fires alongside it.
+        assert any(
+            "_COMPONENT_TERSE" in e for e in report["errors"]
+        ), (
+            "adding a `done` clause to one table and not the other is the same "
+            f"drift as the original defect, one level down: {report['errors']}"
+        )
+
+    def test_a_clause_missing_from_the_terse_form_is_caught(self, tmp_path):
+        """The terse form is a second table, so it can drift from the first.
+
+        ``plain_language_explanations`` off yields `_COMPONENT_TERSE`, and a
+        component with a full sentence but no terse one would simply vanish for
+        that customer -- a promise that appears to depend on a preference setting.
+        The clause tables are separate because a truncation is not a shorter
+        sentence ("250 points on the way" differs in tense from the full form, and
+        the tense is the defect), and separate tables need a parity check.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    '    "points": {\n'
+                    '        "done": "{points} points credited",\n'
+                    '        "pending": "{points} points on the way",\n'
+                    "    },",
+                    '    "points": {\n'
+                    '        "pending": "{points} points on the way",\n'
+                    "    },",
+                )
+            ],
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False, (
+            "the validator accepted a component whose terse form is missing"
+        )
+        assert any(
+            "in _COMPONENT_TERSE" in e for e in report["errors"]
+        ), report["errors"]
+        # Only the parity complaint. `points` *is* appliable here, so the
+        # undeliverable-clause check must not fire -- a control that also trips an
+        # unrelated check is not pinning what it claims to.
+        assert not any(
+            "past-tense `done` clause" in e for e in report["errors"]
+        ), (
+            f"the parity check fired alone as intended, but the undeliverable "
+            f"check also fired on an appliable component: {report['errors']}"
+        )
+
+    def test_a_first_person_clause_for_something_we_never_apply_is_caught(self, tmp_path):
+        """The subtle one: future tense, and still a false promise.
+
+        Rewriting the past-tense template into the future tense passes every review
+        the original failed -- it stops claiming a completed act -- and leaves the
+        claim false in a new way: "We're taking 15% off your next service" is a
+        commitment by *this* process to do something it does not do. A control
+        that only looked for past tense would call that fixed.
+
+        So this one plants exactly that sentence and requires the validator to
+        object on the ground that no shape of row makes it appliable, rather than
+        on tone or on the tense.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    '    "discount_percent": {\n'
+                    '        "out_of_band": (\n'
+                    '            "A {discount}% discount on your next service is noted '
+                    'on your account "\n'
+                    '            "for our team to apply."\n'
+                    "        ),\n"
+                    "    },",
+                    '    "discount_percent": {\n'
+                    '        "pending": "We\'re taking {discount}% off your next '
+                    'service.",\n'
+                    '        "out_of_band": (\n'
+                    '            "A {discount}% discount on your next service is noted '
+                    'on your account "\n'
+                    '            "for our team to apply."\n'
+                    "        ),\n"
+                    "    },",
+                ),
+                (
+                    '    "discount_percent": {\n'
+                    '        "out_of_band": "{discount}% discount noted for our '
+                    'team",\n'
+                    "    },",
+                    '    "discount_percent": {\n'
+                    '        "pending": "{discount}% off your next service",\n'
+                    '        "out_of_band": "{discount}% discount noted for our '
+                    'team",\n'
+                    "    },",
+                ),
+            ],
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False, (
+            "the validator accepted a first-person promise for a component this "
+            "service never applies"
+        )
+        assert any(
+            "first-person `pending` clause" in e for e in report["errors"]
+        ), report["errors"]
+        # Isolation, in both directions. The clause is still legitimately
+        # out-of-band, so the missing-clause check must stay quiet; and a future
+        # tense is not a past one, so the undeliverable-`done` check must not be
+        # what caught it. A control satisfied by the wrong diagnosis would keep
+        # passing after the check it names was deleted.
+        assert not any(
+            "needs an `out_of_band` clause" in e for e in report["errors"]
+        ), report["errors"]
+        assert not any(
+            "past-tense `done` clause" in e for e in report["errors"]
+        ), report["errors"]
+
+    def test_a_form_nothing_selects_is_caught(self, tmp_path):
+        """A fourth form is configuration that can never be read.
+
+        The three forms the renderer selects between are named in `_CLAUSE_FORMS`,
+        and a name outside that set is a sentence no code path can produce. It is
+        the most plausible mistake of the next three, because adding a fourth way for
+        a component to be spoken about *looks* like the extensible thing to do: the
+        table is a dict of dicts and adding a key to it type-checks fine.
+
+        So this control adds a form nobody selects and requires the complaint. Without
+        the check, the clause would sit in the table looking deliberate, and the
+        per-component render would keep reaching for `pending` — which is how the
+        *first* defect came to describe an effect that never happened.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    '    "priority": {\n'
+                    '        "out_of_band": (\n'
+                    '            "Your next request is flagged on your account for '
+                    'our team to prioritise."\n'
+                    "        ),\n"
+                    "    },",
+                    '    "priority": {\n'
+                    '        "eventually": (\n'
+                    '            "Your next request will be prioritised soon."\n'
+                    "        ),\n"
+                    '        "out_of_band": (\n'
+                    '            "Your next request is flagged on your account for '
+                    'our team to prioritise."\n'
+                    "        ),\n"
+                    "    },",
+                ),
+                (
+                    '    "priority": {\n'
+                    '        "out_of_band": "next request flagged for priority",\n'
+                    "    },",
+                    '    "priority": {\n'
+                    '        "eventually": "next request prioritised soon",\n'
+                    '        "out_of_band": "next request flagged for priority",\n'
+                    "    },",
+                ),
+            ],
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False, (
+            "the validator accepted a clause in a form no renderer selects"
+        )
+        assert any(
+            "has an unrecognised tense" in e for e in report["errors"]
+        ), report["errors"]
+        # Isolation. The new form is unreadable but so is every other claim about
+        # `priority`, and the check must be about the form rather than about
+        # `priority` having lost its only honest clause -- otherwise deleting this
+        # check would leave the missing-`out_of_band` check holding the door up and
+        # this control would still pass.
+        assert not any(
+            "needs an `out_of_band` clause" in e for e in report["errors"]
+        ), report["errors"]
+
+    def test_a_component_this_service_cannot_fully_apply_needs_an_out_of_band_clause(
+        self, tmp_path
+    ):
+        """`waiver` is appliable in principle and not in practice, so it needs three.
+
+        `points` is appliable for every offer that carries it. `waiver` is appliable
+        only when `arrears_entry_id` is populated -- and `issue_offer` never
+        populates it, so the unlinked case is every waiver this service issues. That
+        is the row deciding, and it is invisible to a check that probes one shape.
+
+        Which is the trap this control sets: the natural implementation is "forbid
+        `out_of_band` on anything this service can apply", which fires immediately
+        on `waiver` and gets "fixed" by deleting the clause the unlinked case needs.
+        The check has to distinguish never-appliable from not-always-appliable, and
+        the only way to know that is to probe both shapes *and* ask whether the row
+        carries the component at all -- a goodwill offer for zero points carries no
+        points component, so an unfiltered second probe invents a third state for
+        `points` too.
+
+        So this control removes the clause and requires the specific complaint, and
+        then requires that `points` -- which has no such case -- is *not* reported.
+        """
+        module = _load_reverted(
+            tmp_path,
+            [
+                (
+                    '        "out_of_band": (\n'
+                    '            "The {waiver_type} removal is noted on your account '
+                    'for our team to "\n'
+                    '            "complete."\n'
+                    "        ),\n",
+                    "",
+                ),
+                (
+                    '        "out_of_band": "{waiver_type} removal noted for our '
+                    'team",\n',
+                    "",
+                ),
+            ],
+        )
+        report = module.validate_offers()
+        assert report["valid"] is False, (
+            "the validator accepted an offer carrying a waiver that no clause "
+            "describes for the case this service cannot handle"
+        )
+        assert any(
+            "is carried by an offer this service cannot apply it to" in e
+            for e in report["errors"]
+        ), report["errors"]
+        assert not any(
+            "'points' is carried by an offer" in e for e in report["errors"]
+        ), (
+            f"points is appliable for every offer that carries it, so it must not "
+            f"be reported as having an unappliable case: {report['errors']}"
+        )
 
     def test_the_check_skips_rather_than_raises_when_it_cannot_read_the_source(
         self, tmp_path
