@@ -425,9 +425,12 @@ subflow, the reachability audit reported as a missing producer, and the
 release-journey gate reported as a non-clean simulation. One explicit encoding in
 `app/rule_engine.py` closed all three. The same read was fixed wherever the tree
 opens *source* without an encoding (`efficiency_audit`, `test_rule_pack_reachability`,
-`test_e2e_adversarial`, and the migration-chain tests). The recurring lesson: a
-green suite on one platform is not a green suite, and a handler that catches the
-exception it anticipated but not its siblings hides the difference.
+`test_e2e_adversarial`, and the migration-chain tests), and the write side too:
+`_load_reverted` in `test_customer_offers_stage_b` wrote its patched copy with the
+platform encoding, turning the same em dash into a `0x97` byte that the import
+then refused as non-UTF-8. The recurring lesson: a green suite on one platform is
+not a green suite, and a handler that catches the exception it anticipated but not
+its siblings hides the difference.
 
 #### Governance
 
