@@ -1367,7 +1367,7 @@ def _load_reverted(tmp_path, replacements, *, only_in=None, hide_source_of=None)
 
     source = source.replace(*_REVERTED_HELPER, 1)
     target = tmp_path / "reverted_offers.py"
-    target.write_text(source)
+    target.write_text(source, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("reverted_offers", target)
     module = importlib.util.module_from_spec(spec)
     sys.modules["reverted_offers"] = module
