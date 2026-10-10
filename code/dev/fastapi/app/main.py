@@ -23,6 +23,7 @@ from app.schemas import audit as audit_schemas
 from app import deps
 from app import enrichment
 from app.routers import (
+    ai_providers as ai_providers_admin,
     audit,
     bookings,
     chat,
@@ -36,7 +37,7 @@ from app.routers import (
     webhooks,
 )
 from app import kaizen_runner
-from app.services import audit_log, chat_analytics, customer_offers, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers, mail, brain_router
+from app.services import audit_log, chat_analytics, customer_offers, loyalty_journey, policy_scoring, activity_tree, communication_strategy, arrears_payments, points_exchange, recovery_playbooks, retention, customer_360, customer_explain, preferences as preferences_service, self_service, auth_methods, device_recognition, storage_providers, mail, brain_router, ai_providers
 # `transfers` names both a router and a service, and the router arrives in the
 # `app.routers` import above. Aliasing the service follows the existing
 # `preferences as preferences_service` convention rather than leaving a bare
@@ -140,6 +141,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database startup error: {e}", exc_info=True)
         raise
+
+    # Rehydrate the external-brain pool: operator-rotated credentials and the
+    # cooldown state a previous process learned. Its own try/except, because a
+    # failure here must not stop the app -- with nothing restored, the pool falls
+    # back to the environment, which is exactly the pre-feature behaviour.
+    try:
+        async with db_infra.SessionLocal() as session:
+            restored = await ai_providers.load_persisted_state(session)
+        logger.info("AI provider state restored: %s", restored)
+    except Exception as e:
+        logger.warning(f"AI provider state could not be restored: {e}", exc_info=True)
 
     # Optional background workers (off by default so single-tenant behavior and
     # the test suite stay untouched; enable per deployment via env).
@@ -258,6 +270,11 @@ app.include_router(identity.router, prefix="/users", tags=["identity"])
 app.include_router(transfers.router, prefix="/transfers", tags=["transfers"])
 app.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
 app.include_router(chat.router, tags=["chat"])
+# External-brain provider pool: inspect the providers, rotate a credential,
+# reset a cooldown, force one failover. The router carries its own
+# /chat/admin/ai-providers prefix so it inherits the existing admin rule by
+# prefix rather than adding a new AUTHZ_RULES row.
+app.include_router(ai_providers_admin.router, tags=["ai-providers"])
 app.include_router(topics.router, tags=["topics"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
@@ -333,6 +350,11 @@ async def app_metadata():
             # Which brain answers a customer, and the budgets that keep
             # that decision from being the slow part of a reply.
             "brain_router",
+            # The list of AI services the external brain can answer from, and
+            # the quota failover that moves between them. Separate from
+            # brain_router: choosing *that* a model should answer is the router's
+            # job, choosing *which* one still can is this feature's.
+            "ai_provider_failover",
             "customer_transfers",
         ],
     }
@@ -438,6 +460,37 @@ async def app_ecosystem():
                     "exists so the one-time-code path works end to end without a mail "
                     "server; POST /users/auth/email-otp/request reports delivered=false "
                     "in that configuration instead of claiming a code is on its way."
+                ),
+            },
+            "ai_provider_failover": {
+                "routes": [
+                    "/chat/admin/ai-providers",
+                    "/chat/admin/ai-providers/catalog",
+                    "/chat/admin/ai-providers/{provider}/credential",
+                    "/chat/admin/ai-providers/{provider}/reset",
+                    "/chat/admin/ai-providers/failover",
+                ],
+                "purpose": (
+                    "answering general questions from a list of AI services and "
+                    "moving to the next when one runs out of quota, with browser-"
+                    "session and API-key credentials both first-class"
+                ),
+                "status": "ready",
+                "configured": ai_providers.POOL.available_providers(),
+                "providers": list(ai_providers.provider_ids()),
+                "auth_modes": list(ai_providers.AUTH_MODES),
+                # Named rather than implied: a browser-session request is against
+                # a consumer web app that changes without notice, and an operator
+                # deserves to know which providers carry that caveat.
+                "browser_providers_best_effort": [
+                    spec.provider
+                    for spec in ai_providers.AI_PROVIDERS
+                    if spec.browser_best_effort
+                ],
+                "note": (
+                    "credentials come from the environment and can be rotated at "
+                    "runtime through the admin surface; cooldowns persist so a quota "
+                    "that ended is not re-probed on every restart"
                 ),
             },
             "booking_core": {
@@ -1451,6 +1504,9 @@ async def app_feature_summary():
             "booking_events": "/bookings/analytics/events",
             "booking_export": "/bookings/analytics/export",
             "chat_history": "/chat/history",
+            "ai_providers": "/chat/admin/ai-providers",
+            "ai_provider_catalog": "/chat/admin/ai-providers/catalog",
+            "ai_provider_failover": "/chat/admin/ai-providers/failover",
             "retention_dashboard": "/chat/retention-dashboard",
             "retention_maintenance": "/retention/maintenance",
             "retention_health": "/chat/admin/retention-health",
@@ -1667,6 +1723,12 @@ async def scoring_catalog():
         "auth_methods": auth_methods.build_auth_methods_catalog(),
         "device_recognition": device_recognition.build_recognition_catalog(),
         "storage_providers": storage_providers.build_storage_catalog(),
+        # The list of AI services the external brain may answer from, and the
+        # failover policy between them. Published here rather than only under the
+        # admin surface because the catalog carries no secret: it is what *could*
+        # be configured, so an operator can learn the option set from a running
+        # deployment. What *is* configured stays behind the admin gate.
+        "ai_providers": ai_providers.build_ai_providers_catalog(),
         # Mail is published because the OTP endpoint's honesty depends on it: a
         # deployment whose transport cannot deliver needs to be able to see that
         # without reading the source.

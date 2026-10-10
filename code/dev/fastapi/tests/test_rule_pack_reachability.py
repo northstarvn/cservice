@@ -106,7 +106,7 @@ def _select_rules_call_sites() -> list[tuple[str, Optional[str]]]:
     sites: list[tuple[str, Optional[str]]] = []
     for path in sorted(APP.rglob("*.py")):
         try:
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):  # pragma: no cover - unreadable file
             continue
         for node in ast.walk(tree):
@@ -429,7 +429,7 @@ class TestTheRegisteredPackThatNothingSelectsIsNotSilentlyWellFormed:
                 # real_life_flows.py: simulator infrastructure, not a production producer
                 continue
             try:
-                tree = ast.parse(path.read_text())
+                tree = ast.parse(path.read_text(encoding="utf-8"))
             except (OSError, SyntaxError):  # pragma: no cover
                 continue
             for node in ast.walk(tree):

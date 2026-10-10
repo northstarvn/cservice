@@ -375,6 +375,68 @@ healthier and is measurably worse.
 
 ## Expansion log
 
+### External-brain failover, and the cp1252 bug it surfaced (2026-10-03)
+
+The sixth addendum's `brain_router` could decide that a general-purpose model
+should answer, and had nothing to answer with. This pass adds the provider list
+behind that decision: several services under one external brain, each holding
+either an API key or a browser session, with automatic failover when one runs out
+of quota. The default chat path is unchanged — with no credential configured the
+pool is empty and the router falls back exactly as before.
+
+#### Two credential kinds, and who wins
+
+An API key and a browser session are both first-class. Their precedence is
+stated rather than inferred: a credential set at runtime (through the admin
+surface) wins over the environment, and **clearing it lets the environment back
+in** — otherwise clearing a rotation would silently disable a provider that is
+still configured in the deployment, and "unset" and "never set" would be the same
+state. What survives a restart is a row, not process memory, which is why both
+the credential and the cooldown are persisted.
+
+#### A spent quota is not a rate limit
+
+The two arrive as the same HTTP status codes and are told apart by the body, so
+the classification is its own surface rather than a branch buried in the loop: a
+rate limit cools a model for seconds, a spent quota for much longer. Rejecting a
+credential cools **every model of that provider** in the same call, because a
+rejected key is a fact about the account, not the model. The loop re-checks
+cooldowns as it runs, so a provider-wide auth failure skips that provider's
+remaining models without another request.
+
+#### The admin surface adds no authz rule
+
+Mounted under `/chat/admin/ai-providers`, it inherits the existing `chat_admin`
+AUTHZ rule **by prefix** rather than adding one. A new rule would have made the
+authz drift report a second place to keep true for no gain: rotating a
+credential, clearing a cooldown and inspecting health are what that rule already
+governs. A secret is never returned — the catalog reports that a provider is
+configured, never the value — and an unknown provider is a 404.
+
+#### The defect this pass found, which was not in its own code
+
+The existing rules audit reads application source with `ast.parse(path.read_text())`.
+`read_text()` uses the platform encoding, which on this Windows development host
+is cp1252, and `app/regional_policy.py` contains a byte cp1252 cannot decode
+(0x81). The decode error is a `ValueError`, and the surrounding handler caught
+only `OSError` and `SyntaxError`, so it propagated and failed the
+`rule_pack_selects` probe — which the kaizen flow simulator reported as a failing
+subflow, the reachability audit reported as a missing producer, and the
+release-journey gate reported as a non-clean simulation. One explicit encoding in
+`app/rule_engine.py` closed all three. The same read was fixed wherever the tree
+opens *source* without an encoding (`efficiency_audit`, `test_rule_pack_reachability`,
+`test_e2e_adversarial`, and the migration-chain tests). The recurring lesson: a
+green suite on one platform is not a green suite, and a handler that catches the
+exception it anticipated but not its siblings hides the difference.
+
+#### Governance
+
+`r6` (leaf-level additions only, maintenance rule 6) with an r6 seventh addendum;
+`scripts/build_code_map.py --check` and `scripts/sync_code_map_md.py --check`
+both report in sync. `/meta/ecosystem`, `/meta/features` and the scoring catalog
+carry the new surface. `tests/test_ai_providers.py` drives a scripted transport —
+no network and no sleeps — with the pool reset between tests.
+
 ### Stage F: why it changed, and whether it still holds (2026-10-01)
 
 Three items. All three exist because of something Stages C and D introduced, and

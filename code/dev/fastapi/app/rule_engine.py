@@ -1507,7 +1507,7 @@ def pack_reachability_report(app_root: Optional[Any] = None) -> dict[str, Any]:
         if path.name == this_file:
             continue
         try:
-            tree = _ast.parse(path.read_text())
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):  # pragma: no cover - unreadable file
             continue
         for node in _ast.walk(tree):

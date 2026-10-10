@@ -267,6 +267,14 @@ TREE = _node(
               # maintenance rule 3 forbids enumerating endpoints as leaves.
               "customer_360", "self_service", "customer_explanations",
               "preference_consent"),
+        # The external-brain provider list, admin-only. Its own node rather than
+        # leaves under `chat` because these acts are on the *answerer* -- which
+        # service holds a credential, which has cooled down -- not on customer
+        # chat; folding them into `chat` would hide that the credential is the
+        # thing being rotated. Business surfaces, not one leaf per route:
+        # `credential` is rotate and clear together (one decision, two verbs).
+        _node("ai_providers",
+              "snapshot", "catalog", "credential", "reset", "failover"),
         _node("topics",
               "catalog", "themes", "intelligence", "coverage", "portfolio", "workspace",
               "overview", "search", "suggestions", "recommendations",
@@ -530,6 +538,17 @@ TREE = _node(
               "signal_scoring", "policy_bands", "credential_vocabulary",
               "demand_resolution", "enforcement_modes", "operator_handoff",
               "data_egress", "validation", "catalog"),
+        # The provider list behind the external brain: choosing *which* service
+        # still can answer, once the router has decided one should. Its own node
+        # beside `brain_router` for that reason, and grouped into surfaces rather
+        # than one leaf per helper -- `credential_resolution` (the environment
+        # versus a runtime rotation), `failure_classification` (a spent quota is
+        # not a rate limit), `cooldown_planning` (what may be tried next), the
+        # pool, and the persistence that outlives a restart.
+        _node("ai_providers",
+              "credential_resolution", "failure_classification",
+              "cooldown_planning", "failover_pool", "persistence",
+              "validation", "catalog"),
         # Customer-to-customer value. The asymmetry is the design: a credit
         # moving between holders cannot create value, so points move freely; a
         # debt moving can, so it does not move at all. `refused_operations` is a

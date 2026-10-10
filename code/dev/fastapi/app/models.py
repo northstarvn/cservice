@@ -1278,6 +1278,97 @@ class StorageConnection(Base, TimestampMixin):
     last_error = Column(String(255), nullable=False, default="")
 
 
+class AiProviderCredential(Base, TimestampMixin):
+    """A credential an *operator* supplied for an AI provider, at rest encrypted.
+
+    The environment is how a deployment is configured; this table is how a
+    credential is rotated without a redeploy. It exists because the second kind
+    of credential this service accepts -- a browser session -- is short-lived by
+    nature, and asking a human to restart the process every time a web session
+    refreshes is not a rotation story.
+
+    ``secret_encrypted`` holds ciphertext with an ``enc:<scheme>:`` prefix, so a
+    change in which crypto library is installed cannot make a stored row
+    undecryptable. It is classified as a credential even though it is ciphertext:
+    the ciphertext is what an attacker replays, so it is auth material by any
+    reasonable reading.
+
+    ``auth_mode`` and ``status`` are constrained to their vocabularies in the
+    database rather than trusted from the application, because a typo in either
+    is a provider that silently never answers.
+    """
+
+    __tablename__ = "ai_provider_credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String(40), nullable=False, index=True)
+    label = Column(String(80), nullable=False, default="")
+    auth_mode = Column(String(20), nullable=False, default="api_key")
+    secret_encrypted = Column(Text, nullable=False, default="")
+    status = Column(String(20), nullable=False, default="active", index=True)
+    # Where the credential came from, so an operator can tell a value they set
+    # from one the environment injected under the same provider name.
+    credential_source = Column(String(20), nullable=False, default="database")
+    last_error = Column(String(255), nullable=False, default="")
+    # When it was last replaced (a rotation) and last used (an attempt charged
+    # against it). Two different questions: "is this fresh" and "is it live".
+    rotated_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "auth_mode IN ('api_key', 'browser_session')",
+            name="ck_ai_provider_credentials_auth_mode",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'disabled')",
+            name="ck_ai_provider_credentials_status",
+        ),
+        UniqueConstraint(
+            "provider", name="uq_ai_provider_credentials_provider"
+        ),
+    )
+
+
+class AiModelHealth(Base, TimestampMixin):
+    """The failover state: which provider/model is cooled down, and until when.
+
+    This is the table that makes a quota ending survive a restart. Without it,
+    every deploy would re-probe the provider that said "insufficient_quota" an
+    hour ago, discover it again, and burn a request doing so -- and a rolling
+    deploy would do it on every pod.
+
+    One row per ``(provider, model)``, because a quota is not always
+    provider-wide: an OpenAI deployment can exhaust ``gpt-4o`` and still answer
+    from ``gpt-4o-mini``, and the cooldown has to be narrow enough to allow that.
+    A rejected *credential* is the exception, and the pool cools every model of
+    that provider rather than walking the ones that will also be rejected.
+
+    ``failure_count`` is cumulative until the next success, so a flapping
+    provider can be told apart from one that failed once.
+    """
+
+    __tablename__ = "ai_model_health"
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String(40), nullable=False, index=True)
+    model = Column(String(120), nullable=False, index=True)
+    failure_kind = Column(String(30), nullable=False, default="")
+    failure_count = Column(Integer, nullable=False, default=0)
+    cooldown_until = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_error = Column(String(255), nullable=False, default="")
+    last_checked_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "failure_count >= 0", name="ck_ai_model_health_failure_count_non_negative"
+        ),
+        UniqueConstraint(
+            "provider", "model", name="uq_ai_model_health_provider_model"
+        ),
+    )
+
+
 # =============================================================================
 # Metadata layer: what the schema above means, and what it does not protect
 # =============================================================================
@@ -1469,6 +1560,12 @@ FIELD_SENSITIVITY: dict[str, str] = {
 #: Per-table overrides, keyed ``"table.column"``. Used where a shared column
 #: name means different things in different tables.
 TABLE_FIELD_SENSITIVITY: dict[str, str] = {
+    # A provider credential is a credential in any table. `secret_encrypted` is
+    # ciphertext, but ciphertext is what an attacker replays, exactly as with the
+    # storage tokens -- so it is classified by hand rather than left to the
+    # column-name default, which would only know the name `secret_encrypted`
+    # because this table introduced it.
+    "ai_provider_credentials.secret_encrypted": "credential",
     # an operator-written reason, not user content -- but it still names people
     "recovery_actions.failure_reason": "content",
     # a policy score summary is machine-generated narrative about one person
@@ -2257,6 +2354,32 @@ TABLE_LIFECYCLE: dict[str, dict[str, Any]] = {
             "record is what an operator needs when a leak is investigated. The "
             "ciphertext columns are overwritten with '' on revocation so the row is "
             "kept and the credential is not"
+        ),
+    },
+    "ai_provider_credentials": {
+        "write_mode": MUTABLE,
+        "retention_days": None,
+        "owner": "services/ai_providers.py",
+        "note": (
+            "one row per provider, replaced on rotation rather than versioned: the "
+            "ciphertext is a live credential, not a record of authorisation, so there "
+            "is nothing an old row could prove. no retention, because the row IS the "
+            "credential -- an operator who wants it gone clears the secret, which is "
+            "the revocation. The unique constraint on provider is the guarantee that "
+            "two rotations cannot leave two live secrets for one service"
+        ),
+    },
+    "ai_model_health": {
+        "write_mode": MUTABLE,
+        "retention_days": 30,
+        "owner": "services/ai_providers.py",
+        "note": (
+            "the failover state, persisted so a quota that ended does not have to be "
+            "discovered again on every restart or every pod of a rolling deploy. "
+            "mutable because a cooldown is overwritten on the next failure and cleared "
+            "on the next success. 30 days is longer than any cooldown the module "
+            "assigns, so a row that survives to the sweep is a provider nobody has "
+            "tried since -- which is itself worth keeping long enough to notice"
         ),
     },
 }

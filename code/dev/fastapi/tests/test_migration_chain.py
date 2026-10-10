@@ -45,6 +45,7 @@ CHAIN = (
     "20261002_01_add_transfers.py",
     "20261002_02_chat_history_timestamp_default.py",
     "20261002_03_score_scale_checks.py",
+    "20261003_01_add_ai_providers.py",
 )
 
 #: The tables the *first* migration creates, before any delta runs. Used to
@@ -229,7 +230,7 @@ def test_no_migration_drops_anything_on_the_way_up(chain_db):
     """
     conn, chain = chain_db
     for module in chain:
-        source = (VERSIONS / Path(module.__file__).name).read_text()
+        source = (VERSIONS / Path(module.__file__).name).read_text(encoding="utf-8")
         upgrade_body = source.split("def upgrade", 1)[1].split("def downgrade", 1)[0]
         for destructive in ("op.drop_table", "op.drop_column", "batch_op.drop_column"):
             assert destructive not in upgrade_body, (
@@ -246,7 +247,7 @@ def test_no_migration_converts_a_column_type_on_the_way_up(chain_db):
     """
     conn, chain = chain_db
     for module in chain:
-        source = (VERSIONS / Path(module.__file__).name).read_text()
+        source = (VERSIONS / Path(module.__file__).name).read_text(encoding="utf-8")
         upgrade_body = source.split("def upgrade", 1)[1].split("def downgrade", 1)[0]
         for alter in ("alter_column", "batch_op.alter_column"):
             if alter not in upgrade_body:
@@ -429,7 +430,7 @@ def test_alembic_env_resolves_the_database_url():
     `NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:driver`
     before reaching a single migration.
     """
-    source = pathlib.Path("alembic/env.py").read_text()
+    source = pathlib.Path("alembic/env.py").read_text(encoding="utf-8")
     assert "DATABASE_URL" in source, "env.py must use the application's own URL"
     # And the models must be imported, or `Base.metadata` is empty and
     # `--autogenerate` decides every table is surplus.

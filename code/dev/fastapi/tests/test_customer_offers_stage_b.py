@@ -1350,7 +1350,7 @@ def _load_reverted(tmp_path, replacements, *, only_in=None, hide_source_of=None)
 
     from app.services import customer_offers as live
 
-    source = Path(live.__file__).read_text()
+    source = Path(live.__file__).read_text(encoding="utf-8")
     if only_in is not None:
         head, sep, body = source.partition(f"async def {only_in}(")
         assert sep, f"{only_in} is gone; this control needs updating"

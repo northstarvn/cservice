@@ -525,6 +525,12 @@ found it silently out by seven leaves.
       customer_explanations,
       preference_consent)
     chat,
+      (snapshot,
+      catalog,
+      credential,
+      reset,
+      failover)
+    ai_providers,
       (catalog,
       themes,
       intelligence,
@@ -988,6 +994,14 @@ found it silently out by seven leaves.
       validation,
       catalog)
     brain_router,
+      (credential_resolution,
+      failure_classification,
+      cooldown_planning,
+      failover_pool,
+      persistence,
+      validation,
+      catalog)
+    ai_providers,
       (credit_transfer,
       transfer_idempotency,
       transfer_limits,
@@ -1478,6 +1492,33 @@ what a relaxed authority means.
 
 Every dimension is floored in the direction that means worse: effort cannot fall
 below 1.0, and the check-back floor equals the `critical` band's 4h SLA.
+
+### r6 seventh addendum — the external brain's provider list (2026-10-03)
+
+Leaf-level again, so per maintenance rule 6 the revision stays **`r6`**; the tree
+grew **1004 → 1016 leaves** (93 → 95 internal nodes).
+
+The sixth addendum's `brain_router` decided *that* a general-purpose model should
+answer; this is the layer that decides *which* one still can. Two nodes, one
+under `routers` and one under `services`, placed beside `brain_router` because
+the concern is neither routing (deciding to answer) nor customer chat — it is the
+list of answerers and which of them has run out of quota.
+
+**`services/ai_providers`** (7 leaves, one node). **`credential_resolution`** is
+the leaf that matters: an API key and a browser session are both first-class, and
+their precedence is stated rather than inferred — a runtime rotation wins over
+the environment, and clearing it lets the environment back in. **`failure_classification`**
+and **`cooldown_planning`** are separate leaves because the same status code can
+mean either a spent quota or a rate limit, and only one of them outlasts a
+cooldown. **`failover_pool`** holds the deadline-bounded loop, and **`persistence`**
+is a leaf rather than an implementation detail because a credential or a cooldown
+that does not survive a restart cannot be trusted across one.
+
+**`routers/ai_providers`** (5 leaves, one node). Mounted under
+`/chat/admin/ai-providers` so it inherits the existing `chat_admin` authz rule by
+prefix rather than adding a rule — rotating a credential and clearing a cooldown
+is exactly what that rule already governs. `credential` is rotate and clear as
+one surface, per rule 3.
 
 ### r6 sixth addendum — brain routing and customer transfers (2026-10-02)
 

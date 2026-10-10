@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func, desc, case
 from app import deps, models
-from app.services import brain_router
+from app.services import ai_providers, brain_router
 import os
 from app.schemas.chat import (
     ChatMessageIn,
@@ -1540,6 +1540,17 @@ async def chat_message(
         )
         ai_response = routed.text
         routing = {"enabled": True, **routed.to_dict()}
+        # The provider pool only learns a cooldown when it is actually consulted,
+        # so this is the moment to make that learning durable. Written here, on
+        # the way out, rather than by a periodic worker: the state changes when
+        # traffic happens, and traffic is exactly when a session is open.
+        if routed.external_attempted:
+            try:
+                await ai_providers.persist_health(db)
+            except Exception:
+                # Durability is an improvement, never a reason to fail a reply
+                # the customer has already earned.
+                pass
     chat_rows, bookings = await _load_user_interaction_window(db, current_user.id)
     insights = _build_interaction_insights([row.message for row in chat_rows] + [user_message], bookings, sentiment)
     summary = _build_summary(current_user.id, chat_rows, bookings, sentiment)
@@ -1651,8 +1662,17 @@ def _external_brain_for():
     The budget is passed *in*, not just documented: a caller that ignores it can
     overrun the request, and the only way to make that hard to do by accident is
     to hand over the remaining time rather than expect the callee to know it.
+
+    An explicit installation wins. Failing that, the provider pool answers *if
+    it has a credential* -- ``ai_providers.default_external_brain`` returns
+    ``None`` with none configured, so a deployment that never sets an ``AI_*``
+    variable keeps the exact pre-failover behaviour: the system composer answers
+    and the reason says so.
     """
-    return _EXTERNAL_BRAIN[0]
+    installed = _EXTERNAL_BRAIN[0]
+    if installed is not None:
+        return installed
+    return ai_providers.default_external_brain()
 
 
 #: Single-slot registry rather than a FastAPI dependency, for the same reason as

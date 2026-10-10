@@ -43,6 +43,7 @@ def _reset_external_provider_state():
     for module_path, reset_name in (
         ("app.services.chat_analytics", "reset_sentiment_provider"),
         ("app.services.brain_router", "reset_external_circuit"),
+        ("app.services.ai_providers", "reset_ai_providers"),
     ):
         try:
             module = pytest.importorskip(module_path)

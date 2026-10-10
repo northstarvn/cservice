@@ -319,7 +319,7 @@ def _analyze_files(files: list[Path], markers: bool = True) -> dict[str, Any]:
         else:
             # Cheap line estimate from size when we do not need content.
             try:
-                line_count_fallback = sum(1 for _ in path.open("r", errors="ignore"))
+                line_count_fallback = sum(1 for _ in path.open("r", encoding="utf-8", errors="ignore"))
             except OSError:
                 line_count_fallback = 0
             lines = line_count_fallback

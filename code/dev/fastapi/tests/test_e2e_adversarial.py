@@ -924,7 +924,7 @@ class TestTheLockIsMissingExactlyWhereItMatters:
         found: list[str] = []
         for path in sorted(root.rglob("*.py")):
             try:
-                tree = ast.parse(path.read_text())
+                tree = ast.parse(path.read_text(encoding="utf-8"))
             except SyntaxError:  # pragma: no cover - would be a real problem
                 raise AssertionError(f"{path} does not parse")
             for node in ast.walk(tree):

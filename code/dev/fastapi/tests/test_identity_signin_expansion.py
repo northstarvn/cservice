@@ -1927,7 +1927,7 @@ class TestMailTransportIsHonestAboutDelivering:
             assert result.delivered is True, result.detail
             written = list((tmp_path / "outbox").glob("*.json"))
             assert len(written) == 1
-            assert "555111" in written[0].read_text()
+            assert "555111" in written[0].read_text(encoding="utf-8")
         finally:
             os.environ.pop("CSERVICE_MAIL_TRANSPORT", None)
             os.environ.pop("CSERVICE_MAIL_DIR", None)
